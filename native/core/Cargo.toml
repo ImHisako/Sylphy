@@ -1,0 +1,31 @@
+[package]
+name = "sylphy_core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Native security and Veilid integration boundary for Sylphy"
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+default = []
+veilid = ["dep:tokio", "dep:veilid-core"]
+
+[dependencies]
+argon2 = "0.5.3"
+base64 = "0.22.1"
+chacha20poly1305 = { version = "0.10.1", features = ["std"] }
+ed25519-dalek = { version = "2.1.1", features = ["rand_core", "zeroize"] }
+hkdf = "0.12.4"
+ml-kem = { version = "0.3.2", features = ["getrandom", "zeroize"] }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.134"
+sha2 = "0.10.8"
+subtle = "2.6.1"
+thiserror = "2.0.11"
+tokio = { version = "1.43.0", features = ["rt-multi-thread"], optional = true }
+veilid-core = { version = "0.5.7", optional = true }
+x25519-dalek = { version = "2.0.1", features = ["getrandom", "static_secrets"] }
+zeroize = "1.8.1"
