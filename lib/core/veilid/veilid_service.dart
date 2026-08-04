@@ -56,7 +56,7 @@ class VeilidSnapshot {
       'platform_not_initialized' =>
         'Bootstrap Android non completato · nuovo tentativo automatico',
       'veilid_protected_store_failed' =>
-        'Archivio sicuro Android non inizializzato. Chiudi e riapri l’app.',
+        'Archivio sicuro Android non accessibile · nuovo tentativo automatico',
       'veilid_local_store_failed' =>
         'Archivio locale Veilid non accessibile · nuovo tentativo automatico',
       'veilid_configuration_failed' =>

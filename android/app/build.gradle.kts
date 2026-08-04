@@ -47,4 +47,5 @@ flutter {
 dependencies {
     // Veilid's protected store loads these classes through JNI at runtime.
     implementation("androidx.security:security-crypto:1.1.0")
+    testImplementation("junit:junit:4.13.2")
 }

@@ -23,7 +23,7 @@ cargo build --release --features veilid,signal-ratchet
 
 La feature Signal richiede `protoc` nel `PATH` (pacchetto `protobuf-compiler` su Ubuntu o `protoc` tramite Chocolatey su Windows).
 
-Per Android installare NDK `28.2.13676358`, Java 17, il target Rust e `cargo-ndk`, quindi eseguire `./native/build-android.ps1`. Le librerie vengono generate in `android/app/src/main/jniLibs/<abi>/`. `MainActivity` carica la libreria e registra il `Context` Android richiesto da Veilid prima di `super.onCreate`, impedendo che il primo frame Dart anticipi il setup JNI; il manifest release include `INTERNET`, `ACCESS_NETWORK_STATE` e `ACCESS_WIFI_STATE`. Il protected store nativo richiede inoltre `androidx.security:security-crypto 1.1.0` nel bundle Android.
+Per Android installare NDK `28.2.13676358`, Java 17, il target Rust e `cargo-ndk`, quindi eseguire `./native/build-android.ps1`. Le librerie vengono generate in `android/app/src/main/jniLibs/<abi>/`. `MainActivity` carica la libreria e registra il `Context` Android richiesto da Veilid prima di `super.onCreate`, impedendo che il primo frame Dart anticipi il setup JNI; il context adatta inoltre i nomi JNI con `/` ai nomi binari con `.` richiesti da Android `ClassLoader`. Il manifest release include `INTERNET`, `ACCESS_NETWORK_STATE` e `ACCESS_WIFI_STATE`. Il protected store nativo richiede inoltre `androidx.security:security-crypto 1.1.0` nel bundle Android.
 
 Per Windows eseguire `./native/build-windows.ps1`. Il file `sylphy_core.dll` viene prodotto in `native/core/target/release` e CMake lo include automaticamente nel bundle Flutter se presente.
 
