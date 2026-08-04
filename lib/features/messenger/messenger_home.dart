@@ -1246,8 +1246,8 @@ class _PrivacyOverviewSheetState extends State<_PrivacyOverviewSheet> {
     final resultText = _response == null
         ? null
         : _response!.ok
-            ? 'Verifica delle primitive superata'
-            : 'Verifica non riuscita: ${_response!.code}';
+        ? 'Verifica delle primitive superata'
+        : 'Verifica non riuscita: ${_response!.code}';
     return SafeArea(
       top: false,
       child: Padding(

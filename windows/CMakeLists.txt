@@ -87,6 +87,12 @@ if(PLUGIN_BUNDLED_LIBRARIES)
     COMPONENT Runtime)
 endif()
 
+set(SYLPHY_CORE_DLL "${CMAKE_CURRENT_SOURCE_DIR}/../native/core/target/release/sylphy_core.dll")
+install(FILES "${SYLPHY_CORE_DLL}"
+  DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+  OPTIONAL
+  COMPONENT Runtime)
+
 # Copy the native assets provided by the build.dart from all packages.
 set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/windows/")
 install(DIRECTORY "${NATIVE_ASSETS_DIR}"

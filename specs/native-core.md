@@ -6,7 +6,7 @@ Il confine Flutter/Rust è una singola ABI C JSON. Le richieste sono UTF-8 e le 
 
 ## Veilid
 
-`veilid-core` è una dipendenza opzionale del core. Con la feature `veilid`, `VeilidNode` riceve una `VeilidAPI` già avviata, gestisce attach, routing context e shutdown. Il lifecycle dell'app deve avviare il nodo usando un `program_name` stabile e uno storage directory specifico dell'app; non devono essere serializzati o scritti nei log i segreti di configurazione.
+`veilid-core` è una dipendenza opzionale del core. Con la feature `veilid`, `VeilidNode` avvia `VeilidAPI` con un callback senza contenuto, gestisce attach, routing context, private route, import del route blob e shutdown. Il lifecycle dell'app usa il `program_name` stabile `sylphy` e uno storage directory specifico dell'app; non devono essere serializzati o scritti nei log i segreti di configurazione. Su Android `MainActivity` registra prima `Context` e JVM nel core Veilid tramite JNI.
 
 Il layer di trasporto riceve esclusivamente `MessageEnvelope` già autenticati e cifrati. Bundle pubblici firmati, mailbox cifrate e riferimenti ad allegati cifrati sono gli unici record pubblicabili.
 

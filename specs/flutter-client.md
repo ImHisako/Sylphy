@@ -25,4 +25,6 @@ L'implementazione di produzione di `SecureMessagingBridge` deve essere un adapte
 
 ## Stato attuale
 
-`LocalDemoMessagingBridge` è intenzionalmente un'implementazione in memoria per preview e test widget. Non è un vault e non deve essere usato oltre la fase di interfaccia.
+`NativeCoreClient` carica opzionalmente l'ABI C del core Rust su Windows e Android ed espone soltanto stato del core e self-test del profilo ibrido. L'assenza della libreria non viene mai trasformata in un invio meno sicuro: la UI resta nella modalità demo.
+
+`LocalDemoMessagingBridge` è intenzionalmente un'implementazione in memoria per preview e test widget. Non è un vault e non deve essere usato oltre la fase di interfaccia. Fino all'integrazione di un provider Double Ratchet Signal revisionato, il core non espone startup Veilid, apertura sessione o invio di messaggi.

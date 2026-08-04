@@ -8,7 +8,7 @@ Client Flutter responsive per una messenger privata, pensato per **Windows** e *
 - chat con composer, invio locale dimostrativo e conferme di consegna;
 - schermate per fingerprint e stato di verifica del contatto;
 - layout a tre colonne su Windows e lista/chat ottimizzate per Android;
-- componenti per vault, trasporto privato e sessioni verificate, senza esporre segreti nella UI.
+- core Rust opzionale con vault Argon2id/XChaCha20-Poly1305, bundle Ed25519, profilo X25519 + ML-KEM-768 e adapter [Veilid](https://veilid.com/).
 
 ## Avvio
 
@@ -25,10 +25,21 @@ flutter build windows
 flutter build apk --debug
 ```
 
+## Core nativo e Veilid
+
+Il core è in `native/core` e viene caricato dal client solo se la libreria nativa è inclusa nel bundle. Per generarla:
+
+```powershell
+./native/build-windows.ps1
+./native/build-android.ps1
+```
+
+Entrambi gli script compilano il core con la feature `veilid`. Il secondo richiede anche i target Rust Android e `cargo-ndk`; per Windows è richiesto un linker C++ compatibile. I dettagli dell'ABI, delle route private e del bootstrap Android sono in `native/README.md` e `specs/native-core.md`.
+
 ## Nota di sicurezza
 
-L'app avvia `LocalDemoMessagingBridge`, un repository in memoria necessario per rendere la UI esplorabile. Non esegue cifratura, non crea chiavi e non trasmette dati.
+L'app avvia ancora `LocalDemoMessagingBridge` per rendere la UI esplorabile. Non esegue cifratura, non crea chiavi e non trasmette dati. Quando il core è incluso, l'interfaccia può verificarne il profilo crittografico dalla schermata privacy, ma non avvia un nodo Veilid né invia messaggi reali.
 
-Prima di qualsiasi uso reale, sostituirlo con un bridge Rust/FFI che implementi il contratto in `lib/core/messaging/secure_messaging_bridge.dart` e il profilo definito in `agents.md`: vault Argon2id + XChaCha20-Poly1305, handshake X25519 + ML-KEM-768, Double Ratchet e invio esclusivo di envelope già cifrati tramite Veilid.
+Prima di qualsiasi uso reale, integrare nel bridge Rust/FFI un provider Double Ratchet Signal revisionato. Il core rifiuta intenzionalmente di esporre comandi di invio fino a quell'integrazione: non esiste quindi alcun fallback silenzioso a sessioni non ratchettate.
 
 Il contratto di integrazione del client è documentato in `specs/flutter-client.md`.

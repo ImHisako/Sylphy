@@ -59,7 +59,9 @@ class NativeCoreClient {
     try {
       responsePointer = _call(requestPointer);
       if (responsePointer == nullptr) {
-        throw const NativeCoreException('Il core nativo non ha restituito risposta.');
+        throw const NativeCoreException(
+          'Il core nativo non ha restituito risposta.',
+        );
       }
       final decoded = jsonDecode(responsePointer.toDartString());
       if (decoded is! Map<String, dynamic>) {
@@ -67,7 +69,9 @@ class NativeCoreClient {
       }
       return NativeCoreResponse.fromJson(decoded);
     } on FormatException {
-      throw const NativeCoreException('Risposta JSON non valida dal core nativo.');
+      throw const NativeCoreException(
+        'Risposta JSON non valida dal core nativo.',
+      );
     } finally {
       calloc.free(requestPointer);
       if (responsePointer != null && responsePointer != nullptr) {
@@ -89,7 +93,9 @@ class NativeCoreResponse {
     final code = json['code'];
     final data = json['data'];
     if (ok is! bool || code is! String) {
-      throw const NativeCoreException('Schema della risposta nativa non valido.');
+      throw const NativeCoreException(
+        'Schema della risposta nativa non valido.',
+      );
     }
     return NativeCoreResponse(
       ok: ok,

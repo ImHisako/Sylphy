@@ -20,4 +20,6 @@ cargo test
 cargo build --release --features veilid
 ```
 
-Per Android installare il target Rust e `cargo-ndk`, quindi copiare le librerie generate in `android/app/src/main/jniLibs/<abi>/`. Per Windows la DLL deve essere distribuita accanto all'eseguibile Flutter con il nome `sylphy_core.dll`.
+Per Android installare il target Rust e `cargo-ndk`, quindi eseguire `./native/build-android.ps1`. Le librerie vengono generate in `android/app/src/main/jniLibs/<abi>/`. `MainActivity` carica la libreria e registra il `Context` Android richiesto da Veilid prima dell'avvio del nodo.
+
+Per Windows eseguire `./native/build-windows.ps1`. Il file `sylphy_core.dll` viene prodotto in `native/core/target/release` e CMake lo include automaticamente nel bundle Flutter se presente.

@@ -4,7 +4,7 @@ use ml_kem::{
     kem::{Decapsulate, Encapsulate, Kem},
 };
 use rand_core::OsRng;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 

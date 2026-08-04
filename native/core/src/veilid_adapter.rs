@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::sync::Arc;
 
 #[cfg(feature = "veilid")]
-use crate::{envelope::MessageEnvelope, error::CoreError};
+use crate::envelope::MessageEnvelope;
 
 #[derive(Debug, Serialize)]
 pub struct VeilidCapabilityStatus {
@@ -26,9 +26,7 @@ pub struct VeilidNode {
 
 #[cfg(feature = "veilid")]
 impl VeilidNode {
-    pub async fn start(
-        storage_directory: &str,
-    ) -> Result<Self, veilid_core::VeilidAPIError> {
+    pub async fn start(storage_directory: &str) -> Result<Self, veilid_core::VeilidAPIError> {
         let config = veilid_core::VeilidConfig::new(
             "sylphy",
             "kerberus",
@@ -65,7 +63,7 @@ impl VeilidNode {
         &self,
         route_blob: veilid_core::RouteBlob,
     ) -> Result<veilid_core::RouteId, veilid_core::VeilidAPIError> {
-        self.api.import_remote_private_route(route_blob).await
+        self.api.import_remote_private_route(route_blob.blob)
     }
 
     pub async fn send_envelope(
@@ -74,9 +72,11 @@ impl VeilidNode {
         envelope: &MessageEnvelope,
     ) -> Result<(), veilid_core::VeilidAPIError> {
         let payload = serde_json::to_vec(envelope)
-            .map_err(|_| veilid_core::VeilidAPIError::generic(CoreError::Internal))?;
+            .map_err(|_| veilid_core::VeilidAPIError::generic("envelope serialization failed"))?;
         if payload.len() > 32_768 {
-            return Err(veilid_core::VeilidAPIError::generic(CoreError::LimitExceeded));
+            return Err(veilid_core::VeilidAPIError::generic(
+                "envelope exceeds Veilid application-message limit",
+            ));
         }
         self.api
             .routing_context()?
