@@ -100,7 +100,9 @@ jobs:
   windows:
     name: Build Windows native bundle
     needs: quality
-    runs-on: windows-latest
+    # Flutter 3.35.x supports the Visual Studio 2022 CMake generator. Pin the
+    # image because windows-latest now uses Visual Studio 2026.
+    runs-on: windows-2022
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -111,6 +113,19 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
+
+      - name: Verify Windows build toolchain
+        shell: pwsh
+        run: |
+          flutter config --enable-windows-desktop
+          flutter doctor -v
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $visualStudio = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $visualStudioVersion = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationVersion
+          if (-not $visualStudio -or $visualStudioVersion -notlike '17.*') {
+            throw "Flutter $env:FLUTTER_VERSION richiede Visual Studio 2022 (17.x); rilevato: $visualStudioVersion"
+          }
+          Write-Host "Toolchain Visual Studio $visualStudioVersion: $visualStudio"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -136,4 +151,51 @@ jobs:
         with:
           name: sylphy-windows
           path: build/windows/x64/runner/Release
+          if-no-files-found: error
+
+  android:
+    name: Build Android APK
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: armv7-linux-androideabi,aarch64-linux-android,x86_64-linux-android
+
+      - name: Install cargo-ndk and Protobuf compiler
+        run: |
+          cargo install cargo-ndk --locked
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Build native core
+        shell: pwsh
+        run: ./native/build-android.ps1 -Profile release
+
+      - name: Verify native libraries are bundled
+        run: |
+          test -f android/app/src/main/jniLibs/armeabi-v7a/libsylphy_core.so
+          test -f android/app/src/main/jniLibs/arm64-v8a/libsylphy_core.so
+          test -f android/app/src/main/jniLibs/x86_64/libsylphy_core.so
+
+      - name: Build Android application
+        run: flutter build apk --release
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: sylphy-android
+          path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
