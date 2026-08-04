@@ -26,6 +26,46 @@ pub struct PublicBundle {
 }
 
 impl PublicBundle {
+    pub fn new_signed(
+        signing_key: &SigningKey,
+        x25519_prekey: &[u8],
+        mlkem_prekey: &[u8],
+        expires_at_ms: u64,
+    ) -> CoreResult<Self> {
+        if x25519_prekey.len() != X25519_PUBLIC_KEY_LENGTH
+            || mlkem_prekey.len() != ML_KEM_768_PUBLIC_KEY_LENGTH
+        {
+            return Err(CoreError::InvalidInput);
+        }
+        let version = PROTOCOL_VERSION;
+        let sign_payload = |label: &[u8], key: &[u8]| {
+            let mut payload = Vec::with_capacity(label.len() + 2 + 8 + key.len());
+            payload.extend_from_slice(label);
+            payload.extend_from_slice(&version.to_be_bytes());
+            payload.extend_from_slice(&expires_at_ms.to_be_bytes());
+            payload.extend_from_slice(key);
+            payload
+        };
+        let bundle = Self {
+            version,
+            identity_ed25519: signing_key.verifying_key().to_bytes().to_vec(),
+            signed_prekey_x25519_signature: signing_key
+                .sign(&sign_payload(b"sylphy/prekey/x25519/v1", x25519_prekey))
+                .to_bytes()
+                .to_vec(),
+            signed_prekey_x25519: x25519_prekey.to_vec(),
+            signed_prekey_mlkem768_signature: signing_key
+                .sign(&sign_payload(b"sylphy/prekey/mlkem768/v1", mlkem_prekey))
+                .to_bytes()
+                .to_vec(),
+            signed_prekey_mlkem768: mlkem_prekey.to_vec(),
+            expires_at_ms,
+            capabilities: vec!["hybrid-x25519-mlkem768".to_owned()],
+        };
+        bundle.validate()?;
+        Ok(bundle)
+    }
+
     pub fn validate(&self) -> CoreResult<()> {
         if self.version != PROTOCOL_VERSION
             || self.identity_ed25519.len() != ED25519_LENGTH
@@ -89,29 +129,6 @@ pub fn generate_bundle_for_test(expires_at_ms: u64) -> PublicBundle {
     let mut mlkem_prekey = vec![0_u8; ML_KEM_768_PUBLIC_KEY_LENGTH];
     OsRng.fill_bytes(&mut x25519_prekey);
     OsRng.fill_bytes(&mut mlkem_prekey);
-    let version = PROTOCOL_VERSION;
-    let sign_payload = |label: &[u8], key: &[u8]| {
-        let mut payload = Vec::with_capacity(label.len() + 2 + 8 + key.len());
-        payload.extend_from_slice(label);
-        payload.extend_from_slice(&version.to_be_bytes());
-        payload.extend_from_slice(&expires_at_ms.to_be_bytes());
-        payload.extend_from_slice(key);
-        payload
-    };
-    PublicBundle {
-        version,
-        identity_ed25519: signing_key.verifying_key().to_bytes().to_vec(),
-        signed_prekey_x25519_signature: signing_key
-            .sign(&sign_payload(b"sylphy/prekey/x25519/v1", &x25519_prekey))
-            .to_bytes()
-            .to_vec(),
-        signed_prekey_x25519: x25519_prekey,
-        signed_prekey_mlkem768_signature: signing_key
-            .sign(&sign_payload(b"sylphy/prekey/mlkem768/v1", &mlkem_prekey))
-            .to_bytes()
-            .to_vec(),
-        signed_prekey_mlkem768: mlkem_prekey,
-        expires_at_ms,
-        capabilities: vec!["hybrid-x25519-mlkem768".to_owned()],
-    }
+    PublicBundle::new_signed(&signing_key, &x25519_prekey, &mlkem_prekey, expires_at_ms)
+        .expect("valid generated test bundle")
 }

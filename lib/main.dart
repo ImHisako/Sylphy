@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import 'core/messaging/secure_messaging_bridge.dart';
 import 'core/messaging/sylphy_messaging_bridge.dart';
+import 'core/identity/identity_service.dart';
 import 'core/native/native_core.dart';
 import 'core/profile/user_profile.dart';
 import 'core/veilid/veilid_service.dart';
@@ -23,6 +24,7 @@ class SylphyApp extends StatefulWidget {
     this.veilidService,
     this.profileStore,
     this.photoPicker,
+    this.identityService,
   });
 
   final SecureMessagingBridge? bridge;
@@ -30,6 +32,7 @@ class SylphyApp extends StatefulWidget {
   final VeilidService? veilidService;
   final UserProfileStore? profileStore;
   final ProfilePhotoPicker? photoPicker;
+  final IdentityService? identityService;
 
   @override
   State<SylphyApp> createState() => _SylphyAppState();
@@ -40,8 +43,11 @@ class _SylphyAppState extends State<SylphyApp> {
   late final VeilidService _veilidService;
   late final bool _ownsVeilidService;
   late final UserProfileStore _profileStore;
+  late final IdentityService _identityService;
+  late final bool _ownsIdentityService;
   UserProfile? _profile;
   bool _profileLoaded = false;
+  bool _isEditingProfile = false;
 
   @override
   void initState() {
@@ -55,10 +61,15 @@ class _SylphyAppState extends State<SylphyApp> {
     _veilidService =
         widget.veilidService ?? VeilidService(nativeCore: widget.nativeCore);
     _profileStore = widget.profileStore ?? FileUserProfileStore();
+    _ownsIdentityService = widget.identityService == null;
+    _identityService =
+        widget.identityService ??
+        IdentityService(nativeCore: widget.nativeCore);
     unawaited(_loadProfile());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         unawaited(_veilidService.start());
+        unawaited(_identityService.initialize());
       }
     });
   }
@@ -80,14 +91,24 @@ class _SylphyAppState extends State<SylphyApp> {
   }
 
   void _completeOnboarding(UserProfile profile) {
-    setState(() => _profile = profile);
+    setState(() {
+      _profile = profile;
+      _isEditingProfile = false;
+    });
   }
+
+  void _editProfile() => setState(() => _isEditingProfile = true);
+
+  void _cancelProfileEdit() => setState(() => _isEditingProfile = false);
 
   @override
   void dispose() {
     if (_ownsVeilidService) {
       unawaited(_veilidService.stop());
       _veilidService.dispose();
+    }
+    if (_ownsIdentityService) {
+      _identityService.dispose();
     }
     super.dispose();
   }
@@ -159,19 +180,23 @@ class _SylphyAppState extends State<SylphyApp> {
       ),
       home: !_profileLoaded
           ? const Scaffold(body: Center(child: CircularProgressIndicator()))
-          : _profile == null
+          : _profile == null || _isEditingProfile
           ? ProfileOnboarding(
               profileStore: _profileStore,
               photoPicker: widget.photoPicker,
               onCompleted: _completeOnboarding,
+              initialProfile: _isEditingProfile ? _profile : null,
+              onCancelled: _isEditingProfile ? _cancelProfileEdit : null,
             )
           : AnimatedBuilder(
-              animation: _veilidService,
+              animation: Listenable.merge([_veilidService, _identityService]),
               builder: (context, _) => MessengerHome(
                 bridge: _bridge,
                 nativeCore: widget.nativeCore,
                 veilidService: _veilidService,
                 profile: _profile!,
+                identityService: _identityService,
+                onEditProfile: _editProfile,
               ),
             ),
     );

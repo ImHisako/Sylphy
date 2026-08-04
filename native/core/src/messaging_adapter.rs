@@ -139,7 +139,8 @@ pub fn add_contact(display_name: &str, invitation_code: &str) -> CoreResult<Valu
 }
 
 fn decode_invitation(invitation_code: &str) -> CoreResult<PublicBundle> {
-    let normalized = invitation_code.trim();
+    let trimmed = invitation_code.trim();
+    let normalized = trimmed.strip_prefix("sylphy:").unwrap_or(trimmed);
     if normalized.is_empty() || normalized.len() > MAX_INVITATION_TEXT_BYTES {
         return Err(CoreError::InvalidInput);
     }

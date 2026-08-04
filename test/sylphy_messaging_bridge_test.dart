@@ -46,6 +46,12 @@ class _FakeNativeCore implements NativeCoreApi {
   String? importedInvitation;
 
   @override
+  NativeCoreResponse ensureIdentity({
+    required String storageDirectory,
+    required String vaultPassword,
+  }) => throw UnimplementedError();
+
+  @override
   NativeCoreResponse addContact({
     required String displayName,
     required String invitationCode,

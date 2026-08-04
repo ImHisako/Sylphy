@@ -106,6 +106,36 @@ void main() {
       findsOneWidget,
     );
   });
+
+  testWidgets('opens the own profile and changes the display name', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final store = _completedProfileStore();
+    await tester.pumpWidget(SylphyApp(profileStore: store));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('open-profile')));
+    await tester.pumpAndSettle();
+    expect(find.text('Il mio profilo'), findsOneWidget);
+    expect(find.text('Profilo Test'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('edit-profile')));
+    await tester.pumpAndSettle();
+    expect(find.text('Modifica il tuo profilo'), findsOneWidget);
+    await tester.enterText(
+      find.byKey(const ValueKey('profile-name')),
+      'Nuovo Nome',
+    );
+    await tester.tap(find.byKey(const ValueKey('complete-onboarding')));
+    await tester.pumpAndSettle();
+
+    expect(store.profile?.displayName, 'Nuovo Nome');
+    await tester.tap(find.byKey(const ValueKey('open-profile')));
+    await tester.pumpAndSettle();
+    expect(find.text('Nuovo Nome'), findsOneWidget);
+  });
 }
 
 _MemoryProfileStore _completedProfileStore() =>

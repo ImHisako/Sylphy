@@ -39,7 +39,10 @@ class VeilidSnapshot {
   };
 
   String get detail => switch (phase) {
-    VeilidPhase.unavailable => 'Installa la libreria nativa per connetterti.',
+    VeilidPhase.unavailable =>
+      diagnosticCode == 'feature_unavailable'
+          ? 'Questa build non include Veilid. Installa la build Android ABI 4 più recente.'
+          : 'Installa la libreria nativa per connetterti.',
     VeilidPhase.offline => 'Nodo arrestato · nuovo tentativo automatico',
     VeilidPhase.connecting => 'Avvio del nodo privato in corso.',
     VeilidPhase.attached =>
@@ -47,10 +50,17 @@ class VeilidSnapshot {
           ? '$livePeerCount peer attivi · envelope opachi'
           : 'Collegato · envelope opachi',
     VeilidPhase.degraded => 'Collegamento parziale · riprovo automaticamente',
-    VeilidPhase.error =>
-      diagnosticCode == null
-          ? 'Connessione non riuscita · nuovo tentativo automatico'
-          : 'Connessione non riuscita ($diagnosticCode) · nuovo tentativo automatico',
+    VeilidPhase.error => switch (diagnosticCode) {
+      'feature_unavailable' =>
+        'Core compilato senza Veilid: il retry non può risolvere questa build.',
+      'platform_not_initialized' =>
+        'Bootstrap Android non completato · nuovo tentativo automatico',
+      'network_startup_failed' =>
+        'Avvio rete non riuscito · nuovo tentativo automatico',
+      null => 'Connessione non riuscita · nuovo tentativo automatico',
+      _ =>
+        'Connessione non riuscita ($diagnosticCode) · nuovo tentativo automatico',
+    },
   };
 
   factory VeilidSnapshot.fromResponse(NativeCoreResponse response) {
@@ -182,7 +192,8 @@ class VeilidService extends ChangeNotifier {
   void _ensureRefreshTimer() {
     _refreshTimer ??= Timer.periodic(const Duration(seconds: 8), (_) {
       if (_snapshot.phase == VeilidPhase.offline ||
-          _snapshot.phase == VeilidPhase.error) {
+          (_snapshot.phase == VeilidPhase.error &&
+              _snapshot.diagnosticCode != 'feature_unavailable')) {
         unawaited(start());
       } else {
         refresh();

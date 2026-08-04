@@ -13,11 +13,15 @@ class ProfileOnboarding extends StatefulWidget {
     required this.profileStore,
     required this.onCompleted,
     this.photoPicker,
+    this.initialProfile,
+    this.onCancelled,
   });
 
   final UserProfileStore profileStore;
   final ValueChanged<UserProfile> onCompleted;
   final ProfilePhotoPicker? photoPicker;
+  final UserProfile? initialProfile;
+  final VoidCallback? onCancelled;
 
   @override
   State<ProfileOnboarding> createState() => _ProfileOnboardingState();
@@ -29,6 +33,18 @@ class _ProfileOnboardingState extends State<ProfileOnboarding> {
   Uint8List? _photoBytes;
   bool _isSaving = false;
   String? _errorText;
+
+  bool get _isEditing => widget.initialProfile != null;
+
+  @override
+  void initState() {
+    super.initState();
+    final initialProfile = widget.initialProfile;
+    if (initialProfile != null) {
+      _nameController.text = initialProfile.displayName;
+      _photoBytes = initialProfile.photoBytes;
+    }
+  }
 
   @override
   void dispose() {
@@ -103,8 +119,10 @@ class _ProfileOnboardingState extends State<ProfileOnboarding> {
                       color: Theme.of(context).colorScheme.primary,
                     ),
                     const SizedBox(height: 20),
-                    const Text(
-                      'Crea il tuo profilo',
+                    Text(
+                      _isEditing
+                          ? 'Modifica il tuo profilo'
+                          : 'Crea il tuo profilo',
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 28,
@@ -112,8 +130,10 @@ class _ProfileOnboardingState extends State<ProfileOnboarding> {
                       ),
                     ),
                     const SizedBox(height: 8),
-                    const Text(
-                      'Scegli il nome che vedranno i tuoi contatti. Potrai aggiungere una foto, ma non è obbligatoria.',
+                    Text(
+                      _isEditing
+                          ? 'Aggiorna il nome o la foto mostrati nella home e ai tuoi contatti.'
+                          : 'Scegli il nome che vedranno i tuoi contatti. Potrai aggiungere una foto, ma non è obbligatoria.',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: Color(0xFFAEB7C3), height: 1.45),
                     ),
@@ -196,8 +216,18 @@ class _ProfileOnboardingState extends State<ProfileOnboarding> {
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
                           : const Icon(Icons.arrow_forward_rounded),
-                      label: const Text('Entra in Sylphy'),
+                      label: Text(
+                        _isEditing ? 'Salva modifiche' : 'Entra in Sylphy',
+                      ),
                     ),
+                    if (_isEditing) ...[
+                      const SizedBox(height: 8),
+                      TextButton(
+                        key: const ValueKey('cancel-profile-edit'),
+                        onPressed: _isSaving ? null : widget.onCancelled,
+                        child: const Text('Annulla'),
+                      ),
+                    ],
                     const SizedBox(height: 12),
                     const Text(
                       'La foto è facoltativa e rimane nello storage locale dell’app.',

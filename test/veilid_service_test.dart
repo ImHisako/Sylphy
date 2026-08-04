@@ -64,12 +64,32 @@ void main() {
 
     expect(snapshot.phase, VeilidPhase.error);
     expect(snapshot.diagnosticCode, 'feature_unavailable');
+    expect(snapshot.detail, contains('retry non può risolvere'));
+  });
+
+  test('distinguishes a retryable network startup failure', () {
+    const response = NativeCoreResponse(
+      ok: false,
+      code: 'network_startup_failed',
+      data: {},
+    );
+
+    final snapshot = VeilidSnapshot.fromResponse(response);
+
+    expect(snapshot.phase, VeilidPhase.error);
+    expect(snapshot.diagnosticCode, 'network_startup_failed');
     expect(snapshot.detail, contains('nuovo tentativo automatico'));
   });
 }
 
 class _FakeNativeCore implements NativeCoreApi {
   String? storageDirectory;
+
+  @override
+  NativeCoreResponse ensureIdentity({
+    required String storageDirectory,
+    required String vaultPassword,
+  }) => throw UnimplementedError();
 
   @override
   NativeCoreResponse addContact({

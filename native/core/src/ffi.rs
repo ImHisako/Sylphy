@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    CORE_ABI_VERSION, PROTOCOL_VERSION, bundle::PublicBundle, error::CoreError, hybrid,
+    CORE_ABI_VERSION, PROTOCOL_VERSION, bundle::PublicBundle, error::CoreError, hybrid, identity,
     messaging_adapter, ratchet_adapter, vault, veilid_adapter,
 };
 
@@ -28,6 +28,10 @@ enum CoreRequest {
     AddContact {
         display_name: String,
         invitation_code: String,
+    },
+    EnsureIdentity {
+        storage_directory: String,
+        vault_password: String,
     },
     ValidatePublicBundle {
         bundle: PublicBundle,
@@ -137,6 +141,14 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
             code: "ok",
             data: messaging_adapter::add_contact(&display_name, &invitation_code)?,
         }),
+        CoreRequest::EnsureIdentity {
+            storage_directory,
+            vault_password,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: identity::ensure_identity(&storage_directory, &vault_password)?,
+        }),
         CoreRequest::ValidatePublicBundle { bundle } => {
             bundle.validate()?;
             Ok(CoreResponse {
@@ -194,6 +206,8 @@ fn error_response(error: CoreError) -> CoreResponse {
         CoreError::VerificationFailed => "verification_failed",
         CoreError::LimitExceeded => "limit_exceeded",
         CoreError::FeatureUnavailable => "feature_unavailable",
+        CoreError::PlatformNotInitialized => "platform_not_initialized",
+        CoreError::NetworkStartupFailed => "network_startup_failed",
         CoreError::Internal => "internal_error",
     };
     CoreResponse {

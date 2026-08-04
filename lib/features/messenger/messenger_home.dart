@@ -3,8 +3,10 @@ import 'package:flutter/material.dart';
 import '../../core/messaging/models.dart';
 import '../../core/messaging/secure_messaging_bridge.dart';
 import '../../core/native/native_core.dart';
+import '../../core/identity/identity_service.dart';
 import '../../core/profile/user_profile.dart';
 import '../../core/veilid/veilid_service.dart';
+import '../profile/profile_sheet.dart';
 
 class MessengerHome extends StatefulWidget {
   const MessengerHome({
@@ -12,6 +14,8 @@ class MessengerHome extends StatefulWidget {
     required this.bridge,
     required this.veilidService,
     required this.profile,
+    required this.identityService,
+    required this.onEditProfile,
     this.nativeCore,
   });
 
@@ -19,6 +23,8 @@ class MessengerHome extends StatefulWidget {
   final NativeCoreApi? nativeCore;
   final VeilidService veilidService;
   final UserProfile profile;
+  final IdentityService identityService;
+  final VoidCallback onEditProfile;
 
   @override
   State<MessengerHome> createState() => _MessengerHomeState();
@@ -79,7 +85,7 @@ class _MessengerHomeState extends State<MessengerHome> {
       }
       final message = switch (error.code) {
         'native_core_unavailable' =>
-          'Il core nativo non è disponibile: ricompila l’app con ABI 3.',
+          'Il core nativo non è disponibile: ricompila l’app con ABI 4.',
         'feature_unavailable' =>
           'Lo storage nativo non è ancora pronto. Attendi l’avvio del nodo e riprova.',
         'verification_failed' =>
@@ -97,6 +103,15 @@ class _MessengerHomeState extends State<MessengerHome> {
     if (mounted) {
       setState(() {});
     }
+  }
+
+  void _openProfile() {
+    showProfileSheet(
+      context: context,
+      profile: widget.profile,
+      identityService: widget.identityService,
+      onEditProfile: widget.onEditProfile,
+    );
   }
 
   @override
@@ -125,6 +140,7 @@ class _MessengerHomeState extends State<MessengerHome> {
             onConversationSelected: _selectConversation,
             onChanged: _refresh,
             onAddContact: _addContact,
+            onProfilePressed: _openProfile,
             showDetails: constraints.maxWidth >= 1180,
           );
         }
@@ -137,6 +153,7 @@ class _MessengerHomeState extends State<MessengerHome> {
           onConversationSelected: _selectConversation,
           onChanged: _refresh,
           onAddContact: _addContact,
+          onProfilePressed: _openProfile,
         );
       },
     );
@@ -154,6 +171,7 @@ class _DesktopMessenger extends StatelessWidget {
     required this.onConversationSelected,
     required this.onChanged,
     required this.onAddContact,
+    required this.onProfilePressed,
     required this.showDetails,
   });
 
@@ -166,6 +184,7 @@ class _DesktopMessenger extends StatelessWidget {
   final Future<void> Function(String conversationId) onConversationSelected;
   final VoidCallback onChanged;
   final VoidCallback onAddContact;
+  final VoidCallback onProfilePressed;
   final bool showDetails;
 
   @override
@@ -178,6 +197,7 @@ class _DesktopMessenger extends StatelessWidget {
               snapshot: veilidService.snapshot,
               profile: profile,
               onAddContact: onAddContact,
+              onProfilePressed: onProfilePressed,
               onPrivacyPressed: () =>
                   _showPrivacyOverview(context, nativeCore, veilidService),
             ),
@@ -310,12 +330,14 @@ class _DesktopAppRail extends StatelessWidget {
     required this.snapshot,
     required this.profile,
     required this.onAddContact,
+    required this.onProfilePressed,
     required this.onPrivacyPressed,
   });
 
   final VeilidSnapshot snapshot;
   final UserProfile profile;
   final VoidCallback onAddContact;
+  final VoidCallback onProfilePressed;
   final VoidCallback onPrivacyPressed;
 
   @override
@@ -395,7 +417,11 @@ class _DesktopAppRail extends StatelessWidget {
                 onPressed: onPrivacyPressed,
               ),
               const SizedBox(height: 8),
-              _ProfileAvatar(profile: profile, radius: 18),
+              _ProfileAvatar(
+                profile: profile,
+                radius: 18,
+                onPressed: onProfilePressed,
+              ),
             ],
           ),
         ),
@@ -562,6 +588,7 @@ class _MobileConversationList extends StatelessWidget {
     required this.onConversationSelected,
     required this.onChanged,
     required this.onAddContact,
+    required this.onProfilePressed,
   });
 
   final SecureMessagingBridge bridge;
@@ -572,6 +599,7 @@ class _MobileConversationList extends StatelessWidget {
   final Future<void> Function(String conversationId) onConversationSelected;
   final VoidCallback onChanged;
   final VoidCallback onAddContact;
+  final VoidCallback onProfilePressed;
 
   @override
   Widget build(BuildContext context) {
@@ -581,7 +609,11 @@ class _MobileConversationList extends StatelessWidget {
         actions: [
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
-            child: _ProfileAvatar(profile: profile, radius: 18),
+            child: _ProfileAvatar(
+              profile: profile,
+              radius: 18,
+              onPressed: onProfilePressed,
+            ),
           ),
           const SizedBox(width: 4),
           IconButton(
@@ -1334,32 +1366,42 @@ class _BrandMark extends StatelessWidget {
 }
 
 class _ProfileAvatar extends StatelessWidget {
-  const _ProfileAvatar({required this.profile, required this.radius});
+  const _ProfileAvatar({
+    required this.profile,
+    required this.radius,
+    this.onPressed,
+  });
 
   final UserProfile profile;
   final double radius;
+  final VoidCallback? onPressed;
 
   @override
   Widget build(BuildContext context) {
     return Tooltip(
       message: profile.displayName,
-      child: CircleAvatar(
-        key: const ValueKey('current-profile-avatar'),
-        radius: radius,
-        backgroundColor: const Color(0xFF2A313B),
-        backgroundImage: profile.photoBytes == null
-            ? null
-            : MemoryImage(profile.photoBytes!),
-        child: profile.photoBytes == null
-            ? Text(
-                profile.initials,
-                style: TextStyle(
-                  color: Theme.of(context).colorScheme.primary,
-                  fontSize: radius * 0.72,
-                  fontWeight: FontWeight.w900,
-                ),
-              )
-            : null,
+      child: InkWell(
+        key: const ValueKey('open-profile'),
+        customBorder: const CircleBorder(),
+        onTap: onPressed,
+        child: CircleAvatar(
+          key: const ValueKey('current-profile-avatar'),
+          radius: radius,
+          backgroundColor: const Color(0xFF2A313B),
+          backgroundImage: profile.photoBytes == null
+              ? null
+              : MemoryImage(profile.photoBytes!),
+          child: profile.photoBytes == null
+              ? Text(
+                  profile.initials,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.primary,
+                    fontSize: radius * 0.72,
+                    fontWeight: FontWeight.w900,
+                  ),
+                )
+              : null,
+        ),
       ),
     );
   }

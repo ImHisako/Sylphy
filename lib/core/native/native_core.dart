@@ -4,7 +4,7 @@ import 'dart:io';
 
 import 'package:ffi/ffi.dart';
 
-const _expectedAbiVersion = 3;
+const _expectedAbiVersion = 4;
 
 typedef _NativeAbiVersion = Uint32 Function();
 typedef _DartAbiVersion = int Function();
@@ -29,6 +29,11 @@ abstract interface class NativeCoreApi {
   NativeCoreResponse addContact({
     required String displayName,
     required String invitationCode,
+  });
+
+  NativeCoreResponse ensureIdentity({
+    required String storageDirectory,
+    required String vaultPassword,
   });
 
   NativeCoreResponse verifyHybridPrimitives();
@@ -105,6 +110,18 @@ class NativeCoreClient implements NativeCoreApi {
       'command': 'add_contact',
       'display_name': displayName,
       'invitation_code': invitationCode,
+    });
+  }
+
+  @override
+  NativeCoreResponse ensureIdentity({
+    required String storageDirectory,
+    required String vaultPassword,
+  }) {
+    return call({
+      'command': 'ensure_identity',
+      'storage_directory': storageDirectory,
+      'vault_password': vaultPassword,
     });
   }
 

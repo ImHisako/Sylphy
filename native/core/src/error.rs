@@ -16,6 +16,10 @@ pub enum CoreError {
     LimitExceeded,
     #[error("feature unavailable")]
     FeatureUnavailable,
+    #[error("platform initialization incomplete")]
+    PlatformNotInitialized,
+    #[error("network startup failed")]
+    NetworkStartupFailed,
     #[error("internal operation failed")]
     Internal,
 }

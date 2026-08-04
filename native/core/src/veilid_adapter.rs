@@ -226,19 +226,24 @@ pub fn start_node(storage_directory: &str) -> CoreResult<VeilidNodeStatus> {
     }
     std::fs::create_dir_all(storage_directory).map_err(|_| CoreError::Internal)?;
 
+    #[cfg(target_os = "android")]
+    if !crate::android::is_context_ready() {
+        return Err(CoreError::PlatformNotInitialized);
+    }
+
     let mut state = lock_runtime()?;
     if state.node.is_none() {
         let node = state
             .runtime
             .block_on(VeilidNode::start(storage_directory))
-            .map_err(|_| CoreError::FeatureUnavailable)?;
+            .map_err(|_| CoreError::NetworkStartupFailed)?;
         state.node = Some(node);
     }
     let node = state.node.as_ref().ok_or(CoreError::Internal)?;
     state
         .runtime
         .block_on(node.status())
-        .map_err(|_| CoreError::FeatureUnavailable)
+        .map_err(|_| CoreError::NetworkStartupFailed)
 }
 
 #[cfg(not(feature = "veilid"))]
@@ -255,7 +260,7 @@ pub fn node_status() -> CoreResult<VeilidNodeStatus> {
     state
         .runtime
         .block_on(node.status())
-        .map_err(|_| CoreError::FeatureUnavailable)
+        .map_err(|_| CoreError::NetworkStartupFailed)
 }
 
 #[cfg(not(feature = "veilid"))]
