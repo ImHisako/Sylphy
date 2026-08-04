@@ -1,7 +1,9 @@
 use serde::Serialize;
 
+use crate::error::{CoreError, CoreResult};
+
 #[cfg(feature = "veilid")]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(feature = "veilid")]
 use crate::envelope::MessageEnvelope;
@@ -10,6 +12,39 @@ use crate::envelope::MessageEnvelope;
 pub struct VeilidCapabilityStatus {
     pub compiled: bool,
     pub transport_contract: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct VeilidNodeStatus {
+    pub compiled: bool,
+    pub running: bool,
+    pub attachment_state: String,
+    pub public_internet_ready: bool,
+    pub live_peer_count: String,
+}
+
+impl VeilidNodeStatus {
+    #[cfg(not(feature = "veilid"))]
+    fn unavailable() -> Self {
+        Self {
+            compiled: false,
+            running: false,
+            attachment_state: "unavailable".to_owned(),
+            public_internet_ready: false,
+            live_peer_count: "0".to_owned(),
+        }
+    }
+
+    #[cfg(feature = "veilid")]
+    fn stopped() -> Self {
+        Self {
+            compiled: true,
+            running: false,
+            attachment_state: "detached".to_owned(),
+            public_internet_ready: false,
+            live_peer_count: "0".to_owned(),
+        }
+    }
 }
 
 pub fn capability_status() -> VeilidCapabilityStatus {
@@ -45,6 +80,17 @@ impl VeilidNode {
 
     pub async fn attach(&self) -> Result<(), veilid_core::VeilidAPIError> {
         self.api.attach().await
+    }
+
+    pub async fn status(&self) -> Result<VeilidNodeStatus, veilid_core::VeilidAPIError> {
+        let state = self.api.get_state().await?;
+        Ok(VeilidNodeStatus {
+            compiled: true,
+            running: true,
+            attachment_state: state.attachment.state.to_string(),
+            public_internet_ready: state.attachment.public_internet_ready,
+            live_peer_count: state.attachment.live_peer_count.to_string(),
+        })
     }
 
     pub fn routing_context(
@@ -87,5 +133,121 @@ impl VeilidNode {
 
     pub async fn shutdown(self) {
         self.api.shutdown().await;
+    }
+}
+
+#[cfg(feature = "veilid")]
+struct VeilidRuntime {
+    runtime: tokio::runtime::Runtime,
+    node: Option<VeilidNode>,
+}
+
+#[cfg(feature = "veilid")]
+impl VeilidRuntime {
+    fn new() -> Result<Self, ()> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("sylphy-veilid")
+            .build()
+            .map_err(|_| ())?;
+        Ok(Self {
+            runtime,
+            node: None,
+        })
+    }
+}
+
+#[cfg(feature = "veilid")]
+static VEILID_RUNTIME: OnceLock<Result<Mutex<VeilidRuntime>, ()>> = OnceLock::new();
+
+#[cfg(feature = "veilid")]
+fn runtime() -> CoreResult<&'static Mutex<VeilidRuntime>> {
+    VEILID_RUNTIME
+        .get_or_init(|| VeilidRuntime::new().map(Mutex::new))
+        .as_ref()
+        .map_err(|_| CoreError::Internal)
+}
+
+#[cfg(feature = "veilid")]
+fn lock_runtime() -> CoreResult<std::sync::MutexGuard<'static, VeilidRuntime>> {
+    runtime()?.lock().map_err(|_| CoreError::Internal)
+}
+
+#[cfg(feature = "veilid")]
+pub fn start_node(storage_directory: &str) -> CoreResult<VeilidNodeStatus> {
+    if storage_directory.trim().is_empty() {
+        return Err(CoreError::InvalidInput);
+    }
+    std::fs::create_dir_all(storage_directory).map_err(|_| CoreError::Internal)?;
+
+    let mut state = lock_runtime()?;
+    if state.node.is_none() {
+        let node = state
+            .runtime
+            .block_on(VeilidNode::start(storage_directory))
+            .map_err(|_| CoreError::FeatureUnavailable)?;
+        state.node = Some(node);
+    }
+    let node = state.node.as_ref().ok_or(CoreError::Internal)?;
+    state
+        .runtime
+        .block_on(node.status())
+        .map_err(|_| CoreError::FeatureUnavailable)
+}
+
+#[cfg(not(feature = "veilid"))]
+pub fn start_node(_storage_directory: &str) -> CoreResult<VeilidNodeStatus> {
+    Err(CoreError::FeatureUnavailable)
+}
+
+#[cfg(feature = "veilid")]
+pub fn node_status() -> CoreResult<VeilidNodeStatus> {
+    let state = lock_runtime()?;
+    let Some(node) = state.node.as_ref() else {
+        return Ok(VeilidNodeStatus::stopped());
+    };
+    state
+        .runtime
+        .block_on(node.status())
+        .map_err(|_| CoreError::FeatureUnavailable)
+}
+
+#[cfg(not(feature = "veilid"))]
+pub fn node_status() -> CoreResult<VeilidNodeStatus> {
+    Ok(VeilidNodeStatus::unavailable())
+}
+
+#[cfg(feature = "veilid")]
+pub fn stop_node() -> CoreResult<VeilidNodeStatus> {
+    let mut state = lock_runtime()?;
+    if let Some(node) = state.node.take() {
+        state.runtime.block_on(node.shutdown());
+    }
+    Ok(VeilidNodeStatus::stopped())
+}
+
+#[cfg(not(feature = "veilid"))]
+pub fn stop_node() -> CoreResult<VeilidNodeStatus> {
+    Ok(VeilidNodeStatus::unavailable())
+}
+
+#[cfg(all(test, not(feature = "veilid")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reports_an_unavailable_node_without_the_feature() {
+        let status = node_status().expect("status without Veilid feature");
+        assert!(!status.compiled);
+        assert!(!status.running);
+        assert_eq!(status.attachment_state, "unavailable");
+    }
+
+    #[test]
+    fn refuses_start_without_the_feature() {
+        assert!(matches!(
+            start_node("ignored"),
+            Err(CoreError::FeatureUnavailable)
+        ));
     }
 }

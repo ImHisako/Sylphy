@@ -25,6 +25,6 @@ L'implementazione di produzione di `SecureMessagingBridge` deve essere un adapte
 
 ## Stato attuale
 
-`NativeCoreClient` carica opzionalmente l'ABI C del core Rust su Windows e Android ed espone soltanto stato del core e self-test del profilo ibrido. L'assenza della libreria non viene mai trasformata in un invio meno sicuro: la UI resta nella modalità demo.
+`NativeCoreClient` carica opzionalmente l'ABI C del core Rust su Windows, Linux e Android ed espone stato del core, self-test del profilo ibrido, self-test Double Ratchet e lifecycle Veilid. `VeilidService` avvia il nodo nello storage applicativo e traduce la telemetria aggregata in stati UI neutrali. L'assenza della libreria non viene mai trasformata in un invio meno sicuro: la UI dichiara esplicitamente la modalità anteprima.
 
-`LocalDemoMessagingBridge` è intenzionalmente un'implementazione in memoria per preview e test widget. Non è un vault e non deve essere usato oltre la fase di interfaccia. Fino all'integrazione di un provider Double Ratchet Signal revisionato, il core non espone startup Veilid, apertura sessione o invio di messaggi.
+`LocalDemoMessagingBridge` è intenzionalmente un'implementazione in memoria per preview e test widget. Non è un vault e non deve essere usato oltre la fase di interfaccia. Il provider Signal è integrato e verificabile dal pannello Privacy; apertura sessione e invio UI restano bloccati fino alla persistenza cifrata degli store Signal.

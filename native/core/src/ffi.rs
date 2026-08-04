@@ -8,14 +8,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    CORE_ABI_VERSION, PROTOCOL_VERSION, bundle::PublicBundle, error::CoreError, hybrid, vault,
-    veilid_adapter,
+    CORE_ABI_VERSION, PROTOCOL_VERSION, bundle::PublicBundle, error::CoreError, hybrid,
+    ratchet_adapter, vault, veilid_adapter,
 };
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum CoreRequest {
     Status,
+    StartVeilid {
+        storage_directory: String,
+    },
+    VeilidStatus,
+    StopVeilid,
     ValidatePublicBundle {
         bundle: PublicBundle,
     },
@@ -24,6 +29,7 @@ enum CoreRequest {
         value_base64: String,
     },
     HybridSelfTest,
+    RatchetSelfTest,
 }
 
 #[derive(Debug, Serialize)]
@@ -79,9 +85,28 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
                 "abi_version": CORE_ABI_VERSION,
                 "protocol_version": PROTOCOL_VERSION,
                 "veilid": veilid_adapter::capability_status(),
+                "veilid_node": veilid_adapter::node_status()?,
                 "security_profile": "argon2id+xchacha20poly1305+ed25519+x25519+mlkem768",
-                "ratchet": "provider-required",
+                "ratchet": ratchet_adapter::capability_status(),
             }),
+        }),
+        CoreRequest::StartVeilid { storage_directory } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: serde_json::to_value(veilid_adapter::start_node(&storage_directory)?)
+                .map_err(|_| CoreError::Internal)?,
+        }),
+        CoreRequest::VeilidStatus => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: serde_json::to_value(veilid_adapter::node_status()?)
+                .map_err(|_| CoreError::Internal)?,
+        }),
+        CoreRequest::StopVeilid => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: serde_json::to_value(veilid_adapter::stop_node()?)
+                .map_err(|_| CoreError::Internal)?,
         }),
         CoreRequest::ValidatePublicBundle { bundle } => {
             bundle.validate()?;
@@ -115,6 +140,18 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
                 ok: true,
                 code: "ok",
                 data: json!({"hybrid_handshake": "verified"}),
+            })
+        }
+        CoreRequest::RatchetSelfTest => {
+            ratchet_adapter::self_test()?;
+            Ok(CoreResponse {
+                ok: true,
+                code: "ok",
+                data: json!({
+                    "double_ratchet": "verified",
+                    "out_of_order_delivery": "verified",
+                    "provider": ratchet_adapter::capability_status().provider,
+                }),
             })
         }
     }

@@ -11,6 +11,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [features]
 default = []
 veilid = ["dep:tokio", "dep:veilid-core"]
+signal-ratchet = ["dep:futures-executor", "dep:libsignal-protocol", "dep:rand"]
 
 [dependencies]
 argon2 = "0.5.3"
@@ -18,7 +19,10 @@ base64 = "0.22.1"
 chacha20poly1305 = { version = "0.10.1", features = ["std"] }
 ed25519-dalek = { version = "2.1.1", features = ["rand_core", "zeroize"] }
 hkdf = "0.12.4"
+futures-executor = { version = "0.3.31", optional = true }
+libsignal-protocol = { git = "https://github.com/signalapp/libsignal.git", rev = "622d0d52471f3cc9215fe4e9abaac1970018f79c", optional = true }
 ml-kem = { version = "0.3.2", features = ["getrandom", "zeroize"] }
+rand = { version = "0.9.2", optional = true }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.134"

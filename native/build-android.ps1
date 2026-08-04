@@ -14,7 +14,7 @@ $buildArguments = @(
     '-o', $jniLibrariesPath,
     'build',
     '--manifest-path', $manifestPath,
-    '--features', 'veilid'
+    '--features', 'veilid,signal-ratchet'
 )
 
 if ($Profile -eq 'release') {

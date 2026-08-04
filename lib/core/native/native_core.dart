@@ -21,7 +21,7 @@ class NativeCoreClient {
   final int abiVersion;
 
   static NativeCoreClient? tryLoad() {
-    if (!Platform.isWindows && !Platform.isAndroid) {
+    if (!Platform.isWindows && !Platform.isLinux && !Platform.isAndroid) {
       return null;
     }
     try {
@@ -49,8 +49,19 @@ class NativeCoreClient {
 
   NativeCoreResponse status() => call(const {'command': 'status'});
 
+  NativeCoreResponse startVeilid(String storageDirectory) =>
+      call({'command': 'start_veilid', 'storage_directory': storageDirectory});
+
+  NativeCoreResponse veilidStatus() => call(const {'command': 'veilid_status'});
+
+  NativeCoreResponse stopVeilid() => call(const {'command': 'stop_veilid'});
+
   NativeCoreResponse verifyHybridPrimitives() {
     return call(const {'command': 'hybrid_self_test'});
+  }
+
+  NativeCoreResponse verifyDoubleRatchet() {
+    return call(const {'command': 'ratchet_self_test'});
   }
 
   NativeCoreResponse call(Map<String, Object> request) {

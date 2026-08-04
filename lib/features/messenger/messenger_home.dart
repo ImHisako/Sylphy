@@ -3,12 +3,19 @@ import 'package:flutter/material.dart';
 import '../../core/messaging/models.dart';
 import '../../core/messaging/secure_messaging_bridge.dart';
 import '../../core/native/native_core.dart';
+import '../../core/veilid/veilid_service.dart';
 
 class MessengerHome extends StatefulWidget {
-  const MessengerHome({super.key, required this.bridge, this.nativeCore});
+  const MessengerHome({
+    super.key,
+    required this.bridge,
+    required this.veilidService,
+    this.nativeCore,
+  });
 
   final SecureMessagingBridge bridge;
   final NativeCoreClient? nativeCore;
+  final VeilidService veilidService;
 
   @override
   State<MessengerHome> createState() => _MessengerHomeState();
@@ -49,6 +56,8 @@ class _MessengerHomeState extends State<MessengerHome> {
         if (constraints.maxWidth >= 900) {
           return _DesktopMessenger(
             bridge: widget.bridge,
+            nativeCore: widget.nativeCore,
+            veilidService: widget.veilidService,
             conversations: conversations,
             activeConversation: activeConversation,
             onConversationSelected: _selectConversation,
@@ -59,6 +68,7 @@ class _MessengerHomeState extends State<MessengerHome> {
         return _MobileConversationList(
           bridge: widget.bridge,
           nativeCore: widget.nativeCore,
+          veilidService: widget.veilidService,
           conversations: conversations,
           onConversationSelected: _selectConversation,
           onChanged: _refresh,
@@ -71,6 +81,8 @@ class _MessengerHomeState extends State<MessengerHome> {
 class _DesktopMessenger extends StatelessWidget {
   const _DesktopMessenger({
     required this.bridge,
+    required this.nativeCore,
+    required this.veilidService,
     required this.conversations,
     required this.activeConversation,
     required this.onConversationSelected,
@@ -79,6 +91,8 @@ class _DesktopMessenger extends StatelessWidget {
   });
 
   final SecureMessagingBridge bridge;
+  final NativeCoreClient? nativeCore;
+  final VeilidService veilidService;
   final List<Conversation> conversations;
   final Conversation activeConversation;
   final Future<void> Function(String conversationId) onConversationSelected;
@@ -91,9 +105,16 @@ class _DesktopMessenger extends StatelessWidget {
       body: SafeArea(
         child: Row(
           children: [
+            _DesktopAppRail(
+              snapshot: veilidService.snapshot,
+              onPrivacyPressed: () =>
+                  _showPrivacyOverview(context, nativeCore, veilidService),
+            ),
+            const VerticalDivider(width: 1),
             SizedBox(
               width: 328,
               child: _ConversationSidebar(
+                veilidSnapshot: veilidService.snapshot,
                 conversations: conversations,
                 activeConversationId: activeConversation.id,
                 onConversationSelected: onConversationSelected,
@@ -112,7 +133,10 @@ class _DesktopMessenger extends StatelessWidget {
               const VerticalDivider(width: 1),
               SizedBox(
                 width: 292,
-                child: _ConversationDetails(conversation: activeConversation),
+                child: _ConversationDetails(
+                  conversation: activeConversation,
+                  veilidSnapshot: veilidService.snapshot,
+                ),
               ),
             ],
           ],
@@ -122,14 +146,143 @@ class _DesktopMessenger extends StatelessWidget {
   }
 }
 
+class _DesktopAppRail extends StatelessWidget {
+  const _DesktopAppRail({
+    required this.snapshot,
+    required this.onPrivacyPressed,
+  });
+
+  final VeilidSnapshot snapshot;
+  final VoidCallback onPrivacyPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final networkColor = _networkColor(snapshot.phase);
+    return ColoredBox(
+      color: const Color(0xFF090C11),
+      child: SizedBox(
+        width: 72,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 18),
+          child: Column(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.primary,
+                  borderRadius: BorderRadius.circular(13),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.primary.withValues(alpha: 0.18),
+                      blurRadius: 18,
+                    ),
+                  ],
+                ),
+                child: Icon(
+                  Icons.auto_awesome_rounded,
+                  color: Theme.of(context).colorScheme.onPrimary,
+                ),
+              ),
+              const SizedBox(height: 30),
+              const _RailButton(
+                icon: Icons.forum_rounded,
+                tooltip: 'Conversazioni',
+                selected: true,
+              ),
+              _RailButton(
+                icon: Icons.people_outline_rounded,
+                tooltip: 'Contatti',
+                onPressed: () => _showNotReadyNotice(context, 'Contatti'),
+              ),
+              _RailButton(
+                icon: Icons.folder_copy_outlined,
+                tooltip: 'File cifrati',
+                onPressed: () =>
+                    _showNotReadyNotice(context, 'Archivio cifrato'),
+              ),
+              const Spacer(),
+              Tooltip(
+                message: snapshot.detail,
+                child: Container(
+                  width: 12,
+                  height: 12,
+                  decoration: BoxDecoration(
+                    color: networkColor,
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: const Color(0xFF090C11),
+                      width: 2,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: networkColor.withValues(alpha: 0.35),
+                        blurRadius: 9,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              _RailButton(
+                icon: Icons.shield_outlined,
+                tooltip: 'Privacy e rete',
+                onPressed: onPrivacyPressed,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RailButton extends StatelessWidget {
+  const _RailButton({
+    required this.icon,
+    required this.tooltip,
+    this.selected = false,
+    this.onPressed,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final bool selected;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: IconButton(
+        tooltip: tooltip,
+        onPressed: onPressed ?? () {},
+        style: IconButton.styleFrom(
+          backgroundColor: selected
+              ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.14)
+              : Colors.transparent,
+          foregroundColor: selected
+              ? Theme.of(context).colorScheme.primary
+              : const Color(0xFF8C96A5),
+        ),
+        icon: Icon(icon),
+      ),
+    );
+  }
+}
+
 class _ConversationSidebar extends StatefulWidget {
   const _ConversationSidebar({
     required this.conversations,
+    required this.veilidSnapshot,
     required this.activeConversationId,
     required this.onConversationSelected,
   });
 
   final List<Conversation> conversations;
+  final VeilidSnapshot veilidSnapshot;
   final String activeConversationId;
   final Future<void> Function(String conversationId) onConversationSelected;
 
@@ -212,9 +365,9 @@ class _ConversationSidebarState extends State<_ConversationSidebar> {
                     },
                   ),
           ),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 8, 16, 20),
-            child: _VaultStatusCard(),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
+            child: _VaultStatusCard(veilidSnapshot: widget.veilidSnapshot),
           ),
         ],
       ),
@@ -226,6 +379,7 @@ class _MobileConversationList extends StatelessWidget {
   const _MobileConversationList({
     required this.bridge,
     required this.nativeCore,
+    required this.veilidService,
     required this.conversations,
     required this.onConversationSelected,
     required this.onChanged,
@@ -233,6 +387,7 @@ class _MobileConversationList extends StatelessWidget {
 
   final SecureMessagingBridge bridge;
   final NativeCoreClient? nativeCore;
+  final VeilidService veilidService;
   final List<Conversation> conversations;
   final Future<void> Function(String conversationId) onConversationSelected;
   final VoidCallback onChanged;
@@ -245,7 +400,8 @@ class _MobileConversationList extends StatelessWidget {
         actions: [
           IconButton(
             tooltip: 'Stato protezione',
-            onPressed: () => _showPrivacyOverview(context, nativeCore),
+            onPressed: () =>
+                _showPrivacyOverview(context, nativeCore, veilidService),
             icon: const Icon(Icons.shield_outlined),
           ),
           const SizedBox(width: 8),
@@ -259,7 +415,10 @@ class _MobileConversationList extends StatelessWidget {
           separatorBuilder: (context, index) => const SizedBox(height: 8),
           itemBuilder: (context, index) {
             if (index == 0) {
-              return const _MobileNetworkStatus();
+              return _MobileNetworkStatus(
+                snapshot: veilidService.snapshot,
+                onRetry: veilidService.retry,
+              );
             }
             if (index == 1) {
               return const Padding(
@@ -428,8 +587,14 @@ class _ChatPaneState extends State<_ChatPane> {
   @override
   Widget build(BuildContext context) {
     final messages = widget.bridge.listMessages(widget.conversation.id);
-    return ColoredBox(
-      color: const Color(0xFF111318),
+    return DecoratedBox(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF11151B), Color(0xFF0C0F14)],
+        ),
+      ),
       child: Column(
         children: [
           if (widget.showHeader) _ChatHeader(conversation: widget.conversation),
@@ -580,9 +745,13 @@ class _Composer extends StatelessWidget {
 }
 
 class _ConversationDetails extends StatelessWidget {
-  const _ConversationDetails({required this.conversation});
+  const _ConversationDetails({
+    required this.conversation,
+    required this.veilidSnapshot,
+  });
 
   final Conversation conversation;
+  final VeilidSnapshot veilidSnapshot;
 
   @override
   Widget build(BuildContext context) {
@@ -628,13 +797,13 @@ class _ConversationDetails extends StatelessWidget {
               subtitle: conversation.fingerprint,
             ),
             const SizedBox(height: 10),
-            const _InfoCard(
+            _InfoCard(
               icon: Icons.hub_outlined,
               title: 'Trasporto',
-              subtitle: 'Instradamento privato',
+              subtitle: veilidSnapshot.title,
             ),
             const Spacer(),
-            const _VaultStatusCard(compact: true),
+            _VaultStatusCard(veilidSnapshot: veilidSnapshot, compact: true),
           ],
         ),
       ),
@@ -958,8 +1127,9 @@ class _BrandMark extends StatelessWidget {
 }
 
 class _VaultStatusCard extends StatelessWidget {
-  const _VaultStatusCard({this.compact = false});
+  const _VaultStatusCard({required this.veilidSnapshot, this.compact = false});
 
+  final VeilidSnapshot veilidSnapshot;
   final bool compact;
 
   @override
@@ -991,13 +1161,20 @@ class _VaultStatusCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'Vault protetto',
-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800),
+                Text(
+                  veilidSnapshot.phase == VeilidPhase.unavailable
+                      ? 'Anteprima protetta'
+                      : 'Core di sicurezza',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                  ),
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  compact ? 'Core nativo richiesto' : 'Profilo ibrido attivo',
+                  veilidSnapshot.phase == VeilidPhase.unavailable
+                      ? 'Core nativo richiesto'
+                      : 'Rust + profilo ibrido disponibile',
                   style: const TextStyle(
                     color: Color(0xFFAEB7C3),
                     fontSize: 11,
@@ -1013,7 +1190,10 @@ class _VaultStatusCard extends StatelessWidget {
 }
 
 class _MobileNetworkStatus extends StatelessWidget {
-  const _MobileNetworkStatus();
+  const _MobileNetworkStatus({required this.snapshot, required this.onRetry});
+
+  final VeilidSnapshot snapshot;
+  final Future<void> Function() onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -1023,26 +1203,49 @@ class _MobileNetworkStatus extends StatelessWidget {
         color: const Color(0xFF1B2027),
         borderRadius: BorderRadius.circular(17),
       ),
-      child: const Row(
+      child: Row(
         children: [
-          Icon(Icons.hub_rounded, color: Color(0xFFD4F66A)),
-          SizedBox(width: 10),
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: _networkColor(snapshot.phase).withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Icon(
+              snapshot.phase == VeilidPhase.connecting
+                  ? Icons.sync_rounded
+                  : Icons.hub_rounded,
+              color: _networkColor(snapshot.phase),
+            ),
+          ),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Rete privata',
-                  style: TextStyle(fontWeight: FontWeight.w800),
+                  snapshot.title,
+                  style: const TextStyle(fontWeight: FontWeight.w800),
                 ),
-                SizedBox(height: 2),
+                const SizedBox(height: 2),
                 Text(
-                  'Nessun contenuto viene mostrato al trasporto.',
-                  style: TextStyle(color: Color(0xFFB2BAC5), fontSize: 12),
+                  snapshot.detail,
+                  style: const TextStyle(
+                    color: Color(0xFFB2BAC5),
+                    fontSize: 12,
+                  ),
                 ),
               ],
             ),
           ),
+          if (snapshot.phase == VeilidPhase.error ||
+              snapshot.phase == VeilidPhase.offline)
+            IconButton(
+              tooltip: 'Riprova',
+              onPressed: onRetry,
+              icon: const Icon(Icons.refresh_rounded),
+            ),
         ],
       ),
     );
@@ -1190,19 +1393,36 @@ void _showNotReadyNotice(BuildContext context, String feature) {
   );
 }
 
-void _showPrivacyOverview(BuildContext context, NativeCoreClient? nativeCore) {
+void _showPrivacyOverview(
+  BuildContext context,
+  NativeCoreClient? nativeCore,
+  VeilidService veilidService,
+) {
   showModalBottomSheet<void>(
     context: context,
     backgroundColor: const Color(0xFF1A1E25),
     showDragHandle: true,
-    builder: (context) => _PrivacyOverviewSheet(nativeCore: nativeCore),
+    isScrollControlled: true,
+    builder: (sheetContext) => ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.86,
+      ),
+      child: _PrivacyOverviewSheet(
+        nativeCore: nativeCore,
+        veilidService: veilidService,
+      ),
+    ),
   );
 }
 
 class _PrivacyOverviewSheet extends StatefulWidget {
-  const _PrivacyOverviewSheet({required this.nativeCore});
+  const _PrivacyOverviewSheet({
+    required this.nativeCore,
+    required this.veilidService,
+  });
 
   final NativeCoreClient? nativeCore;
+  final VeilidService veilidService;
 
   @override
   State<_PrivacyOverviewSheet> createState() => _PrivacyOverviewSheetState();
@@ -1219,7 +1439,10 @@ class _PrivacyOverviewSheetState extends State<_PrivacyOverviewSheet> {
     }
     setState(() => _isChecking = true);
     try {
-      final response = nativeCore.verifyHybridPrimitives();
+      final hybridResponse = nativeCore.verifyHybridPrimitives();
+      final response = hybridResponse.ok
+          ? nativeCore.verifyDoubleRatchet()
+          : hybridResponse;
       if (mounted) {
         setState(() => _response = response);
       }
@@ -1246,69 +1469,128 @@ class _PrivacyOverviewSheetState extends State<_PrivacyOverviewSheet> {
     final resultText = _response == null
         ? null
         : _response!.ok
-        ? 'Verifica delle primitive superata'
+        ? 'Profilo ibrido e Double Ratchet verificati'
         : 'Verifica non riuscita: ${_response!.code}';
     return SafeArea(
       top: false,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(24, 8, 24, 30),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Privacy di Sylphy',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              coreLoaded
-                  ? 'Il core Rust è caricato. Puoi verificare localmente il profilo ibrido prima di configurare un nodo Veilid.'
-                  : 'La libreria Rust non è ancora distribuita: l’interfaccia usa esclusivamente dati demo in memoria.',
-              style: const TextStyle(color: Color(0xFFC1C8D2), height: 1.45),
-            ),
-            const SizedBox(height: 18),
-            const _PrivacyLine(
-              Icons.lock_outline_rounded,
-              'Vault Argon2id + XChaCha20-Poly1305',
-            ),
-            const SizedBox(height: 12),
-            const _PrivacyLine(
-              Icons.key_outlined,
-              'X25519 + ML-KEM-768 nel core nativo',
-            ),
-            const SizedBox(height: 12),
-            const _PrivacyLine(
-              Icons.hub_outlined,
-              'Envelope opachi per il trasporto',
-            ),
-            if (coreLoaded) ...[
-              const SizedBox(height: 22),
-              OutlinedButton.icon(
-                onPressed: _isChecking ? null : _checkNativeCore,
-                icon: _isChecking
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.verified_outlined),
-                label: const Text('Verifica profilo ibrido'),
+      child: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 8, 24, 30),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Privacy di Sylphy',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
               ),
-              if (resultText != null) ...[
-                const SizedBox(height: 10),
-                Text(
-                  resultText,
-                  style: TextStyle(
-                    color: _response!.ok
-                        ? const Color(0xFF9DE4B6)
-                        : const Color(0xFFFFBE7A),
-                    fontWeight: FontWeight.w700,
-                  ),
+              const SizedBox(height: 12),
+              Text(
+                coreLoaded
+                    ? 'Il core Rust è caricato. Il nodo Veilid usa storage isolato e pubblica soltanto envelope applicativi opachi.'
+                    : 'La libreria Rust non è ancora distribuita: l’interfaccia usa esclusivamente dati demo in memoria.',
+                style: const TextStyle(color: Color(0xFFC1C8D2), height: 1.45),
+              ),
+              const SizedBox(height: 16),
+              AnimatedBuilder(
+                animation: widget.veilidService,
+                builder: (context, _) {
+                  final snapshot = widget.veilidService.snapshot;
+                  return Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF141920),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: const Color(0xFF303741)),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.hub_rounded,
+                          color: _networkColor(snapshot.phase),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                snapshot.title,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                snapshot.detail,
+                                style: const TextStyle(
+                                  color: Color(0xFFAEB7C3),
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (snapshot.phase == VeilidPhase.error ||
+                            snapshot.phase == VeilidPhase.offline)
+                          IconButton(
+                            tooltip: 'Riprova connessione',
+                            onPressed: widget.veilidService.retry,
+                            icon: const Icon(Icons.refresh_rounded),
+                          ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(height: 18),
+              const _PrivacyLine(
+                Icons.lock_outline_rounded,
+                'Vault Argon2id + XChaCha20-Poly1305',
+              ),
+              const SizedBox(height: 12),
+              const _PrivacyLine(
+                Icons.key_outlined,
+                'X25519 + ML-KEM-768 nel core nativo',
+              ),
+              const SizedBox(height: 12),
+              const _PrivacyLine(
+                Icons.sync_lock_rounded,
+                'Double Ratchet Signal con chiavi per messaggio',
+              ),
+              const SizedBox(height: 12),
+              const _PrivacyLine(
+                Icons.hub_outlined,
+                'Envelope opachi per il trasporto',
+              ),
+              if (coreLoaded) ...[
+                const SizedBox(height: 22),
+                OutlinedButton.icon(
+                  onPressed: _isChecking ? null : _checkNativeCore,
+                  icon: _isChecking
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.verified_outlined),
+                  label: const Text('Verifica crittografia'),
                 ),
+                if (resultText != null) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    resultText,
+                    style: TextStyle(
+                      color: _response!.ok
+                          ? const Color(0xFF9DE4B6)
+                          : const Color(0xFFFFBE7A),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
               ],
             ],
-          ],
+          ),
         ),
       ),
     );
@@ -1378,8 +1660,22 @@ class _PrivacyLine extends StatelessWidget {
         const SizedBox(width: 4),
         Icon(icon, size: 19, color: Color(0xFFD4F66A)),
         const SizedBox(width: 12),
-        Text(label, style: const TextStyle(fontWeight: FontWeight.w700)),
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
+        ),
       ],
     );
   }
 }
+
+Color _networkColor(VeilidPhase phase) => switch (phase) {
+  VeilidPhase.attached => const Color(0xFF8CE6AC),
+  VeilidPhase.connecting => const Color(0xFFCFF36A),
+  VeilidPhase.degraded => const Color(0xFFFFC56B),
+  VeilidPhase.offline => const Color(0xFF95A0AF),
+  VeilidPhase.unavailable => const Color(0xFF77818F),
+  VeilidPhase.error => const Color(0xFFFF8F86),
+};

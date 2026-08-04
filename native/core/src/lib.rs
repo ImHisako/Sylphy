@@ -5,6 +5,7 @@ pub mod envelope;
 pub mod error;
 pub mod ffi;
 pub mod hybrid;
+pub mod ratchet_adapter;
 pub mod vault;
 pub mod veilid_adapter;
 

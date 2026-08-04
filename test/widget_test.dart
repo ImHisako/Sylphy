@@ -11,7 +11,8 @@ void main() {
 
     expect(find.text('Sylphy'), findsOneWidget);
     expect(find.text('Lina Moretti'), findsAtLeastNWidgets(1));
-    expect(find.text('Vault protetto'), findsAtLeastNWidgets(1));
+    expect(find.text('Anteprima protetta'), findsAtLeastNWidgets(1));
+    expect(find.text('Core nativo richiesto'), findsAtLeastNWidgets(1));
   });
 
   testWidgets('sends a local demonstration message', (tester) async {
@@ -27,5 +28,22 @@ void main() {
     await tester.pump();
 
     expect(find.text('Messaggio di prova'), findsAtLeastNWidgets(1));
+  });
+
+  testWidgets('keeps the Veilid status readable on a mobile viewport', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(const SylphyApp());
+    await tester.pump();
+
+    expect(find.text('Core Veilid non incluso'), findsOneWidget);
+    expect(find.text('Scrivi'), findsOneWidget);
+    await tester.tap(find.byTooltip('Stato protezione'));
+    await tester.pumpAndSettle();
+    expect(find.text('Privacy di Sylphy'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 }
