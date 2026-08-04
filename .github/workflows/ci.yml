@@ -199,3 +199,65 @@ jobs:
           name: sylphy-android
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs:
+      - linux
+      - windows
+      - android
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify release version
+        shell: bash
+        run: |
+          app_version="$(sed -n 's/^version: \([^+]*\).*/\1/p' pubspec.yaml)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ -z "$app_version" || "$tag_version" != "$app_version" ]]; then
+            echo "Il tag $GITHUB_REF_NAME non corrisponde alla versione $app_version in pubspec.yaml." >&2
+            exit 1
+          fi
+
+      - name: Download Linux bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: sylphy-linux
+          path: release/linux
+
+      - name: Download Windows bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: sylphy-windows
+          path: release/windows
+
+      - name: Download Android APK
+        uses: actions/download-artifact@v4
+        with:
+          name: sylphy-android
+          path: release/android
+
+      - name: Package release files
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          tar -C release/linux -czf "release-assets/sylphy-${GITHUB_REF_NAME}-linux-x64.tar.gz" .
+          (cd release/windows && zip -r "../../release-assets/sylphy-${GITHUB_REF_NAME}-windows-x64.zip" .)
+          cp release/android/app-release.apk "release-assets/sylphy-${GITHUB_REF_NAME}-android.apk"
+          (cd release-assets && sha256sum sylphy-* > SHA256SUMS.txt)
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --generate-notes --title "Sylphy $GITHUB_REF_NAME"
+          fi

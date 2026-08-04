@@ -3,7 +3,10 @@ use serde::Serialize;
 use crate::error::{CoreError, CoreResult};
 
 #[cfg(feature = "veilid")]
-use std::sync::{Arc, Mutex, OnceLock};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 #[cfg(feature = "veilid")]
 use crate::envelope::MessageEnvelope;
@@ -21,6 +24,7 @@ pub struct VeilidNodeStatus {
     pub attachment_state: String,
     pub public_internet_ready: bool,
     pub live_peer_count: String,
+    pub pending_inbound_envelopes: usize,
 }
 
 impl VeilidNodeStatus {
@@ -32,6 +36,7 @@ impl VeilidNodeStatus {
             attachment_state: "unavailable".to_owned(),
             public_internet_ready: false,
             live_peer_count: "0".to_owned(),
+            pending_inbound_envelopes: 0,
         }
     }
 
@@ -43,6 +48,7 @@ impl VeilidNodeStatus {
             attachment_state: "detached".to_owned(),
             public_internet_ready: false,
             live_peer_count: "0".to_owned(),
+            pending_inbound_envelopes: 0,
         }
     }
 }
@@ -57,6 +63,7 @@ pub fn capability_status() -> VeilidCapabilityStatus {
 #[cfg(feature = "veilid")]
 pub struct VeilidNode {
     api: veilid_core::VeilidAPI,
+    inbound_envelopes: Arc<Mutex<VecDeque<Vec<u8>>>>,
 }
 
 #[cfg(feature = "veilid")]
@@ -69,13 +76,29 @@ impl VeilidNode {
             Some(storage_directory),
             Some(storage_directory),
         );
-        let api = veilid_core::api_startup(Arc::new(|_| {}), config).await?;
+        let inbound_envelopes = Arc::new(Mutex::new(VecDeque::new()));
+        let callback_inbox = Arc::clone(&inbound_envelopes);
+        let api = veilid_core::api_startup(
+            Arc::new(move |update| {
+                if let veilid_core::VeilidUpdate::AppMessage(message) = update {
+                    enqueue_inbound_envelope(&callback_inbox, message.message());
+                }
+            }),
+            config,
+        )
+        .await?;
         api.attach().await?;
-        Ok(Self { api })
+        Ok(Self {
+            api,
+            inbound_envelopes,
+        })
     }
 
     pub fn from_started_api(api: veilid_core::VeilidAPI) -> Self {
-        Self { api }
+        Self {
+            api,
+            inbound_envelopes: Arc::new(Mutex::new(VecDeque::new())),
+        }
     }
 
     pub async fn attach(&self) -> Result<(), veilid_core::VeilidAPIError> {
@@ -90,6 +113,11 @@ impl VeilidNode {
             attachment_state: state.attachment.state.to_string(),
             public_internet_ready: state.attachment.public_internet_ready,
             live_peer_count: state.attachment.live_peer_count.to_string(),
+            pending_inbound_envelopes: self
+                .inbound_envelopes
+                .lock()
+                .map(|inbox| inbox.len())
+                .unwrap_or(0),
         })
     }
 
@@ -133,6 +161,24 @@ impl VeilidNode {
 
     pub async fn shutdown(self) {
         self.api.shutdown().await;
+    }
+}
+
+#[cfg(feature = "veilid")]
+const MAX_PENDING_INBOUND_ENVELOPES: usize = 256;
+
+#[cfg(feature = "veilid")]
+const MAX_INBOUND_ENVELOPE_BYTES: usize = 32_768;
+
+#[cfg(feature = "veilid")]
+fn enqueue_inbound_envelope(inbox: &Mutex<VecDeque<Vec<u8>>>, payload: &[u8]) {
+    if payload.is_empty() || payload.len() > MAX_INBOUND_ENVELOPE_BYTES {
+        return;
+    }
+    if let Ok(mut inbox) = inbox.lock()
+        && inbox.len() < MAX_PENDING_INBOUND_ENVELOPES
+    {
+        inbox.push_back(payload.to_vec());
     }
 }
 

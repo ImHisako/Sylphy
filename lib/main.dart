@@ -3,9 +3,12 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import 'core/messaging/secure_messaging_bridge.dart';
+import 'core/messaging/sylphy_messaging_bridge.dart';
 import 'core/native/native_core.dart';
+import 'core/profile/user_profile.dart';
 import 'core/veilid/veilid_service.dart';
 import 'features/messenger/messenger_home.dart';
+import 'features/onboarding/profile_onboarding.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -18,11 +21,15 @@ class SylphyApp extends StatefulWidget {
     this.bridge,
     this.nativeCore,
     this.veilidService,
+    this.profileStore,
+    this.photoPicker,
   });
 
   final SecureMessagingBridge? bridge;
-  final NativeCoreClient? nativeCore;
+  final NativeCoreApi? nativeCore;
   final VeilidService? veilidService;
+  final UserProfileStore? profileStore;
+  final ProfilePhotoPicker? photoPicker;
 
   @override
   State<SylphyApp> createState() => _SylphyAppState();
@@ -32,19 +39,48 @@ class _SylphyAppState extends State<SylphyApp> {
   late final SecureMessagingBridge _bridge;
   late final VeilidService _veilidService;
   late final bool _ownsVeilidService;
+  late final UserProfileStore _profileStore;
+  UserProfile? _profile;
+  bool _profileLoaded = false;
 
   @override
   void initState() {
     super.initState();
-    _bridge = widget.bridge ?? LocalDemoMessagingBridge.seeded();
+    _bridge =
+        widget.bridge ??
+        (widget.nativeCore == null
+            ? const UnavailableMessagingBridge()
+            : SylphyMessagingBridge(core: widget.nativeCore!));
     _ownsVeilidService = widget.veilidService == null;
     _veilidService =
         widget.veilidService ?? VeilidService(nativeCore: widget.nativeCore);
+    _profileStore = widget.profileStore ?? FileUserProfileStore();
+    unawaited(_loadProfile());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         unawaited(_veilidService.start());
       }
     });
+  }
+
+  Future<void> _loadProfile() async {
+    UserProfile? profile;
+    try {
+      profile = await _profileStore.load();
+    } on Exception {
+      profile = null;
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _profile = profile;
+      _profileLoaded = true;
+    });
+  }
+
+  void _completeOnboarding(UserProfile profile) {
+    setState(() => _profile = profile);
   }
 
   @override
@@ -121,14 +157,23 @@ class _SylphyAppState extends State<SylphyApp> {
           ),
         ),
       ),
-      home: AnimatedBuilder(
-        animation: _veilidService,
-        builder: (context, _) => MessengerHome(
-          bridge: _bridge,
-          nativeCore: widget.nativeCore,
-          veilidService: _veilidService,
-        ),
-      ),
+      home: !_profileLoaded
+          ? const Scaffold(body: Center(child: CircularProgressIndicator()))
+          : _profile == null
+          ? ProfileOnboarding(
+              profileStore: _profileStore,
+              photoPicker: widget.photoPicker,
+              onCompleted: _completeOnboarding,
+            )
+          : AnimatedBuilder(
+              animation: _veilidService,
+              builder: (context, _) => MessengerHome(
+                bridge: _bridge,
+                nativeCore: widget.nativeCore,
+                veilidService: _veilidService,
+                profile: _profile!,
+              ),
+            ),
     );
   }
 }

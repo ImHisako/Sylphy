@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{
     CORE_ABI_VERSION, PROTOCOL_VERSION, bundle::PublicBundle, error::CoreError, hybrid,
-    ratchet_adapter, vault, veilid_adapter,
+    messaging_adapter, ratchet_adapter, vault, veilid_adapter,
 };
 
 #[derive(Debug, Deserialize)]
@@ -21,6 +21,14 @@ enum CoreRequest {
     },
     VeilidStatus,
     StopVeilid,
+    ListConversations,
+    ListMessages {
+        conversation_id: String,
+    },
+    AddContact {
+        display_name: String,
+        invitation_code: String,
+    },
     ValidatePublicBundle {
         bundle: PublicBundle,
     },
@@ -90,12 +98,15 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
                 "ratchet": ratchet_adapter::capability_status(),
             }),
         }),
-        CoreRequest::StartVeilid { storage_directory } => Ok(CoreResponse {
-            ok: true,
-            code: "ok",
-            data: serde_json::to_value(veilid_adapter::start_node(&storage_directory)?)
-                .map_err(|_| CoreError::Internal)?,
-        }),
+        CoreRequest::StartVeilid { storage_directory } => {
+            messaging_adapter::configure_storage(&storage_directory)?;
+            Ok(CoreResponse {
+                ok: true,
+                code: "ok",
+                data: serde_json::to_value(veilid_adapter::start_node(&storage_directory)?)
+                    .map_err(|_| CoreError::Internal)?,
+            })
+        }
         CoreRequest::VeilidStatus => Ok(CoreResponse {
             ok: true,
             code: "ok",
@@ -107,6 +118,24 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
             code: "ok",
             data: serde_json::to_value(veilid_adapter::stop_node()?)
                 .map_err(|_| CoreError::Internal)?,
+        }),
+        CoreRequest::ListConversations => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::list_conversations()?,
+        }),
+        CoreRequest::ListMessages { conversation_id } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::list_messages(&conversation_id)?,
+        }),
+        CoreRequest::AddContact {
+            display_name,
+            invitation_code,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::add_contact(&display_name, &invitation_code)?,
         }),
         CoreRequest::ValidatePublicBundle { bundle } => {
             bundle.validate()?;

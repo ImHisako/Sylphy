@@ -4,7 +4,7 @@ import 'dart:io';
 
 import 'package:ffi/ffi.dart';
 
-const _expectedAbiVersion = 1;
+const _expectedAbiVersion = 3;
 
 typedef _NativeAbiVersion = Uint32 Function();
 typedef _DartAbiVersion = int Function();
@@ -13,7 +13,30 @@ typedef _DartCall = Pointer<Utf8> Function(Pointer<Utf8> request);
 typedef _NativeFreeString = Void Function(Pointer<Utf8> value);
 typedef _DartFreeString = void Function(Pointer<Utf8> value);
 
-class NativeCoreClient {
+abstract interface class NativeCoreApi {
+  NativeCoreResponse status();
+
+  NativeCoreResponse startVeilid(String storageDirectory);
+
+  NativeCoreResponse veilidStatus();
+
+  NativeCoreResponse stopVeilid();
+
+  NativeCoreResponse listConversations();
+
+  NativeCoreResponse listMessages(String conversationId);
+
+  NativeCoreResponse addContact({
+    required String displayName,
+    required String invitationCode,
+  });
+
+  NativeCoreResponse verifyHybridPrimitives();
+
+  NativeCoreResponse verifyDoubleRatchet();
+}
+
+class NativeCoreClient implements NativeCoreApi {
   NativeCoreClient._(this._call, this._freeString, this.abiVersion);
 
   final _DartCall _call;
@@ -47,19 +70,50 @@ class NativeCoreClient {
     }
   }
 
+  @override
   NativeCoreResponse status() => call(const {'command': 'status'});
 
+  @override
   NativeCoreResponse startVeilid(String storageDirectory) =>
       call({'command': 'start_veilid', 'storage_directory': storageDirectory});
 
+  @override
   NativeCoreResponse veilidStatus() => call(const {'command': 'veilid_status'});
 
+  @override
   NativeCoreResponse stopVeilid() => call(const {'command': 'stop_veilid'});
 
+  @override
+  NativeCoreResponse listConversations() {
+    return call(const {'command': 'list_conversations'});
+  }
+
+  @override
+  NativeCoreResponse listMessages(String conversationId) {
+    return call({
+      'command': 'list_messages',
+      'conversation_id': conversationId,
+    });
+  }
+
+  @override
+  NativeCoreResponse addContact({
+    required String displayName,
+    required String invitationCode,
+  }) {
+    return call({
+      'command': 'add_contact',
+      'display_name': displayName,
+      'invitation_code': invitationCode,
+    });
+  }
+
+  @override
   NativeCoreResponse verifyHybridPrimitives() {
     return call(const {'command': 'hybrid_self_test'});
   }
 
+  @override
   NativeCoreResponse verifyDoubleRatchet() {
     return call(const {'command': 'ratchet_self_test'});
   }

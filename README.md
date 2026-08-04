@@ -4,8 +4,10 @@ Client Flutter responsive per una messenger privata, pensato per **Windows**, **
 
 ## Funzionalità incluse
 
-- lista conversazioni con ricerca, stati di presenza e contatori non letti;
-- chat con composer, invio locale dimostrativo e conferme di consegna;
+- onboarding al primo avvio con nome obbligatorio e foto profilo facoltativa, persistiti nello storage applicativo locale;
+- import di una persona dalla home tramite codice invito Sylphy validato dal core nativo, con stato iniziale “in attesa di verifica”;
+- inbox nativa fail-closed, senza contatti o messaggi dimostrativi;
+- chat e composer disponibili solo per record validati dal core nativo;
 - schermate per fingerprint e stato di verifica del contatto;
 - layout desktop adattivo a tre colonne con navigation rail e layout mobile dedicato;
 - stato reale del nodo Veilid (avvio, attach, qualità della rete e peer aggregati) senza esporre NodeId o route;
@@ -48,15 +50,17 @@ flutter build linux --release
 
 Gli script compilano il core con le feature `veilid,signal-ratchet`. La build richiede anche il compilatore Protobuf `protoc`; Android richiede i target Rust e `cargo-ndk`, Windows Visual Studio Build Tools con C++, Linux Clang/CMake/Ninja, GTK 3 e liblzma. I dettagli dell'ABI, delle route private e del bootstrap Android sono in `native/README.md` e `specs/native-core.md`.
 
-Quando `sylphy_core.dll` o `libsylphy_core.so` è disponibile, l'app crea lo storage applicativo, avvia `veilid-core 0.5.7`, esegue `attach` e aggiorna periodicamente lo stato mostrato nella UI. Lo shutdown dell'app arresta il nodo in modo deterministico. Veilid non riceve plaintext: il relativo adapter accetta soltanto `MessageEnvelope` applicativi già autenticati e cifrati e impone un limite di 32 KiB.
+Quando `sylphy_core.dll` o `libsylphy_core.so` è disponibile, l'app crea uno storage applicativo persistente, avvia `veilid-core 0.5.7`, esegue `attach` e aggiorna periodicamente lo stato mostrato nella UI. Gli errori di startup e lo stato detached attivano un retry automatico. Su Android il manifest release concede i permessi di rete richiesti dal core. Lo shutdown dell'app arresta il nodo in modo deterministico.
+
+Il callback nativo conserva in una coda limitata soltanto gli `AppMessage` opachi ricevuti. Veilid non riceve plaintext: l'adapter accetta `MessageEnvelope` applicativi già autenticati e cifrati, impone un limite di 32 KiB e non espone NodeId, route o payload nelle risposte FFI.
 
 ## GitHub Actions
 
-`.github/workflows/ci.yml` esegue checkout del commit caricato, test e analisi su Ubuntu, quindi produce bundle Linux e Windows completi del core Veilid. Gli artifact `sylphy-linux` e `sylphy-windows` sono disponibili dalla run GitHub. Il workflow ha permessi repository in sola lettura: non genera push ricorsivi e non modifica il branch.
+`.github/workflows/ci.yml` esegue checkout del commit caricato, test e analisi su Ubuntu, quindi produce bundle Android, Linux e Windows completi del core Veilid. I job ordinari hanno accesso in sola lettura; sui tag `v*` il solo job finale riceve `contents: write` per creare o aggiornare la GitHub Release.
 
 ## Nota di sicurezza
 
-L'app avvia ancora `LocalDemoMessagingBridge` per rendere la UI esplorabile. Il nodo Veilid è reale quando la libreria nativa è inclusa, ma le conversazioni demo non vengono trasmesse: il bridge demo non esegue cifratura, non crea chiavi e non invia dati.
+L'app non carica conversazioni dimostrative. Con ABI nativa assente mostra un inbox vuoto; con ABI v3 usa `SylphyMessagingBridge`, che legge soltanto record restituiti dal core Rust. Un codice invito è accettato solo dopo la decodifica e la verifica nativa del bundle pubblico Ed25519/X25519/ML-KEM; il relativo contatto resta pending e non abilita il composer. Il composer non inoltra plaintext finché vault, contatto verificato e sessione persistente non sono disponibili.
 
 Il core include `signalapp/libsignal` fissato al tag `v0.99.3` e implementa creazione prekey, apertura sessione, cifratura/decrittazione, rotazione DH/PQ e gestione dei messaggi fuori ordine. Il self-test FFI verifica l'intero percorso e la serializzazione opaca destinata a Veilid. L'invio UI resta intenzionalmente disabilitato finché identity store, prekey store e session store non saranno persistiti nel vault cifrato: non esiste alcun fallback a sessioni effimere o non ratchettate.
 

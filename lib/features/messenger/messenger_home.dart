@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../core/messaging/models.dart';
 import '../../core/messaging/secure_messaging_bridge.dart';
 import '../../core/native/native_core.dart';
+import '../../core/profile/user_profile.dart';
 import '../../core/veilid/veilid_service.dart';
 
 class MessengerHome extends StatefulWidget {
@@ -10,32 +11,86 @@ class MessengerHome extends StatefulWidget {
     super.key,
     required this.bridge,
     required this.veilidService,
+    required this.profile,
     this.nativeCore,
   });
 
   final SecureMessagingBridge bridge;
-  final NativeCoreClient? nativeCore;
+  final NativeCoreApi? nativeCore;
   final VeilidService veilidService;
+  final UserProfile profile;
 
   @override
   State<MessengerHome> createState() => _MessengerHomeState();
 }
 
 class _MessengerHomeState extends State<MessengerHome> {
-  late String _activeConversationId;
+  String? _activeConversationId;
 
   @override
   void initState() {
     super.initState();
-    _activeConversationId = widget.bridge.listConversations().first.id;
+    final conversations = widget.bridge.listConversations();
+    _activeConversationId = conversations.isEmpty
+        ? null
+        : conversations.first.id;
   }
 
   Future<void> _selectConversation(String conversationId) async {
-    await widget.bridge.markConversationRead(conversationId);
+    try {
+      await widget.bridge.markConversationRead(conversationId);
+    } on SecureMessagingException {
+      // A newly imported contact has no authenticated session yet, but its
+      // safety details must remain inspectable from the UI.
+    }
     if (!mounted) {
       return;
     }
     setState(() => _activeConversationId = conversationId);
+  }
+
+  Future<void> _addContact() async {
+    final draft = await showDialog<_ContactDraft>(
+      context: context,
+      builder: (context) => const _AddContactDialog(),
+    );
+    if (draft == null || !mounted) {
+      return;
+    }
+    try {
+      final contactId = await widget.bridge.addContact(
+        displayName: draft.displayName,
+        invitationCode: draft.invitationCode,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() => _activeConversationId = contactId);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${draft.displayName} è stato aggiunto. Verifica il fingerprint prima di scrivere.',
+          ),
+        ),
+      );
+    } on SecureMessagingException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      final message = switch (error.code) {
+        'native_core_unavailable' =>
+          'Il core nativo non è disponibile: ricompila l’app con ABI 3.',
+        'feature_unavailable' =>
+          'Lo storage nativo non è ancora pronto. Attendi l’avvio del nodo e riprova.',
+        'verification_failed' =>
+          'Codice già importato, scaduto oppure firma non valida.',
+        'limit_exceeded' => 'Rubrica piena oppure codice troppo grande.',
+        _ => 'Codice invito non valido.',
+      };
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    }
   }
 
   void _refresh() {
@@ -49,19 +104,27 @@ class _MessengerHomeState extends State<MessengerHome> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final conversations = widget.bridge.listConversations();
-        final activeConversation = conversations.firstWhere(
-          (conversation) => conversation.id == _activeConversationId,
-          orElse: () => conversations.first,
-        );
+        Conversation? activeConversation;
+        for (final conversation in conversations) {
+          if (conversation.id == _activeConversationId) {
+            activeConversation = conversation;
+            break;
+          }
+        }
+        activeConversation ??= conversations.isEmpty
+            ? null
+            : conversations.first;
         if (constraints.maxWidth >= 900) {
           return _DesktopMessenger(
             bridge: widget.bridge,
             nativeCore: widget.nativeCore,
             veilidService: widget.veilidService,
+            profile: widget.profile,
             conversations: conversations,
             activeConversation: activeConversation,
             onConversationSelected: _selectConversation,
             onChanged: _refresh,
+            onAddContact: _addContact,
             showDetails: constraints.maxWidth >= 1180,
           );
         }
@@ -69,9 +132,11 @@ class _MessengerHomeState extends State<MessengerHome> {
           bridge: widget.bridge,
           nativeCore: widget.nativeCore,
           veilidService: widget.veilidService,
+          profile: widget.profile,
           conversations: conversations,
           onConversationSelected: _selectConversation,
           onChanged: _refresh,
+          onAddContact: _addContact,
         );
       },
     );
@@ -83,20 +148,24 @@ class _DesktopMessenger extends StatelessWidget {
     required this.bridge,
     required this.nativeCore,
     required this.veilidService,
+    required this.profile,
     required this.conversations,
     required this.activeConversation,
     required this.onConversationSelected,
     required this.onChanged,
+    required this.onAddContact,
     required this.showDetails,
   });
 
   final SecureMessagingBridge bridge;
-  final NativeCoreClient? nativeCore;
+  final NativeCoreApi? nativeCore;
   final VeilidService veilidService;
+  final UserProfile profile;
   final List<Conversation> conversations;
-  final Conversation activeConversation;
+  final Conversation? activeConversation;
   final Future<void> Function(String conversationId) onConversationSelected;
   final VoidCallback onChanged;
+  final VoidCallback onAddContact;
   final bool showDetails;
 
   @override
@@ -107,6 +176,8 @@ class _DesktopMessenger extends StatelessWidget {
           children: [
             _DesktopAppRail(
               snapshot: veilidService.snapshot,
+              profile: profile,
+              onAddContact: onAddContact,
               onPrivacyPressed: () =>
                   _showPrivacyOverview(context, nativeCore, veilidService),
             ),
@@ -116,25 +187,31 @@ class _DesktopMessenger extends StatelessWidget {
               child: _ConversationSidebar(
                 veilidSnapshot: veilidService.snapshot,
                 conversations: conversations,
-                activeConversationId: activeConversation.id,
+                activeConversationId: activeConversation?.id,
                 onConversationSelected: onConversationSelected,
+                onAddContact: onAddContact,
               ),
             ),
             const VerticalDivider(width: 1),
             Expanded(
-              child: _ChatPane(
-                bridge: bridge,
-                conversation: activeConversation,
-                onChanged: onChanged,
-                showHeader: true,
-              ),
+              child: activeConversation == null
+                  ? _EmptyInbox(
+                      snapshot: veilidService.snapshot,
+                      hasNativeCore: nativeCore != null,
+                    )
+                  : _ChatPane(
+                      bridge: bridge,
+                      conversation: activeConversation!,
+                      onChanged: onChanged,
+                      showHeader: true,
+                    ),
             ),
-            if (showDetails) ...[
+            if (showDetails && activeConversation != null) ...[
               const VerticalDivider(width: 1),
               SizedBox(
                 width: 292,
                 child: _ConversationDetails(
-                  conversation: activeConversation,
+                  conversation: activeConversation!,
                   veilidSnapshot: veilidService.snapshot,
                 ),
               ),
@@ -146,13 +223,99 @@ class _DesktopMessenger extends StatelessWidget {
   }
 }
 
+class _EmptyInbox extends StatelessWidget {
+  const _EmptyInbox({
+    required this.snapshot,
+    required this.hasNativeCore,
+    this.compact = false,
+  });
+
+  final VeilidSnapshot snapshot;
+  final bool hasNativeCore;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final content = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: compact ? 54 : 68,
+          height: compact ? 54 : 68,
+          decoration: BoxDecoration(
+            color: _networkColor(snapshot.phase).withValues(alpha: 0.12),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(
+            Icons.mark_chat_unread_outlined,
+            size: compact ? 26 : 32,
+            color: _networkColor(snapshot.phase),
+          ),
+        ),
+        const SizedBox(height: 18),
+        const Text(
+          'Nessuna conversazione sicura',
+          textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          hasNativeCore
+              ? 'Il bridge nativo è attivo. Le conversazioni appariranno solo dopo la creazione del vault e la verifica di un contatto.'
+              : 'Installa il core nativo per creare un’identità e collegarti alla rete Veilid.',
+          textAlign: TextAlign.center,
+          style: const TextStyle(color: Color(0xFFAEB7C3), height: 1.4),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          snapshot.title,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: _networkColor(snapshot.phase),
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
+    );
+
+    if (compact) {
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+          child: content,
+        ),
+      );
+    }
+    return DecoratedBox(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF11151B), Color(0xFF0C0F14)],
+        ),
+      ),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 460),
+          child: Padding(padding: const EdgeInsets.all(32), child: content),
+        ),
+      ),
+    );
+  }
+}
+
 class _DesktopAppRail extends StatelessWidget {
   const _DesktopAppRail({
     required this.snapshot,
+    required this.profile,
+    required this.onAddContact,
     required this.onPrivacyPressed,
   });
 
   final VeilidSnapshot snapshot;
+  final UserProfile profile;
+  final VoidCallback onAddContact;
   final VoidCallback onPrivacyPressed;
 
   @override
@@ -193,9 +356,9 @@ class _DesktopAppRail extends StatelessWidget {
                 selected: true,
               ),
               _RailButton(
-                icon: Icons.people_outline_rounded,
-                tooltip: 'Contatti',
-                onPressed: () => _showNotReadyNotice(context, 'Contatti'),
+                icon: Icons.person_add_alt_1_rounded,
+                tooltip: 'Aggiungi contatto',
+                onPressed: onAddContact,
               ),
               _RailButton(
                 icon: Icons.folder_copy_outlined,
@@ -231,6 +394,8 @@ class _DesktopAppRail extends StatelessWidget {
                 tooltip: 'Privacy e rete',
                 onPressed: onPrivacyPressed,
               ),
+              const SizedBox(height: 8),
+              _ProfileAvatar(profile: profile, radius: 18),
             ],
           ),
         ),
@@ -279,12 +444,14 @@ class _ConversationSidebar extends StatefulWidget {
     required this.veilidSnapshot,
     required this.activeConversationId,
     required this.onConversationSelected,
+    required this.onAddContact,
   });
 
   final List<Conversation> conversations;
   final VeilidSnapshot veilidSnapshot;
-  final String activeConversationId;
+  final String? activeConversationId;
   final Future<void> Function(String conversationId) onConversationSelected;
+  final VoidCallback onAddContact;
 
   @override
   State<_ConversationSidebar> createState() => _ConversationSidebarState();
@@ -307,9 +474,19 @@ class _ConversationSidebarState extends State<_ConversationSidebar> {
       color: const Color(0xFF15181E),
       child: Column(
         children: [
-          const Padding(
-            padding: EdgeInsets.fromLTRB(24, 24, 24, 18),
-            child: _BrandMark(),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 18, 12, 12),
+            child: Row(
+              children: [
+                const Expanded(child: _BrandMark()),
+                IconButton(
+                  key: const ValueKey('desktop-add-contact'),
+                  tooltip: 'Aggiungi contatto',
+                  onPressed: widget.onAddContact,
+                  icon: const Icon(Icons.person_add_alt_1_rounded),
+                ),
+              ],
+            ),
           ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -380,17 +557,21 @@ class _MobileConversationList extends StatelessWidget {
     required this.bridge,
     required this.nativeCore,
     required this.veilidService,
+    required this.profile,
     required this.conversations,
     required this.onConversationSelected,
     required this.onChanged,
+    required this.onAddContact,
   });
 
   final SecureMessagingBridge bridge;
-  final NativeCoreClient? nativeCore;
+  final NativeCoreApi? nativeCore;
   final VeilidService veilidService;
+  final UserProfile profile;
   final List<Conversation> conversations;
   final Future<void> Function(String conversationId) onConversationSelected;
   final VoidCallback onChanged;
+  final VoidCallback onAddContact;
 
   @override
   Widget build(BuildContext context) {
@@ -398,6 +579,11 @@ class _MobileConversationList extends StatelessWidget {
       appBar: AppBar(
         title: const _BrandMark(compact: true),
         actions: [
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: _ProfileAvatar(profile: profile, radius: 18),
+          ),
+          const SizedBox(width: 4),
           IconButton(
             tooltip: 'Stato protezione',
             onPressed: () =>
@@ -411,7 +597,7 @@ class _MobileConversationList extends StatelessWidget {
         top: false,
         child: ListView.separated(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
-          itemCount: conversations.length + 2,
+          itemCount: conversations.isEmpty ? 3 : conversations.length + 2,
           separatorBuilder: (context, index) => const SizedBox(height: 8),
           itemBuilder: (context, index) {
             if (index == 0) {
@@ -432,6 +618,13 @@ class _MobileConversationList extends StatelessWidget {
                     letterSpacing: 1.2,
                   ),
                 ),
+              );
+            }
+            if (conversations.isEmpty) {
+              return _EmptyInbox(
+                snapshot: veilidService.snapshot,
+                hasNativeCore: nativeCore != null,
+                compact: true,
               );
             }
             final conversation = conversations[index - 2];
@@ -458,11 +651,12 @@ class _MobileConversationList extends StatelessWidget {
         ),
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _showNotReadyNotice(context, 'Nuova conversazione'),
+        key: const ValueKey('mobile-add-contact'),
+        onPressed: onAddContact,
         backgroundColor: Theme.of(context).colorScheme.primary,
         foregroundColor: Theme.of(context).colorScheme.onPrimary,
         icon: const Icon(Icons.edit_square),
-        label: const Text('Scrivi'),
+        label: const Text('Aggiungi contatto'),
       ),
     );
   }
@@ -572,14 +766,27 @@ class _ChatPaneState extends State<_ChatPane> {
     if (text.trim().isEmpty) {
       return;
     }
-    _composerController.clear();
-    await widget.bridge.sendText(
-      conversationId: widget.conversation.id,
-      plaintext: text,
-    );
+    try {
+      await widget.bridge.sendText(
+        conversationId: widget.conversation.id,
+        plaintext: text,
+      );
+    } on SecureMessagingException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Invio bloccato: vault e sessione verificata non disponibili.',
+            ),
+          ),
+        );
+      }
+      return;
+    }
     if (!mounted) {
       return;
     }
+    _composerController.clear();
     setState(() {});
     widget.onChanged();
   }
@@ -1126,6 +1333,181 @@ class _BrandMark extends StatelessWidget {
   }
 }
 
+class _ProfileAvatar extends StatelessWidget {
+  const _ProfileAvatar({required this.profile, required this.radius});
+
+  final UserProfile profile;
+  final double radius;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: profile.displayName,
+      child: CircleAvatar(
+        key: const ValueKey('current-profile-avatar'),
+        radius: radius,
+        backgroundColor: const Color(0xFF2A313B),
+        backgroundImage: profile.photoBytes == null
+            ? null
+            : MemoryImage(profile.photoBytes!),
+        child: profile.photoBytes == null
+            ? Text(
+                profile.initials,
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.primary,
+                  fontSize: radius * 0.72,
+                  fontWeight: FontWeight.w900,
+                ),
+              )
+            : null,
+      ),
+    );
+  }
+}
+
+class _ContactDraft {
+  const _ContactDraft({
+    required this.displayName,
+    required this.invitationCode,
+  });
+
+  final String displayName;
+  final String invitationCode;
+}
+
+class _AddContactDialog extends StatefulWidget {
+  const _AddContactDialog();
+
+  @override
+  State<_AddContactDialog> createState() => _AddContactDialogState();
+}
+
+class _AddContactDialogState extends State<_AddContactDialog> {
+  final _formKey = GlobalKey<FormState>();
+  final _nameController = TextEditingController();
+  final _invitationController = TextEditingController();
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _invitationController.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    if (!_formKey.currentState!.validate()) {
+      return;
+    }
+    var invitationCode = _invitationController.text.trim();
+    if (invitationCode.toLowerCase().startsWith('sylphy:')) {
+      invitationCode = invitationCode.substring('sylphy:'.length).trim();
+    }
+    Navigator.of(context).pop(
+      _ContactDraft(
+        displayName: _nameController.text.trim(),
+        invitationCode: invitationCode,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Row(
+        children: [
+          Icon(Icons.person_add_alt_1_rounded),
+          SizedBox(width: 12),
+          Flexible(child: Text('Aggiungi una persona')),
+        ],
+      ),
+      content: SizedBox(
+        width: 460,
+        child: SingleChildScrollView(
+          child: Form(
+            key: _formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Chiedi alla persona il suo codice invito Sylphy. Il core nativo controllerà identità, firme e scadenza prima di aggiungerla.',
+                  style: TextStyle(color: Color(0xFFB8C1CC), height: 1.4),
+                ),
+                const SizedBox(height: 20),
+                TextFormField(
+                  key: const ValueKey('contact-name'),
+                  controller: _nameController,
+                  autofocus: true,
+                  maxLength: 64,
+                  textCapitalization: TextCapitalization.words,
+                  decoration: const InputDecoration(
+                    labelText: 'Nome contatto',
+                    prefixIcon: Icon(Icons.person_outline_rounded),
+                  ),
+                  validator: (value) => value == null || value.trim().isEmpty
+                      ? 'Inserisci un nome.'
+                      : null,
+                ),
+                const SizedBox(height: 10),
+                TextFormField(
+                  key: const ValueKey('contact-invitation-code'),
+                  controller: _invitationController,
+                  minLines: 3,
+                  maxLines: 6,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  decoration: const InputDecoration(
+                    labelText: 'Codice invito',
+                    hintText: 'sylphy:…',
+                    alignLabelWithHint: true,
+                    prefixIcon: Icon(Icons.qr_code_2_rounded),
+                  ),
+                  validator: (value) => value == null || value.trim().isEmpty
+                      ? 'Incolla il codice invito.'
+                      : null,
+                ),
+                const SizedBox(height: 12),
+                const Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.verified_user_outlined,
+                      size: 18,
+                      color: Color(0xFFCFF36A),
+                    ),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Il contatto resterà in attesa finché non confronterai il fingerprint di sicurezza.',
+                        style: TextStyle(
+                          color: Color(0xFF9299A5),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Annulla'),
+        ),
+        FilledButton.icon(
+          key: const ValueKey('confirm-add-contact'),
+          onPressed: _submit,
+          icon: const Icon(Icons.person_add_alt_1_rounded),
+          label: const Text('Aggiungi'),
+        ),
+      ],
+    );
+  }
+}
+
 class _VaultStatusCard extends StatelessWidget {
   const _VaultStatusCard({required this.veilidSnapshot, this.compact = false});
 
@@ -1163,7 +1545,7 @@ class _VaultStatusCard extends StatelessWidget {
               children: [
                 Text(
                   veilidSnapshot.phase == VeilidPhase.unavailable
-                      ? 'Anteprima protetta'
+                      ? 'Core nativo non disponibile'
                       : 'Core di sicurezza',
                   style: const TextStyle(
                     fontSize: 12,
@@ -1173,8 +1555,8 @@ class _VaultStatusCard extends StatelessWidget {
                 const SizedBox(height: 2),
                 Text(
                   veilidSnapshot.phase == VeilidPhase.unavailable
-                      ? 'Core nativo richiesto'
-                      : 'Rust + profilo ibrido disponibile',
+                      ? 'Nessun dato dimostrativo caricato'
+                      : 'Bridge Rust + Veilid disponibile',
                   style: const TextStyle(
                     color: Color(0xFFAEB7C3),
                     fontSize: 11,
@@ -1395,7 +1777,7 @@ void _showNotReadyNotice(BuildContext context, String feature) {
 
 void _showPrivacyOverview(
   BuildContext context,
-  NativeCoreClient? nativeCore,
+  NativeCoreApi? nativeCore,
   VeilidService veilidService,
 ) {
   showModalBottomSheet<void>(
@@ -1421,7 +1803,7 @@ class _PrivacyOverviewSheet extends StatefulWidget {
     required this.veilidService,
   });
 
-  final NativeCoreClient? nativeCore;
+  final NativeCoreApi? nativeCore;
   final VeilidService veilidService;
 
   @override
@@ -1487,8 +1869,8 @@ class _PrivacyOverviewSheetState extends State<_PrivacyOverviewSheet> {
               const SizedBox(height: 12),
               Text(
                 coreLoaded
-                    ? 'Il core Rust è caricato. Il nodo Veilid usa storage isolato e pubblica soltanto envelope applicativi opachi.'
-                    : 'La libreria Rust non è ancora distribuita: l’interfaccia usa esclusivamente dati demo in memoria.',
+                    ? 'Il bridge Rust è caricato. Il nodo Veilid usa storage isolato e accetta soltanto envelope applicativi opachi.'
+                    : 'La libreria Rust non è disponibile. Sylphy resta chiuso e non mostra conversazioni dimostrative.',
                 style: const TextStyle(color: Color(0xFFC1C8D2), height: 1.45),
               ),
               const SizedBox(height: 16),

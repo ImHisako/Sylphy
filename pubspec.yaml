@@ -35,6 +35,8 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
   ffi: ^2.1.4
+  file_selector: 1.1.0
+  path_provider: 2.1.5
 
 dev_dependencies:
   flutter_test:
@@ -46,6 +48,14 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^5.0.0
+
+# Keep the endorsed implementations compatible with the Flutter 3.35.x
+# release toolchain used by CI. Newer lines require Flutter 3.38+.
+dependency_overrides:
+  path_provider_android: 2.2.20
+  path_provider_foundation: 2.4.3
+  path_provider_linux: 2.2.1
+  path_provider_platform_interface: 2.1.2
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
