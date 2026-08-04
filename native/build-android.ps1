@@ -4,7 +4,7 @@ param(
 )
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$manifestPath = Join-Path $PSScriptRoot 'core\Cargo.toml'
+$nativeCorePath = Join-Path $PSScriptRoot 'core'
 $jniLibrariesPath = Join-Path $projectRoot 'android\app\src\main\jniLibs'
 $buildArguments = @(
     'ndk',
@@ -13,7 +13,6 @@ $buildArguments = @(
     '-t', 'x86_64',
     '-o', $jniLibrariesPath,
     'build',
-    '--manifest-path', $manifestPath,
     '--features', 'veilid,signal-ratchet'
 )
 
@@ -21,7 +20,13 @@ if ($Profile -eq 'release') {
     $buildArguments += '--release'
 }
 
-& cargo @buildArguments
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+Push-Location $nativeCorePath
+try {
+    & cargo @buildArguments
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+finally {
+    Pop-Location
 }

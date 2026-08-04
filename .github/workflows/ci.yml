@@ -125,7 +125,7 @@ jobs:
           if (-not $visualStudio -or $visualStudioVersion -notlike '17.*') {
             throw "Flutter $env:FLUTTER_VERSION richiede Visual Studio 2022 (17.x); rilevato: $visualStudioVersion"
           }
-          Write-Host "Toolchain Visual Studio $visualStudioVersion: $visualStudio"
+          Write-Host "Toolchain Visual Studio ${visualStudioVersion}: $visualStudio"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
