@@ -55,8 +55,18 @@ class VeilidSnapshot {
         'Core compilato senza Veilid: il retry non può risolvere questa build.',
       'platform_not_initialized' =>
         'Bootstrap Android non completato · nuovo tentativo automatico',
+      'veilid_protected_store_failed' =>
+        'Archivio sicuro Android non inizializzato. Chiudi e riapri l’app.',
+      'veilid_local_store_failed' =>
+        'Archivio locale Veilid non accessibile · nuovo tentativo automatico',
+      'veilid_configuration_failed' =>
+        'Configurazione Veilid rifiutata da questa build.',
+      'veilid_restarting' =>
+        'Riavvio del nodo ancora in corso · nuovo tentativo automatico',
       'network_startup_failed' =>
-        'Avvio rete non riuscito · nuovo tentativo automatico',
+        'Inizializzazione Veilid non riuscita · nuovo tentativo automatico',
+      'network_attach_failed' =>
+        'Collegamento alla rete non riuscito · nuovo tentativo automatico',
       null => 'Connessione non riuscita · nuovo tentativo automatico',
       _ =>
         'Connessione non riuscita ($diagnosticCode) · nuovo tentativo automatico',

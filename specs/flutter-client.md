@@ -27,6 +27,6 @@ L'implementazione di produzione di `SecureMessagingBridge` deve essere un adapte
 
 ## Stato attuale
 
-`NativeCoreClient` carica opzionalmente l'ABI C v4 del core Rust su Windows, Linux e Android ed espone identità pubblica, stato del core, inbox nativa, import contatto, self-test del profilo ibrido, self-test Double Ratchet e lifecycle Veilid. `VeilidService` avvia il nodo nello storage applicativo persistente, ritenta startup e attachment falliti e distingue feature assente, bootstrap Android incompleto ed errore di rete senza esporre dettagli interni.
+`NativeCoreClient` carica opzionalmente l'ABI C v4 del core Rust su Windows, Linux e Android ed espone identità pubblica, stato del core, inbox nativa, import contatto, self-test del profilo ibrido, self-test Double Ratchet e lifecycle Veilid. `VeilidService` avvia il nodo nello storage applicativo persistente, ritenta startup e attachment falliti e distingue feature assente, bootstrap Android, protected/local store, configurazione e rete senza esporre dettagli interni.
 
 `main.dart` non seleziona alcun bridge dimostrativo. Senza core usa `UnavailableMessagingBridge`, che restituisce un inbox vuoto e rifiuta import e invio; con il core usa `SylphyMessagingBridge`, che accetta soltanto read model nativi validi e rifiuta il plaintext finché la sessione sicura persistente non è pronta. I fake restano confinati ai test widget. Il provider Signal è integrato e verificabile dal pannello Privacy; apertura sessione e invio UI restano bloccati fino alla persistenza cifrata degli store Signal.

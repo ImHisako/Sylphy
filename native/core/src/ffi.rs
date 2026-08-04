@@ -207,7 +207,12 @@ fn error_response(error: CoreError) -> CoreResponse {
         CoreError::LimitExceeded => "limit_exceeded",
         CoreError::FeatureUnavailable => "feature_unavailable",
         CoreError::PlatformNotInitialized => "platform_not_initialized",
+        CoreError::VeilidProtectedStoreFailed => "veilid_protected_store_failed",
+        CoreError::VeilidLocalStoreFailed => "veilid_local_store_failed",
+        CoreError::VeilidConfigurationFailed => "veilid_configuration_failed",
+        CoreError::VeilidRestarting => "veilid_restarting",
         CoreError::NetworkStartupFailed => "network_startup_failed",
+        CoreError::NetworkAttachFailed => "network_attach_failed",
         CoreError::Internal => "internal_error",
     };
     CoreResponse {

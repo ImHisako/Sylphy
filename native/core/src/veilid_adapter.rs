@@ -5,6 +5,7 @@ use crate::error::{CoreError, CoreResult};
 #[cfg(feature = "veilid")]
 use std::{
     collections::VecDeque,
+    path::PathBuf,
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -68,14 +69,8 @@ pub struct VeilidNode {
 
 #[cfg(feature = "veilid")]
 impl VeilidNode {
-    pub async fn start(storage_directory: &str) -> Result<Self, veilid_core::VeilidAPIError> {
-        let config = veilid_core::VeilidConfig::new(
-            "sylphy",
-            "kerberus",
-            "app",
-            Some(storage_directory),
-            Some(storage_directory),
-        );
+    pub async fn start(storage_directory: &str) -> CoreResult<Self> {
+        let config = mobile_config(storage_directory);
         let inbound_envelopes = Arc::new(Mutex::new(VecDeque::new()));
         let callback_inbox = Arc::clone(&inbound_envelopes);
         let api = veilid_core::api_startup(
@@ -86,8 +81,12 @@ impl VeilidNode {
             }),
             config,
         )
-        .await?;
-        api.attach().await?;
+        .await
+        .map_err(|error| classify_startup_error(&error))?;
+        if let Err(error) = api.attach().await {
+            api.shutdown().await;
+            return Err(classify_attach_error(&error));
+        }
         Ok(Self {
             api,
             inbound_envelopes,
@@ -165,6 +164,70 @@ impl VeilidNode {
 }
 
 #[cfg(feature = "veilid")]
+fn mobile_config(storage_directory: &str) -> veilid_core::VeilidConfig {
+    // Match Veilid's official Flutter helper: override only the three
+    // stores and keep TLS/network defaults untouched.
+    let storage = PathBuf::from(storage_directory);
+    let mut config = veilid_core::VeilidConfig {
+        program_name: "sylphy".to_owned(),
+        ..Default::default()
+    };
+    config.protected_store.directory = storage
+        .join("protected_store")
+        .to_string_lossy()
+        .into_owned();
+    config.table_store.directory = storage.join("table_store").to_string_lossy().into_owned();
+    config.block_store.directory = storage.join("block_store").to_string_lossy().into_owned();
+    config
+}
+
+#[cfg(feature = "veilid")]
+fn classify_startup_error(error: &veilid_core::VeilidAPIError) -> CoreError {
+    use veilid_core::VeilidAPIError;
+
+    match error {
+        VeilidAPIError::AlreadyInitialized => CoreError::VeilidRestarting,
+        VeilidAPIError::InvalidArgument { .. }
+        | VeilidAPIError::MissingArgument { .. }
+        | VeilidAPIError::ParseError { .. } => CoreError::VeilidConfigurationFailed,
+        VeilidAPIError::Generic { message } | VeilidAPIError::Internal { message } => {
+            classify_startup_message(message)
+        }
+        VeilidAPIError::NotInitialized => CoreError::PlatformNotInitialized,
+        _ => CoreError::NetworkStartupFailed,
+    }
+}
+
+#[cfg(feature = "veilid")]
+fn classify_startup_message(message: &str) -> CoreError {
+    let normalized = message.to_ascii_lowercase();
+    if normalized.contains("protected store")
+        || normalized.contains("keyring")
+        || normalized.contains("key storage")
+    {
+        CoreError::VeilidProtectedStoreFailed
+    } else if normalized.contains("table store")
+        || normalized.contains("block store")
+        || normalized.contains("database")
+    {
+        CoreError::VeilidLocalStoreFailed
+    } else if normalized.contains("config") || normalized.contains("argument") {
+        CoreError::VeilidConfigurationFailed
+    } else {
+        CoreError::NetworkStartupFailed
+    }
+}
+
+#[cfg(feature = "veilid")]
+fn classify_attach_error(error: &veilid_core::VeilidAPIError) -> CoreError {
+    match error {
+        veilid_core::VeilidAPIError::NotInitialized => CoreError::PlatformNotInitialized,
+        veilid_core::VeilidAPIError::AlreadyInitialized => CoreError::VeilidRestarting,
+        _ => CoreError::NetworkAttachFailed,
+    }
+}
+
+#[cfg(feature = "veilid")]
 const MAX_PENDING_INBOUND_ENVELOPES: usize = 256;
 
 #[cfg(feature = "veilid")]
@@ -235,8 +298,7 @@ pub fn start_node(storage_directory: &str) -> CoreResult<VeilidNodeStatus> {
     if state.node.is_none() {
         let node = state
             .runtime
-            .block_on(VeilidNode::start(storage_directory))
-            .map_err(|_| CoreError::NetworkStartupFailed)?;
+            .block_on(VeilidNode::start(storage_directory))?;
         state.node = Some(node);
     }
     let node = state.node.as_ref().ok_or(CoreError::Internal)?;
@@ -299,6 +361,52 @@ mod tests {
         assert!(matches!(
             start_node("ignored"),
             Err(CoreError::FeatureUnavailable)
+        ));
+    }
+}
+
+#[cfg(all(test, feature = "veilid"))]
+mod feature_tests {
+    use super::*;
+
+    #[test]
+    fn mobile_config_overrides_only_local_store_directories() {
+        let config = mobile_config("/data/user/0/com.example.sylphy/files/veilid");
+
+        assert_eq!(config.program_name, "sylphy");
+        assert!(
+            config
+                .protected_store
+                .directory
+                .ends_with("protected_store")
+        );
+        assert!(config.table_store.directory.ends_with("table_store"));
+        assert!(config.block_store.directory.ends_with("block_store"));
+        assert!(config.network.protocol.wss.url.is_none());
+    }
+
+    #[test]
+    fn classifies_protected_store_without_exposing_native_details() {
+        let error = veilid_core::VeilidAPIError::Generic {
+            message: "Could not initialize the protected store.".to_owned(),
+        };
+
+        assert!(matches!(
+            classify_startup_error(&error),
+            CoreError::VeilidProtectedStoreFailed
+        ));
+    }
+
+    #[test]
+    fn classifies_rejected_configuration() {
+        let error = veilid_core::VeilidAPIError::MissingArgument {
+            context: "startup".to_owned(),
+            argument: "program_name".to_owned(),
+        };
+
+        assert!(matches!(
+            classify_startup_error(&error),
+            CoreError::VeilidConfigurationFailed
         ));
     }
 }

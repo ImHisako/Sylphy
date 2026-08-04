@@ -80,6 +80,19 @@ void main() {
     expect(snapshot.diagnosticCode, 'network_startup_failed');
     expect(snapshot.detail, contains('nuovo tentativo automatico'));
   });
+
+  test('identifies an Android protected-store startup failure', () {
+    const response = NativeCoreResponse(
+      ok: false,
+      code: 'veilid_protected_store_failed',
+      data: {},
+    );
+
+    final snapshot = VeilidSnapshot.fromResponse(response);
+
+    expect(snapshot.phase, VeilidPhase.error);
+    expect(snapshot.detail, contains('Archivio sicuro Android'));
+  });
 }
 
 class _FakeNativeCore implements NativeCoreApi {
