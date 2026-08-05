@@ -2,11 +2,20 @@ package com.example.sylphy
 
 import android.content.Context
 import android.content.ContextWrapper
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 
 internal fun veilidBinaryClassName(name: String): String = name.replace('/', '.')
 
@@ -35,6 +44,7 @@ class MainActivity : FlutterActivity() {
         ensureVeilidInitialized()
         // Veilid needs Android's Context/JVM before Flutter can invoke FFI.
         super.onCreate(savedInstanceState)
+        createMessageChannel()
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -51,9 +61,74 @@ class MainActivity : FlutterActivity() {
                             ),
                         )
                     }
+                    "requestNotificationPermission" -> {
+                        requestNotificationPermission()
+                        result.success(true)
+                    }
+                    "showMessageNotification" -> {
+                        showMessageNotification()
+                        result.success(true)
+                    }
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun createMessageChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                MESSAGE_CHANNEL_ID,
+                "Nuovi messaggi",
+                NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
+                description = "Notifiche private per i nuovi messaggi Sylphy"
+                enableVibration(true)
+            }
+            getSystemService(NotificationManager::class.java)
+                .createNotificationChannel(channel)
+        }
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                NOTIFICATION_PERMISSION_REQUEST,
+            )
+        }
+    }
+
+    private fun showMessageNotification() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notification = NotificationCompat.Builder(this, MESSAGE_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("Nuovo messaggio")
+            .setContentText("Hai ricevuto un nuovo messaggio su Sylphy")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .build()
+        NotificationManagerCompat.from(this)
+            .notify((System.currentTimeMillis() and 0x7fffffff).toInt(), notification)
     }
 
     @Synchronized
@@ -92,6 +167,8 @@ class MainActivity : FlutterActivity() {
 
     private companion object {
         const val PLATFORM_CHANNEL = "sylphy/platform"
+        const val MESSAGE_CHANNEL_ID = "sylphy_messages"
+        const val NOTIFICATION_PERMISSION_REQUEST = 4102
         val REQUIRED_PROTECTED_STORE_CLASSES = listOf(
             "androidx.security.crypto.MasterKey",
             "androidx.security.crypto.MasterKey\$Builder",

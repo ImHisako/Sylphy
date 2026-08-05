@@ -37,6 +37,12 @@ class _TestDeviceSecretStore implements DeviceSecretStore {
 }
 
 class _IdentityNativeCore implements NativeCoreApi {
+  @override
+  NativeCoreResponse sendAttachment({
+    required String conversationId,
+    required String fileName,
+    required String bytesBase64,
+  }) => throw UnimplementedError();
   String? receivedStorageDirectory;
   String? receivedVaultPassword;
 
@@ -44,6 +50,8 @@ class _IdentityNativeCore implements NativeCoreApi {
   NativeCoreResponse ensureIdentity({
     required String storageDirectory,
     required String vaultPassword,
+    String? displayName,
+    String? avatarBase64,
   }) {
     receivedStorageDirectory = storageDirectory;
     receivedVaultPassword = vaultPassword;

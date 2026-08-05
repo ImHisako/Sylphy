@@ -9,6 +9,8 @@ import 'core/messaging/sylphy_messaging_bridge.dart';
 import 'core/identity/identity_service.dart';
 import 'core/native/native_core.dart';
 import 'core/profile/user_profile.dart';
+import 'core/privacy/privacy_settings.dart';
+import 'core/platform/message_notifications.dart';
 import 'core/veilid/veilid_service.dart';
 import 'features/messenger/messenger_home.dart';
 import 'features/onboarding/profile_onboarding.dart';
@@ -52,6 +54,7 @@ class SylphyApp extends StatefulWidget {
     this.profileStore,
     this.photoPicker,
     this.identityService,
+    this.privacySettings,
   });
 
   final SecureMessagingBridge? bridge;
@@ -60,6 +63,7 @@ class SylphyApp extends StatefulWidget {
   final UserProfileStore? profileStore;
   final ProfilePhotoPicker? photoPicker;
   final IdentityService? identityService;
+  final PrivacySettingsController? privacySettings;
 
   @override
   State<SylphyApp> createState() => _SylphyAppState();
@@ -72,6 +76,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   late final UserProfileStore _profileStore;
   late final IdentityService _identityService;
   late final bool _ownsIdentityService;
+  late final PrivacySettingsController _privacySettings;
   UserProfile? _profile;
   bool _profileLoaded = false;
   bool _isEditingProfile = false;
@@ -98,6 +103,8 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     _identityService =
         widget.identityService ??
         IdentityService(nativeCore: widget.nativeCore);
+    _privacySettings = widget.privacySettings ?? PrivacySettingsController();
+    _privacySettings.addListener(_onPrivacyChanged);
     unawaited(_loadProfile());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -107,9 +114,19 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   }
 
   Future<void> _initializeNativeServices() async {
+    await const MessageNotifications().initialize();
+    if (!_privacySettings.loaded) await _privacySettings.load();
     await _veilidService.start();
-    await _identityService.initialize();
+    await _publishProfile();
   }
+
+  Future<void> _publishProfile() => _identityService.initialize(
+    profile: _profile,
+    shareDisplayName: _privacySettings.value.shareDisplayName,
+    shareProfilePhoto: _privacySettings.value.shareProfilePhoto,
+  );
+
+  void _onPrivacyChanged() => unawaited(_publishProfile());
 
   Future<void> _loadProfile() async {
     AppLog.instance.record(
@@ -141,6 +158,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       _profile = profile;
       _profileLoaded = true;
     });
+    if (profile != null) unawaited(_publishProfile());
   }
 
   void _completeOnboarding(UserProfile profile) {
@@ -153,6 +171,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       _profile = profile;
       _isEditingProfile = false;
     });
+    unawaited(_publishProfile());
   }
 
   void _editProfile() {
@@ -169,6 +188,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _privacySettings.removeListener(_onPrivacyChanged);
     if (_ownsVeilidService) {
       unawaited(_veilidService.stop());
       _veilidService.dispose();
@@ -280,6 +300,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
                 veilidService: _veilidService,
                 profile: _profile!,
                 identityService: _identityService,
+                privacySettings: _privacySettings,
                 onEditProfile: _editProfile,
               ),
             ),

@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 enum DeliveryState { sent, delivered, read }
 
 enum ContactSafety { verified, pending, refreshRequired }
@@ -10,6 +12,8 @@ class ChatMessage {
     required this.sentAt,
     required this.isOutgoing,
     this.deliveryState = DeliveryState.sent,
+    this.attachmentName,
+    this.attachmentBytes,
   });
 
   final String id;
@@ -18,6 +22,8 @@ class ChatMessage {
   final DateTime sentAt;
   final bool isOutgoing;
   final DeliveryState deliveryState;
+  final String? attachmentName;
+  final Uint8List? attachmentBytes;
 
   ChatMessage copyWith({DeliveryState? deliveryState}) {
     return ChatMessage(
@@ -27,6 +33,8 @@ class ChatMessage {
       sentAt: sentAt,
       isOutgoing: isOutgoing,
       deliveryState: deliveryState ?? this.deliveryState,
+      attachmentName: attachmentName,
+      attachmentBytes: attachmentBytes,
     );
   }
 }
@@ -44,6 +52,7 @@ class Conversation {
     this.unreadCount = 0,
     this.isOnline = false,
     this.isGroup = false,
+    this.avatarBytes,
   });
 
   final String id;
@@ -55,6 +64,7 @@ class Conversation {
   final int unreadCount;
   final bool isOnline;
   final bool isGroup;
+  final Uint8List? avatarBytes;
   final ContactSafety safety;
   final String fingerprint;
 
@@ -77,6 +87,7 @@ class Conversation {
       isGroup: isGroup,
       safety: safety ?? this.safety,
       fingerprint: fingerprint,
+      avatarBytes: avatarBytes,
     );
   }
 }

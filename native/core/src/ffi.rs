@@ -33,6 +33,11 @@ enum CoreRequest {
         conversation_id: String,
         plaintext: String,
     },
+    SendAttachment {
+        conversation_id: String,
+        file_name: String,
+        bytes_base64: String,
+    },
     MarkConversationRead {
         conversation_id: String,
     },
@@ -46,6 +51,10 @@ enum CoreRequest {
     EnsureIdentity {
         storage_directory: String,
         vault_password: String,
+        #[serde(default)]
+        display_name: Option<String>,
+        #[serde(default)]
+        avatar_base64: Option<String>,
     },
     ValidatePublicBundle {
         bundle: PublicBundle,
@@ -163,6 +172,15 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
             code: "ok",
             data: messaging_adapter::send_text(&conversation_id, &plaintext)?,
         }),
+        CoreRequest::SendAttachment {
+            conversation_id,
+            file_name,
+            bytes_base64,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::send_attachment(&conversation_id, &file_name, &bytes_base64)?,
+        }),
         CoreRequest::MarkConversationRead { conversation_id } => Ok(CoreResponse {
             ok: true,
             code: "ok",
@@ -184,10 +202,17 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
         CoreRequest::EnsureIdentity {
             storage_directory,
             vault_password,
+            display_name,
+            avatar_base64,
         } => Ok(CoreResponse {
             ok: true,
             code: "ok",
-            data: identity::ensure_identity(&storage_directory, &vault_password)?,
+            data: identity::ensure_identity(
+                &storage_directory,
+                &vault_password,
+                display_name,
+                avatar_base64,
+            )?,
         }),
         CoreRequest::ValidatePublicBundle { bundle } => {
             bundle.validate()?;

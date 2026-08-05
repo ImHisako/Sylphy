@@ -23,6 +23,12 @@ abstract class SecureMessagingBridge {
     required String conversationId,
     required String plaintext,
   });
+
+  Future<void> sendAttachment({
+    required String conversationId,
+    required String fileName,
+    required List<int> bytes,
+  });
 }
 
 class UnavailableMessagingBridge implements SecureMessagingBridge {
@@ -62,6 +68,15 @@ class UnavailableMessagingBridge implements SecureMessagingBridge {
   Future<void> sendText({
     required String conversationId,
     required String plaintext,
+  }) async {
+    throw const SecureMessagingException('native_core_unavailable');
+  }
+
+  @override
+  Future<void> sendAttachment({
+    required String conversationId,
+    required String fileName,
+    required List<int> bytes,
   }) async {
     throw const SecureMessagingException('native_core_unavailable');
   }

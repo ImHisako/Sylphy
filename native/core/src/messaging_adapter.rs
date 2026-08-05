@@ -6,7 +6,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+};
+use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -26,6 +31,9 @@ const MAX_CONTACT_STORE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MESSAGE_STORE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CONTACTS: usize = 1024;
 const MAX_MESSAGES: usize = 100_000;
+const MAX_ATTACHMENT_BYTES: usize = 700 * 1024;
+const MAX_ATTACHMENT_NAME_CHARS: usize = 128;
+const ATTACHMENT_PREFIX: &str = "sylphy-attachment-v1:";
 const CONTACT_STORE_FILE: &str = "contacts-v1.json";
 const MESSAGE_STORE_FILE: &str = "messages-v1.vault";
 
@@ -52,6 +60,23 @@ struct StoredMessage {
     is_outgoing: bool,
     #[serde(default)]
     is_read: bool,
+    #[serde(default = "default_delivery_state")]
+    delivery_state: String,
+    #[serde(default)]
+    attachment_name: Option<String>,
+    #[serde(default)]
+    attachment_base64: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct AttachmentPointer {
+    version: u8,
+    file_name: String,
+    size: usize,
+    record_key: String,
+    chunk_count: u16,
+    key_base64: String,
+    nonce_base64: String,
 }
 
 #[derive(Default)]
@@ -59,6 +84,8 @@ struct ContactStore {
     path: Option<PathBuf>,
     message_path: Option<PathBuf>,
     contacts: Vec<StoredContact>,
+    messages: Vec<StoredMessage>,
+    messages_loaded: bool,
 }
 
 static CONTACT_STORE: OnceLock<Mutex<ContactStore>> = OnceLock::new();
@@ -79,17 +106,27 @@ pub fn configure_storage(storage_directory: &str) -> CoreResult<()> {
     store.path = Some(path);
     store.message_path = Some(directory.join(MESSAGE_STORE_FILE));
     store.contacts = contacts;
+    store.messages.clear();
+    store.messages_loaded = false;
     Ok(())
 }
 
 pub fn list_conversations() -> CoreResult<Value> {
     sync_inbound();
-    let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
-    let messages = load_messages_optional(store.message_path.as_deref())?;
+    let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    ensure_messages_loaded(&mut store)?;
+    let messages = &store.messages;
     let conversations = store
         .contacts
         .iter()
         .map(|contact| {
+            let public_profile = contact
+                .published_identity
+                .as_ref()
+                .map(|identity| &identity.profile);
+            let visible_name = public_profile
+                .and_then(|profile| profile.display_name.as_deref())
+                .unwrap_or(&contact.display_name);
             let mut contact_messages = messages
                 .iter()
                 .filter(|message| message.conversation_id == contact.id)
@@ -103,8 +140,9 @@ pub fn list_conversations() -> CoreResult<Value> {
             let can_message = contact.published_identity.is_some();
             json!({
                 "id": contact.id,
-                "name": contact.display_name,
-                "initials": initials(&contact.display_name),
+                "name": visible_name,
+                "initials": initials(visible_name),
+                "avatar_base64": public_profile.and_then(|profile| profile.avatar_base64.as_deref()),
                 "accent_value": accent_value(&contact.bundle.identity_ed25519),
                 "last_message": last.map(|message| message.body.as_str()).unwrap_or(
                     if can_message { "Conversazione pronta" } else { "Aggiorna l'ID Sylphy del contatto" }
@@ -128,9 +166,12 @@ pub fn list_conversations() -> CoreResult<Value> {
 pub fn list_messages(conversation_id: &str) -> CoreResult<Value> {
     validate_conversation_id(conversation_id)?;
     sync_inbound();
-    let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
-    let mut messages = load_messages_optional(store.message_path.as_deref())?
-        .into_iter()
+    let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    ensure_messages_loaded(&mut store)?;
+    let mut messages = store
+        .messages
+        .iter()
+        .cloned()
         .filter(|message| message.conversation_id == conversation_id)
         .collect::<Vec<_>>();
     messages.sort_by_key(|message| message.sent_at_ms);
@@ -199,10 +240,21 @@ pub fn send_text(conversation_id: &str, plaintext: &str) -> CoreResult<Value> {
         )
     };
     let (payload, message_id) = secure_packet::seal_for(&recipient, plaintext)?;
-    veilid_adapter::send_payload(&recipient.route_blob, payload)?;
+    let mailbox_result = recipient
+        .mailbox
+        .as_ref()
+        .ok_or(CoreError::FeatureUnavailable)
+        .and_then(|mailbox| veilid_adapter::store_mailbox_payload(mailbox, &payload));
+    let direct_result = veilid_adapter::send_payload(&recipient.route_blob, payload);
+    if mailbox_result.is_err() && direct_result.is_err() {
+        return Err(direct_result
+            .err()
+            .unwrap_or(CoreError::NetworkAttachFailed));
+    }
     let now_ms = current_time_ms()?;
-    let mut messages = load_messages(&message_path)?;
-    messages.push(StoredMessage {
+    let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    ensure_messages_loaded(&mut store)?;
+    store.messages.push(StoredMessage {
         id: message_id.clone(),
         conversation_id: conversation_id.to_owned(),
         author_id: "me".to_owned(),
@@ -210,28 +262,115 @@ pub fn send_text(conversation_id: &str, plaintext: &str) -> CoreResult<Value> {
         sent_at_ms: now_ms,
         is_outgoing: true,
         is_read: true,
+        delivery_state: "sent".to_owned(),
+        attachment_name: None,
+        attachment_base64: None,
     });
-    persist_messages(&message_path, &messages)?;
+    persist_messages(&message_path, &store.messages)?;
+    Ok(json!({"message_id": message_id, "delivery_state": "sent"}))
+}
+
+pub fn send_attachment(
+    conversation_id: &str,
+    file_name: &str,
+    bytes_base64: &str,
+) -> CoreResult<Value> {
+    validate_conversation_id(conversation_id)?;
+    let file_name = validate_attachment_name(file_name)?;
+    let bytes = STANDARD
+        .decode(bytes_base64)
+        .map_err(|_| CoreError::InvalidInput)?;
+    if bytes.is_empty() || bytes.len() > MAX_ATTACHMENT_BYTES {
+        return Err(CoreError::LimitExceeded);
+    }
+    let mut key = [0_u8; 32];
+    let mut nonce = [0_u8; 24];
+    OsRng.fill_bytes(&mut key);
+    OsRng.fill_bytes(&mut nonce);
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    let encrypted = cipher
+        .encrypt(XNonce::from_slice(&nonce), bytes.as_slice())
+        .map_err(|_| CoreError::Internal)?;
+    let (record_key, chunk_count) = veilid_adapter::publish_attachment_blob(&encrypted)?;
+    let pointer = AttachmentPointer {
+        version: 1,
+        file_name: file_name.clone(),
+        size: bytes.len(),
+        record_key,
+        chunk_count,
+        key_base64: STANDARD_NO_PAD.encode(key),
+        nonce_base64: STANDARD_NO_PAD.encode(nonce),
+    };
+    let control = format!(
+        "{ATTACHMENT_PREFIX}{}",
+        STANDARD_NO_PAD.encode(serde_json::to_vec(&pointer).map_err(|_| CoreError::Internal)?)
+    );
+    let (recipient, message_path) = {
+        let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+        let contact = store
+            .contacts
+            .iter()
+            .find(|contact| contact.id == conversation_id)
+            .ok_or(CoreError::InvalidInput)?;
+        (
+            contact
+                .published_identity
+                .clone()
+                .ok_or(CoreError::FeatureUnavailable)?,
+            store
+                .message_path
+                .clone()
+                .ok_or(CoreError::FeatureUnavailable)?,
+        )
+    };
+    let (payload, message_id) = secure_packet::seal_for(&recipient, &control)?;
+    let mailbox_result = recipient
+        .mailbox
+        .as_ref()
+        .ok_or(CoreError::FeatureUnavailable)
+        .and_then(|mailbox| veilid_adapter::store_mailbox_payload(mailbox, &payload));
+    let direct_result = veilid_adapter::send_payload(&recipient.route_blob, payload);
+    if mailbox_result.is_err() && direct_result.is_err() {
+        return Err(direct_result
+            .err()
+            .unwrap_or(CoreError::NetworkAttachFailed));
+    }
+    let now_ms = current_time_ms()?;
+    let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    ensure_messages_loaded(&mut store)?;
+    store.messages.push(StoredMessage {
+        id: message_id.clone(),
+        conversation_id: conversation_id.to_owned(),
+        author_id: "me".to_owned(),
+        body: format!("📎 {file_name}"),
+        sent_at_ms: now_ms,
+        is_outgoing: true,
+        is_read: true,
+        delivery_state: "sent".to_owned(),
+        attachment_name: Some(file_name),
+        attachment_base64: Some(STANDARD.encode(bytes)),
+    });
+    persist_messages(&message_path, &store.messages)?;
     Ok(json!({"message_id": message_id, "delivery_state": "sent"}))
 }
 
 pub fn mark_conversation_read(conversation_id: &str) -> CoreResult<Value> {
     validate_conversation_id(conversation_id)?;
-    let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    ensure_messages_loaded(&mut store)?;
     let path = store
         .message_path
-        .as_deref()
+        .clone()
         .ok_or(CoreError::FeatureUnavailable)?;
-    let mut messages = load_messages(path)?;
     let mut changed = false;
-    for message in &mut messages {
+    for message in &mut store.messages {
         if message.conversation_id == conversation_id && !message.is_outgoing && !message.is_read {
             message.is_read = true;
             changed = true;
         }
     }
     if changed {
-        persist_messages(path, &messages)?;
+        persist_messages(&path, &store.messages)?;
     }
     Ok(json!({"conversation_id": conversation_id, "read": true}))
 }
@@ -249,18 +388,22 @@ pub fn delete_conversation(conversation_id: &str) -> CoreResult<Value> {
     if updated.len() == original_len {
         return Err(CoreError::InvalidInput);
     }
-    let contact_path = store.path.as_deref().ok_or(CoreError::FeatureUnavailable)?;
+    let contact_path = store.path.clone().ok_or(CoreError::FeatureUnavailable)?;
     let message_path = store
         .message_path
-        .as_deref()
+        .clone()
         .ok_or(CoreError::FeatureUnavailable)?;
-    let messages = load_messages(message_path)?
-        .into_iter()
+    ensure_messages_loaded(&mut store)?;
+    let messages = store
+        .messages
+        .iter()
+        .cloned()
         .filter(|message| message.conversation_id != conversation_id)
         .collect::<Vec<_>>();
-    persist_contacts(contact_path, &updated)?;
-    persist_messages(message_path, &messages)?;
+    persist_contacts(&contact_path, &updated)?;
+    persist_messages(&message_path, &messages)?;
     store.contacts = updated;
+    store.messages = messages;
     Ok(json!({"conversation_id": conversation_id, "deleted": true}))
 }
 
@@ -323,25 +466,34 @@ fn sync_inbound() {
         } else {
             continue;
         }
-        let Ok(mut messages) = load_messages(&message_path) else {
+        if ensure_messages_loaded(&mut store).is_err() {
             continue;
-        };
-        if messages
+        }
+        if store
+            .messages
             .iter()
             .any(|message| message.id == opened.message_id)
         {
             continue;
         }
-        messages.push(StoredMessage {
+        let Ok((body, attachment_name, attachment_base64)) =
+            decode_incoming_content(&opened.plaintext)
+        else {
+            continue;
+        };
+        store.messages.push(StoredMessage {
             id: opened.message_id,
             conversation_id: id.clone(),
             author_id: id,
-            body: opened.plaintext,
+            body,
             sent_at_ms: opened.sent_at_ms,
             is_outgoing: false,
             is_read: false,
+            delivery_state: "delivered".to_owned(),
+            attachment_name,
+            attachment_base64,
         });
-        if persist_messages(&message_path, &messages).is_err() {
+        if persist_messages(&message_path, &store.messages).is_err() {
             continue;
         }
         if contacts_changed {
@@ -404,11 +556,16 @@ fn persist_contacts(path: &Path, contacts: &[StoredContact]) -> CoreResult<()> {
     persist_bytes(path, &encoded)
 }
 
-fn load_messages_optional(path: Option<&Path>) -> CoreResult<Vec<StoredMessage>> {
-    match path {
-        Some(path) => load_messages(path),
-        None => Ok(Vec::new()),
+fn ensure_messages_loaded(store: &mut ContactStore) -> CoreResult<()> {
+    if store.messages_loaded {
+        return Ok(());
     }
+    store.messages = match store.message_path.as_deref() {
+        Some(path) => load_messages(path)?,
+        None => Vec::new(),
+    };
+    store.messages_loaded = true;
+    Ok(())
 }
 
 fn load_messages(path: &Path) -> CoreResult<Vec<StoredMessage>> {
@@ -462,8 +619,67 @@ fn message_json(message: StoredMessage) -> Value {
         "body": message.body,
         "sent_at_ms": message.sent_at_ms,
         "is_outgoing": message.is_outgoing,
-        "delivery_state": "sent",
+        "delivery_state": message.delivery_state,
+        "attachment_name": message.attachment_name,
+        "attachment_base64": message.attachment_base64,
     })
+}
+
+fn default_delivery_state() -> String {
+    "sent".to_owned()
+}
+
+fn decode_incoming_content(
+    plaintext: &str,
+) -> CoreResult<(String, Option<String>, Option<String>)> {
+    let Some(encoded) = plaintext.strip_prefix(ATTACHMENT_PREFIX) else {
+        return Ok((plaintext.to_owned(), None, None));
+    };
+    let pointer_bytes = STANDARD_NO_PAD
+        .decode(encoded)
+        .map_err(|_| CoreError::InvalidInput)?;
+    let pointer: AttachmentPointer =
+        serde_json::from_slice(&pointer_bytes).map_err(|_| CoreError::InvalidInput)?;
+    if pointer.version != 1 || pointer.size == 0 || pointer.size > MAX_ATTACHMENT_BYTES {
+        return Err(CoreError::InvalidInput);
+    }
+    let file_name = validate_attachment_name(&pointer.file_name)?;
+    let encrypted =
+        veilid_adapter::fetch_attachment_blob(&pointer.record_key, pointer.chunk_count)?;
+    let key = STANDARD_NO_PAD
+        .decode(&pointer.key_base64)
+        .map_err(|_| CoreError::InvalidInput)?;
+    let nonce = STANDARD_NO_PAD
+        .decode(&pointer.nonce_base64)
+        .map_err(|_| CoreError::InvalidInput)?;
+    if key.len() != 32 || nonce.len() != 24 {
+        return Err(CoreError::InvalidInput);
+    }
+    let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|_| CoreError::InvalidInput)?;
+    let bytes = cipher
+        .decrypt(XNonce::from_slice(&nonce), encrypted.as_slice())
+        .map_err(|_| CoreError::AuthenticationFailed)?;
+    if bytes.len() != pointer.size {
+        return Err(CoreError::VerificationFailed);
+    }
+    Ok((
+        format!("📎 {file_name}"),
+        Some(file_name),
+        Some(STANDARD.encode(bytes)),
+    ))
+}
+
+fn validate_attachment_name(value: &str) -> CoreResult<String> {
+    let name = value.trim();
+    if name.is_empty()
+        || name.chars().count() > MAX_ATTACHMENT_NAME_CHARS
+        || name.chars().any(char::is_control)
+        || name.contains('/')
+        || name.contains('\\')
+    {
+        return Err(CoreError::InvalidInput);
+    }
+    Ok(name.to_owned())
 }
 
 fn validate_display_name(value: &str) -> CoreResult<String> {

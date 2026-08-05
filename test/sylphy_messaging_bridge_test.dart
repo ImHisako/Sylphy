@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sylphy/core/messaging/sylphy_messaging_bridge.dart';
 import 'package:sylphy/core/native/native_core.dart';
@@ -32,18 +34,48 @@ void main() {
     expect(core.importedName, 'Ada');
     expect(core.importedInvitation, 'signed-invitation');
   });
+
+  test('sends attachment bytes only through the native secure core', () async {
+    final core = _FakeNativeCore();
+    final bridge = SylphyMessagingBridge(core: core);
+
+    await bridge.sendAttachment(
+      conversationId: 'contact-1',
+      fileName: 'documento.txt',
+      bytes: utf8.encode('contenuto'),
+    );
+
+    expect(core.sentAttachmentName, 'documento.txt');
+    expect(base64Decode(core.sentAttachmentBase64!), utf8.encode('contenuto'));
+  });
 }
 
 class _FakeNativeCore implements NativeCoreApi {
+  @override
+  NativeCoreResponse sendAttachment({
+    required String conversationId,
+    required String fileName,
+    required String bytesBase64,
+  }) {
+    sentConversationId = conversationId;
+    sentAttachmentName = fileName;
+    sentAttachmentBase64 = bytesBase64;
+    return const NativeCoreResponse(ok: true, code: 'ok', data: {});
+  }
+
   String? importedName;
   String? importedInvitation;
   String? sentConversationId;
   String? sentPlaintext;
+  String? sentAttachmentName;
+  String? sentAttachmentBase64;
 
   @override
   NativeCoreResponse ensureIdentity({
     required String storageDirectory,
     required String vaultPassword,
+    String? displayName,
+    String? avatarBase64,
   }) => throw UnimplementedError();
 
   @override

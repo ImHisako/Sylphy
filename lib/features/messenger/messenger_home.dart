@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:file_selector/file_selector.dart';
 
 import '../../core/diagnostics/app_log.dart';
 import '../../core/messaging/models.dart';
@@ -8,6 +10,8 @@ import '../../core/messaging/secure_messaging_bridge.dart';
 import '../../core/native/native_core.dart';
 import '../../core/identity/identity_service.dart';
 import '../../core/profile/user_profile.dart';
+import '../../core/privacy/privacy_settings.dart';
+import '../../core/platform/message_notifications.dart';
 import '../../core/veilid/veilid_service.dart';
 import '../profile/profile_sheet.dart';
 import '../settings/settings_page.dart';
@@ -19,6 +23,7 @@ class MessengerHome extends StatefulWidget {
     required this.veilidService,
     required this.profile,
     required this.identityService,
+    required this.privacySettings,
     required this.onEditProfile,
     this.nativeCore,
   });
@@ -28,6 +33,7 @@ class MessengerHome extends StatefulWidget {
   final VeilidService veilidService;
   final UserProfile profile;
   final IdentityService identityService;
+  final PrivacySettingsController privacySettings;
   final VoidCallback onEditProfile;
 
   @override
@@ -37,17 +43,60 @@ class MessengerHome extends StatefulWidget {
 class _MessengerHomeState extends State<MessengerHome> {
   String? _activeConversationId;
   Timer? _inboxTimer;
+  List<Conversation> _conversations = const [];
+  String _conversationSignature = '';
+  Map<String, int> _unreadCounts = const {};
 
   @override
   void initState() {
     super.initState();
-    final conversations = widget.bridge.listConversations();
-    _activeConversationId = conversations.isEmpty
+    _conversations = _readConversations();
+    _conversationSignature = _signatureForConversations(_conversations);
+    _unreadCounts = {
+      for (final conversation in _conversations)
+        conversation.id: conversation.unreadCount,
+    };
+    _activeConversationId = _conversations.isEmpty
         ? null
-        : conversations.first.id;
-    _inboxTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) {
-        setState(() {});
+        : _conversations.first.id;
+    _inboxTimer = Timer.periodic(
+      const Duration(milliseconds: 1400),
+      (_) => _refreshInbox(),
+    );
+  }
+
+  List<Conversation> _readConversations() {
+    try {
+      return widget.bridge.listConversations();
+    } on Object {
+      return _conversations;
+    }
+  }
+
+  void _refreshInbox({bool force = false}) {
+    if (!mounted) return;
+    final conversations = _readConversations();
+    final signature = _signatureForConversations(conversations);
+    if (!force && signature == _conversationSignature) return;
+    final hasNewMessage = conversations.any(
+      (conversation) =>
+          conversation.unreadCount > (_unreadCounts[conversation.id] ?? 0),
+    );
+    if (hasNewMessage) {
+      unawaited(const MessageNotifications().showIncomingMessage());
+    }
+    setState(() {
+      _conversations = conversations;
+      _conversationSignature = signature;
+      _unreadCounts = {
+        for (final conversation in conversations)
+          conversation.id: conversation.unreadCount,
+      };
+      if (_activeConversationId != null &&
+          !conversations.any((item) => item.id == _activeConversationId)) {
+        _activeConversationId = conversations.isEmpty
+            ? null
+            : conversations.first.id;
       }
     });
   }
@@ -137,11 +186,7 @@ class _MessengerHomeState extends State<MessengerHome> {
     }
   }
 
-  void _refresh() {
-    if (mounted) {
-      setState(() {});
-    }
-  }
+  void _refresh() => _refreshInbox(force: true);
 
   void _openProfile() {
     AppLog.instance.record(
@@ -169,6 +214,7 @@ class _MessengerHomeState extends State<MessengerHome> {
         builder: (context) => SettingsPage(
           nativeCore: widget.nativeCore,
           veilidService: widget.veilidService,
+          privacySettings: widget.privacySettings,
         ),
       ),
     );
@@ -178,7 +224,7 @@ class _MessengerHomeState extends State<MessengerHome> {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final conversations = widget.bridge.listConversations();
+        final conversations = _conversations;
         Conversation? activeConversation;
         for (final conversation in conversations) {
           if (conversation.id == _activeConversationId) {
@@ -202,6 +248,7 @@ class _MessengerHomeState extends State<MessengerHome> {
             onAddContact: _addContact,
             onProfilePressed: _openProfile,
             onSettingsPressed: _openSettings,
+            privacySettings: widget.privacySettings,
             showDetails: constraints.maxWidth >= 1180,
           );
         }
@@ -216,6 +263,7 @@ class _MessengerHomeState extends State<MessengerHome> {
           onAddContact: _addContact,
           onProfilePressed: _openProfile,
           onSettingsPressed: _openSettings,
+          privacySettings: widget.privacySettings,
         );
       },
     );
@@ -235,6 +283,7 @@ class _DesktopMessenger extends StatelessWidget {
     required this.onAddContact,
     required this.onProfilePressed,
     required this.onSettingsPressed,
+    required this.privacySettings,
     required this.showDetails,
   });
 
@@ -249,6 +298,7 @@ class _DesktopMessenger extends StatelessWidget {
   final VoidCallback onAddContact;
   final VoidCallback onProfilePressed;
   final VoidCallback onSettingsPressed;
+  final PrivacySettingsController privacySettings;
   final bool showDetails;
 
   @override
@@ -289,6 +339,7 @@ class _DesktopMessenger extends StatelessWidget {
                       conversation: activeConversation!,
                       onChanged: onChanged,
                       showHeader: true,
+                      privacySettings: privacySettings,
                     ),
             ),
             if (showDetails && activeConversation != null) ...[
@@ -664,6 +715,7 @@ class _MobileConversationList extends StatelessWidget {
     required this.onAddContact,
     required this.onProfilePressed,
     required this.onSettingsPressed,
+    required this.privacySettings,
   });
 
   final SecureMessagingBridge bridge;
@@ -676,6 +728,7 @@ class _MobileConversationList extends StatelessWidget {
   final VoidCallback onAddContact;
   final VoidCallback onProfilePressed;
   final VoidCallback onSettingsPressed;
+  final PrivacySettingsController privacySettings;
 
   @override
   Widget build(BuildContext context) {
@@ -755,6 +808,7 @@ class _MobileConversationList extends StatelessWidget {
                       bridge: bridge,
                       conversationId: conversation.id,
                       onChanged: onChanged,
+                      privacySettings: privacySettings,
                     ),
                   ),
                 );
@@ -781,11 +835,13 @@ class _MobileChatScreen extends StatelessWidget {
     required this.bridge,
     required this.conversationId,
     required this.onChanged,
+    required this.privacySettings,
   });
 
   final SecureMessagingBridge bridge;
   final String conversationId;
   final VoidCallback onChanged;
+  final PrivacySettingsController privacySettings;
 
   @override
   Widget build(BuildContext context) {
@@ -853,6 +909,7 @@ class _MobileChatScreen extends StatelessWidget {
         conversation: conversation,
         onChanged: onChanged,
         showHeader: false,
+        privacySettings: privacySettings,
       ),
     );
   }
@@ -864,12 +921,14 @@ class _ChatPane extends StatefulWidget {
     required this.conversation,
     required this.onChanged,
     required this.showHeader,
+    required this.privacySettings,
   });
 
   final SecureMessagingBridge bridge;
   final Conversation conversation;
   final VoidCallback onChanged;
   final bool showHeader;
+  final PrivacySettingsController privacySettings;
 
   @override
   State<_ChatPane> createState() => _ChatPaneState();
@@ -877,26 +936,66 @@ class _ChatPane extends StatefulWidget {
 
 class _ChatPaneState extends State<_ChatPane> {
   final TextEditingController _composerController = TextEditingController();
+  Timer? _messageTimer;
+  List<ChatMessage> _messages = const [];
+  String _messageSignature = '';
+  bool _isSending = false;
+  bool _isSendingAttachment = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _reloadMessages(force: true);
+    _messageTimer = Timer.periodic(
+      const Duration(milliseconds: 700),
+      (_) => _reloadMessages(),
+    );
+  }
 
   @override
   void didUpdateWidget(covariant _ChatPane oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.conversation.id != widget.conversation.id) {
       _composerController.clear();
+      _messages = const [];
+      _messageSignature = '';
+      _reloadMessages(force: true);
     }
   }
 
   @override
   void dispose() {
+    _messageTimer?.cancel();
     _composerController.dispose();
     super.dispose();
   }
 
-  Future<void> _sendMessage() async {
-    final text = _composerController.text;
-    if (text.trim().isEmpty) {
+  void _reloadMessages({bool force = false}) {
+    if (!mounted) return;
+    List<ChatMessage> messages;
+    try {
+      messages = widget.bridge.listMessages(widget.conversation.id);
+    } on Object {
       return;
     }
+    final signature = _signatureForMessages(messages);
+    if (!force && signature == _messageSignature) return;
+    setState(() {
+      _messages = messages;
+      _messageSignature = signature;
+    });
+    if (messages.any((message) => !message.isOutgoing)) {
+      widget.bridge.markConversationRead(widget.conversation.id);
+    }
+  }
+
+  Future<void> _sendMessage() async {
+    final text = _composerController.text.trim();
+    if (text.isEmpty || _isSending) {
+      return;
+    }
+    _composerController.clear();
+    setState(() => _isSending = true);
     AppLog.instance.record(
       category: 'messenger',
       action: 'send_requested',
@@ -916,6 +1015,10 @@ class _ChatPaneState extends State<_ChatPane> {
         force: true,
       );
       if (mounted) {
+        _composerController.text = text;
+        _composerController.selection = TextSelection.collapsed(
+          offset: _composerController.text.length,
+        );
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(switch (error.code) {
@@ -928,13 +1031,14 @@ class _ChatPaneState extends State<_ChatPane> {
           ),
         );
       }
+      if (mounted) setState(() => _isSending = false);
       return;
     }
     if (!mounted) {
       return;
     }
-    _composerController.clear();
-    setState(() {});
+    setState(() => _isSending = false);
+    _reloadMessages(force: true);
     widget.onChanged();
     AppLog.instance.record(
       category: 'messenger',
@@ -943,9 +1047,52 @@ class _ChatPaneState extends State<_ChatPane> {
     );
   }
 
+  Future<void> _pickAndSendAttachment() async {
+    if (_isSending || _isSendingAttachment) return;
+    final file = await openFile();
+    if (file == null || !mounted) return;
+    final size = await file.length();
+    if (size <= 0 || size > 700 * 1024) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Il file deve avere una dimensione massima di 700 KB.',
+            ),
+          ),
+        );
+      }
+      return;
+    }
+    setState(() => _isSendingAttachment = true);
+    try {
+      await widget.bridge.sendAttachment(
+        conversationId: widget.conversation.id,
+        fileName: file.name,
+        bytes: await file.readAsBytes(),
+      );
+      if (!mounted) return;
+      _reloadMessages(force: true);
+      widget.onChanged();
+    } on SecureMessagingException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              error.code == 'limit_exceeded'
+                  ? 'Allegato troppo grande per l’archivio cifrato.'
+                  : 'Invio dell’allegato non riuscito (${error.code}).',
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSendingAttachment = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final messages = widget.bridge.listMessages(widget.conversation.id);
     return DecoratedBox(
       decoration: const BoxDecoration(
         gradient: LinearGradient(
@@ -965,21 +1112,25 @@ class _ChatPaneState extends State<_ChatPane> {
           Expanded(
             child: ListView.builder(
               padding: const EdgeInsets.fromLTRB(22, 20, 22, 12),
-              itemCount: messages.length + 1,
+              itemCount: _messages.length + 1,
               itemBuilder: (context, index) {
                 if (index == 0) {
                   return const _DaySeparator();
                 }
-                final message = messages[index - 1];
-                return _MessageBubble(message: message);
+                final message = _messages[index - 1];
+                return _MessageBubble(
+                  message: message,
+                  showReceipt: widget.privacySettings.value.showReadReceipts,
+                );
               },
             ),
           ),
           _Composer(
             controller: _composerController,
             onSend: _sendMessage,
-            onAttachmentPressed: () =>
-                _showNotReadyNotice(context, 'Allegati cifrati'),
+            isSending: _isSending,
+            isSendingAttachment: _isSendingAttachment,
+            onAttachmentPressed: _pickAndSendAttachment,
           ),
         ],
       ),
@@ -1089,11 +1240,15 @@ class _Composer extends StatelessWidget {
     required this.controller,
     required this.onSend,
     required this.onAttachmentPressed,
+    required this.isSending,
+    required this.isSendingAttachment,
   });
 
   final TextEditingController controller;
   final VoidCallback onSend;
   final VoidCallback onAttachmentPressed;
+  final bool isSending;
+  final bool isSendingAttachment;
 
   @override
   Widget build(BuildContext context) {
@@ -1109,8 +1264,14 @@ class _Composer extends StatelessWidget {
           children: [
             IconButton(
               tooltip: 'Allega file',
-              onPressed: onAttachmentPressed,
-              icon: const Icon(Icons.add_circle_outline_rounded),
+              onPressed: isSendingAttachment ? null : onAttachmentPressed,
+              icon: isSendingAttachment
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.add_circle_outline_rounded),
               color: const Color(0xFFB5BDC9),
             ),
             const SizedBox(width: 4),
@@ -1120,8 +1281,11 @@ class _Composer extends StatelessWidget {
                 controller: controller,
                 minLines: 1,
                 maxLines: 4,
+                textInputAction: _usesDesktopKeyboard
+                    ? TextInputAction.send
+                    : TextInputAction.newline,
                 textCapitalization: TextCapitalization.sentences,
-                onSubmitted: (_) => onSend(),
+                onSubmitted: _usesDesktopKeyboard ? (_) => onSend() : null,
                 decoration: const InputDecoration(
                   hintText: 'Scrivi un messaggio privato…',
                   contentPadding: EdgeInsets.symmetric(
@@ -1135,12 +1299,18 @@ class _Composer extends StatelessWidget {
             IconButton.filled(
               key: const ValueKey('send-message'),
               tooltip: 'Invia messaggio',
-              onPressed: onSend,
+              onPressed: isSending ? null : onSend,
               style: IconButton.styleFrom(
                 backgroundColor: Theme.of(context).colorScheme.primary,
                 foregroundColor: Theme.of(context).colorScheme.onPrimary,
               ),
-              icon: const Icon(Icons.arrow_upward_rounded),
+              icon: isSending
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.arrow_upward_rounded),
             ),
           ],
         ),
@@ -1336,9 +1506,10 @@ class _ConversationTile extends StatelessWidget {
 }
 
 class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({required this.message});
+  const _MessageBubble({required this.message, required this.showReceipt});
 
   final ChatMessage message;
+  final bool showReceipt;
 
   @override
   Widget build(BuildContext context) {
@@ -1367,10 +1538,53 @@ class _MessageBubble extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
-            Text(
-              message.body,
-              style: TextStyle(color: foreground, fontSize: 15, height: 1.3),
-            ),
+            if (message.attachmentName case final fileName?)
+              Container(
+                constraints: const BoxConstraints(minWidth: 210),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: foreground.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.insert_drive_file_rounded, color: foreground),
+                    const SizedBox(width: 10),
+                    Flexible(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            fileName,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: foreground,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          Text(
+                            _fileSizeLabel(
+                              message.attachmentBytes?.length ?? 0,
+                            ),
+                            style: TextStyle(
+                              color: foreground.withValues(alpha: 0.68),
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Icon(Icons.lock_rounded, size: 16, color: foreground),
+                  ],
+                ),
+              )
+            else
+              Text(
+                message.body,
+                style: TextStyle(color: foreground, fontSize: 15, height: 1.3),
+              ),
             const SizedBox(height: 5),
             Row(
               mainAxisSize: MainAxisSize.min,
@@ -1382,14 +1596,16 @@ class _MessageBubble extends StatelessWidget {
                     fontSize: 10,
                   ),
                 ),
-                if (outgoing) ...[
+                if (outgoing && showReceipt) ...[
                   const SizedBox(width: 4),
                   Icon(
-                    message.deliveryState == DeliveryState.read
-                        ? Icons.done_all_rounded
-                        : Icons.done_rounded,
+                    message.deliveryState == DeliveryState.sent
+                        ? Icons.done_rounded
+                        : Icons.done_all_rounded,
                     size: 14,
-                    color: foreground.withValues(alpha: 0.72),
+                    color: message.deliveryState == DeliveryState.read
+                        ? const Color(0xFF2F6FED)
+                        : foreground.withValues(alpha: 0.72),
                   ),
                 ],
               ],
@@ -1417,14 +1633,19 @@ class _ContactAvatar extends StatelessWidget {
           backgroundColor: Color(
             conversation.accentValue,
           ).withValues(alpha: 0.22),
-          child: Text(
-            conversation.initials,
-            style: TextStyle(
-              color: Color(conversation.accentValue),
-              fontSize: radius * 0.48,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
+          backgroundImage: conversation.avatarBytes == null
+              ? null
+              : MemoryImage(conversation.avatarBytes!),
+          child: conversation.avatarBytes != null
+              ? null
+              : Text(
+                  conversation.initials,
+                  style: TextStyle(
+                    color: Color(conversation.accentValue),
+                    fontSize: radius * 0.48,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
         ),
         if (conversation.isOnline)
           Positioned(
@@ -1972,6 +2193,11 @@ String _clockTime(DateTime value) {
   return '$hour:$minute';
 }
 
+String _fileSizeLabel(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  return '${(bytes / 1024).toStringAsFixed(bytes < 10 * 1024 ? 1 : 0)} KB';
+}
+
 void _showNotReadyNotice(BuildContext context, String feature) {
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
@@ -2351,3 +2577,25 @@ Color _networkColor(VeilidPhase phase) => switch (phase) {
   VeilidPhase.unavailable => const Color(0xFF77818F),
   VeilidPhase.error => const Color(0xFFFF8F86),
 };
+
+bool get _usesDesktopKeyboard =>
+    kIsWeb ||
+    defaultTargetPlatform == TargetPlatform.windows ||
+    defaultTargetPlatform == TargetPlatform.linux ||
+    defaultTargetPlatform == TargetPlatform.macOS;
+
+String _signatureForConversations(
+  List<Conversation> conversations,
+) => conversations
+    .map(
+      (item) =>
+          '${item.id}|${item.lastActivity.microsecondsSinceEpoch}|${item.lastMessage}|${item.unreadCount}|${item.safety.name}|${item.isOnline}',
+    )
+    .join('\n');
+
+String _signatureForMessages(List<ChatMessage> messages) => messages
+    .map(
+      (item) =>
+          '${item.id}|${item.sentAt.microsecondsSinceEpoch}|${item.deliveryState.name}',
+    )
+    .join('\n');

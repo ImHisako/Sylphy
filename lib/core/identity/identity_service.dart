@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../diagnostics/app_log.dart';
 import '../native/native_core.dart';
+import '../profile/user_profile.dart';
 
 enum IdentityPhase { unavailable, loading, ready, error }
 
@@ -79,10 +80,20 @@ class IdentityService extends ChangeNotifier {
   IdentitySnapshot _snapshot;
   bool _isLoading = false;
   Timer? _publishRetryTimer;
+  UserProfile? _publicProfile;
+  bool _shareDisplayName = true;
+  bool _shareProfilePhoto = true;
 
   IdentitySnapshot get snapshot => _snapshot;
 
-  Future<void> initialize() async {
+  Future<void> initialize({
+    UserProfile? profile,
+    bool shareDisplayName = true,
+    bool shareProfilePhoto = true,
+  }) async {
+    if (profile != null) _publicProfile = profile;
+    _shareDisplayName = shareDisplayName;
+    _shareProfilePhoto = shareProfilePhoto;
     final core = _nativeCore;
     if (core == null || _isLoading) {
       return;
@@ -108,6 +119,13 @@ class IdentityService extends ChangeNotifier {
       final response = core.ensureIdentity(
         storageDirectory: nativeDirectory.path,
         vaultPassword: vaultPassword,
+        displayName: _shareDisplayName ? _publicProfile?.displayName : null,
+        avatarBase64:
+            _shareProfilePhoto &&
+                _publicProfile?.photoBytes != null &&
+                _publicProfile!.photoBytes!.length <= 36 * 1024
+            ? base64Encode(_publicProfile!.photoBytes!)
+            : null,
       );
       if (!response.ok) {
         AppLog.instance.record(

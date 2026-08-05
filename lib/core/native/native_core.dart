@@ -38,6 +38,12 @@ abstract interface class NativeCoreApi {
     required String plaintext,
   });
 
+  NativeCoreResponse sendAttachment({
+    required String conversationId,
+    required String fileName,
+    required String bytesBase64,
+  });
+
   NativeCoreResponse markConversationRead(String conversationId);
 
   NativeCoreResponse deleteConversation(String conversationId);
@@ -50,6 +56,8 @@ abstract interface class NativeCoreApi {
   NativeCoreResponse ensureIdentity({
     required String storageDirectory,
     required String vaultPassword,
+    String? displayName,
+    String? avatarBase64,
   });
 
   NativeCoreResponse verifyHybridPrimitives();
@@ -154,6 +162,20 @@ class NativeCoreClient implements NativeCoreApi {
   }
 
   @override
+  NativeCoreResponse sendAttachment({
+    required String conversationId,
+    required String fileName,
+    required String bytesBase64,
+  }) {
+    return call({
+      'command': 'send_attachment',
+      'conversation_id': conversationId,
+      'file_name': fileName,
+      'bytes_base64': bytesBase64,
+    });
+  }
+
+  @override
   NativeCoreResponse markConversationRead(String conversationId) {
     return call({
       'command': 'mark_conversation_read',
@@ -185,11 +207,15 @@ class NativeCoreClient implements NativeCoreApi {
   NativeCoreResponse ensureIdentity({
     required String storageDirectory,
     required String vaultPassword,
+    String? displayName,
+    String? avatarBase64,
   }) {
     return call({
       'command': 'ensure_identity',
       'storage_directory': storageDirectory,
       'vault_password': vaultPassword,
+      if (displayName != null) 'display_name': displayName,
+      if (avatarBase64 != null) 'avatar_base64': avatarBase64,
     });
   }
 

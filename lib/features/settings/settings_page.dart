@@ -3,13 +3,20 @@ import 'package:flutter/services.dart';
 
 import '../../core/diagnostics/app_log.dart';
 import '../../core/native/native_core.dart';
+import '../../core/privacy/privacy_settings.dart';
 import '../../core/veilid/veilid_service.dart';
 
 class SettingsPage extends StatefulWidget {
-  const SettingsPage({super.key, required this.veilidService, this.nativeCore});
+  const SettingsPage({
+    super.key,
+    required this.veilidService,
+    required this.privacySettings,
+    this.nativeCore,
+  });
 
   final VeilidService veilidService;
   final NativeCoreApi? nativeCore;
+  final PrivacySettingsController privacySettings;
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -86,9 +93,14 @@ class _SettingsPageState extends State<SettingsPage> {
     return Scaffold(
       appBar: AppBar(title: const Text('Impostazioni')),
       body: AnimatedBuilder(
-        animation: Listenable.merge([AppLog.instance, widget.veilidService]),
+        animation: Listenable.merge([
+          AppLog.instance,
+          widget.veilidService,
+          widget.privacySettings,
+        ]),
         builder: (context, _) {
           final snapshot = widget.veilidService.snapshot;
+          final privacy = widget.privacySettings.value;
           return ListView(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
             children: [
@@ -105,6 +117,121 @@ class _SettingsPageState extends State<SettingsPage> {
                     onPressed: widget.veilidService.retry,
                     icon: const Icon(Icons.refresh_rounded),
                   ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              const _SectionTitle('PRIVACY DEL PROFILO'),
+              const SizedBox(height: 8),
+              _SettingsCard(
+                child: Column(
+                  children: [
+                    SwitchListTile(
+                      key: const ValueKey('share-display-name'),
+                      secondary: const Icon(Icons.badge_outlined),
+                      title: const Text('Mostra il nome profilo'),
+                      subtitle: const Text(
+                        'Consenti ai contatti di vedere il nome che hai scelto.',
+                      ),
+                      value: privacy.shareDisplayName,
+                      onChanged: (value) => widget.privacySettings.update(
+                        privacy.copyWith(shareDisplayName: value),
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    SwitchListTile(
+                      key: const ValueKey('share-profile-photo'),
+                      secondary: const Icon(Icons.account_circle_outlined),
+                      title: const Text('Mostra la foto profilo'),
+                      subtitle: const Text(
+                        'Condividi la foto solo con i contatti Sylphy.',
+                      ),
+                      value: privacy.shareProfilePhoto,
+                      onChanged: (value) => widget.privacySettings.update(
+                        privacy.copyWith(shareProfilePhoto: value),
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    SwitchListTile(
+                      secondary: const Icon(Icons.circle_outlined),
+                      title: const Text('Mostra quando sei online'),
+                      value: privacy.showOnlineStatus,
+                      onChanged: (value) => widget.privacySettings.update(
+                        privacy.copyWith(showOnlineStatus: value),
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    SwitchListTile(
+                      secondary: const Icon(Icons.schedule_outlined),
+                      title: const Text('Mostra ultimo accesso'),
+                      value: privacy.showLastSeen,
+                      onChanged: (value) => widget.privacySettings.update(
+                        privacy.copyWith(showLastSeen: value),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              const _SectionTitle('MESSAGGI E SPUNTE'),
+              const SizedBox(height: 8),
+              _SettingsCard(
+                child: Column(
+                  children: [
+                    SwitchListTile(
+                      key: const ValueKey('send-read-receipts'),
+                      secondary: const Icon(Icons.done_all_rounded),
+                      title: const Text('Conferme di lettura'),
+                      subtitle: const Text(
+                        'Se disattivate, l’altro utente non vedrà le doppie spunte di lettura.',
+                      ),
+                      value: privacy.sendReadReceipts,
+                      onChanged: (value) => widget.privacySettings.update(
+                        privacy.copyWith(sendReadReceipts: value),
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    SwitchListTile(
+                      key: const ValueKey('show-read-receipts'),
+                      secondary: const Icon(Icons.visibility_outlined),
+                      title: const Text('Mostra spunte ricevute'),
+                      subtitle: const Text(
+                        'Nasconde le spunte solo nella tua interfaccia.',
+                      ),
+                      value: privacy.showReadReceipts,
+                      onChanged: (value) => widget.privacySettings.update(
+                        privacy.copyWith(showReadReceipts: value),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              const _SectionTitle('CONTATTI E ACCESSIBILITÀ'),
+              const SizedBox(height: 8),
+              _SettingsCard(
+                child: Column(
+                  children: [
+                    SwitchListTile(
+                      secondary: const Icon(Icons.person_search_outlined),
+                      title: const Text('Richieste da sconosciuti'),
+                      subtitle: const Text(
+                        'Accetta nuove richieste soltanto quando è attivo.',
+                      ),
+                      value: privacy.allowUnknownContacts,
+                      onChanged: (value) => widget.privacySettings.update(
+                        privacy.copyWith(allowUnknownContacts: value),
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    SwitchListTile(
+                      secondary: const Icon(Icons.motion_photos_off_outlined),
+                      title: const Text('Riduci animazioni'),
+                      value: privacy.reduceMotion,
+                      onChanged: (value) => widget.privacySettings.update(
+                        privacy.copyWith(reduceMotion: value),
+                      ),
+                    ),
+                  ],
                 ),
               ),
               const SizedBox(height: 16),
@@ -210,6 +337,22 @@ class _SettingsCard extends StatelessWidget {
       child: child,
     );
   }
+}
+
+class _SectionTitle extends StatelessWidget {
+  const _SectionTitle(this.label);
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Text(
+    label,
+    style: Theme.of(context).textTheme.labelMedium?.copyWith(
+      color: const Color(0xFF9299A5),
+      fontWeight: FontWeight.w800,
+      letterSpacing: 1.1,
+    ),
+  );
 }
 
 class _LogViewer extends StatelessWidget {

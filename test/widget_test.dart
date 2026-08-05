@@ -34,9 +34,18 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Impostazioni'), findsOneWidget);
+    await tester.scrollUntilVisible(find.text('DEVELOPER OPTIONS'), 400);
     expect(find.text('DEVELOPER OPTIONS'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('developer-log-viewer')),
+      300,
+    );
     expect(find.byKey(const ValueKey('developer-log-viewer')), findsOneWidget);
 
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('developer-logging-switch')),
+      -250,
+    );
     await tester.tap(find.byKey(const ValueKey('developer-logging-switch')));
     await tester.pump();
     expect(AppLog.instance.verboseEnabled, isTrue);
@@ -75,6 +84,44 @@ void main() {
     await tester.pump();
 
     expect(find.text('Messaggio di prova'), findsAtLeastNWidgets(1));
+  });
+
+  testWidgets('sends with Enter on desktop', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final bridge = _TestMessagingBridge();
+    await tester.pumpWidget(
+      SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const ValueKey('message-composer')),
+      'Inviato con Invio',
+    );
+    await tester.testTextInput.receiveAction(TextInputAction.send);
+    await tester.pump();
+
+    expect(find.text('Inviato con Invio'), findsAtLeastNWidgets(1));
+  });
+
+  testWidgets('shows a new mobile message without leaving the chat', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final bridge = _TestMessagingBridge();
+    await tester.pumpWidget(
+      SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Contatto di test'));
+    await tester.pumpAndSettle();
+    bridge.injectIncoming('Messaggio arrivato ora');
+    await tester.pump(const Duration(milliseconds: 750));
+
+    expect(find.text('Messaggio arrivato ora'), findsOneWidget);
   });
 
   testWidgets('lets the user verify a contact without blocking messages', (
@@ -260,6 +307,45 @@ class _TestMessagingBridge implements SecureMessagingBridge {
   final List<ChatMessage> _messages = [];
 
   Conversation get conversation => _conversation;
+
+  @override
+  Future<void> sendAttachment({
+    required String conversationId,
+    required String fileName,
+    required List<int> bytes,
+  }) async {
+    final now = DateTime(2026, 1, 1, 12, 2);
+    _messages.add(
+      ChatMessage(
+        id: 'attachment-${_messages.length}',
+        authorId: 'me',
+        body: '📎 $fileName',
+        sentAt: now,
+        isOutgoing: true,
+        attachmentName: fileName,
+        attachmentBytes: Uint8List.fromList(bytes),
+      ),
+    );
+  }
+
+  void injectIncoming(String body) {
+    final now = DateTime(2026, 1, 1, 12, 1);
+    _messages.add(
+      ChatMessage(
+        id: 'incoming-${_messages.length}',
+        authorId: _conversation.id,
+        body: body,
+        sentAt: now,
+        isOutgoing: false,
+        deliveryState: DeliveryState.delivered,
+      ),
+    );
+    _conversation = _conversation.copyWith(
+      lastMessage: body,
+      lastActivity: now,
+      unreadCount: 1,
+    );
+  }
 
   @override
   Future<String> addContact({

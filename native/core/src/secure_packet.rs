@@ -51,7 +51,13 @@ pub fn seal_for(recipient: &PublishedIdentity, plaintext: &str) -> CoreResult<(V
     let signing_key = local.signing_key()?;
     let local_bundle = local.public_bundle()?;
     let route_blob = crate::veilid_adapter::local_route_blob()?;
-    let sender = PublishedIdentity::new(&signing_key, local_bundle.clone(), route_blob)?;
+    let sender = PublishedIdentity::new(
+        &signing_key,
+        local_bundle.clone(),
+        route_blob,
+        crate::peer_identity::current_public_profile(),
+        crate::peer_identity::current_public_mailbox(),
+    )?;
 
     let remote_x: [u8; 32] = recipient
         .bundle

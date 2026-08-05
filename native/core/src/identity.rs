@@ -44,6 +44,8 @@ pub(crate) struct IdentityRecord {
     message_storage_secret: Vec<u8>,
     #[serde(default)]
     dht_descriptor_json: Option<String>,
+    #[serde(default)]
+    mailbox_descriptor_json: Option<String>,
 }
 
 impl Drop for IdentityRecord {
@@ -71,6 +73,7 @@ impl IdentityRecord {
             expires_at_ms,
             message_storage_secret,
             dht_descriptor_json: None,
+            mailbox_descriptor_json: None,
         }
     }
 
@@ -171,7 +174,12 @@ impl IdentityRecord {
     }
 }
 
-pub fn ensure_identity(storage_directory: &str, vault_password: &str) -> CoreResult<Value> {
+pub fn ensure_identity(
+    storage_directory: &str,
+    vault_password: &str,
+    display_name: Option<String>,
+    avatar_base64: Option<String>,
+) -> CoreResult<Value> {
     validate_inputs(storage_directory, vault_password)?;
     let directory = PathBuf::from(storage_directory).join("identity");
     fs::create_dir_all(&directory).map_err(|_| CoreError::Internal)?;
@@ -202,11 +210,29 @@ pub fn ensure_identity(storage_directory: &str, vault_password: &str) -> CoreRes
     let identity_id = grouped_hex(&identity_hash[..8]);
     let serialized_bundle = serde_json::to_vec(&bundle).map_err(|_| CoreError::Internal)?;
     let mut invitation_code = format!("sylphy:{}", STANDARD_NO_PAD.encode(serialized_bundle));
+    let public_profile = crate::peer_identity::PublicProfile {
+        display_name,
+        avatar_base64,
+    };
+    crate::peer_identity::set_public_profile(public_profile.clone())?;
+    if let Ok((mailbox, descriptor)) =
+        crate::veilid_adapter::ensure_mailbox(record.mailbox_descriptor_json.as_deref())
+    {
+        crate::peer_identity::set_public_mailbox(Some(mailbox))?;
+        if record.mailbox_descriptor_json.as_deref() != Some(descriptor.as_str()) {
+            record.mailbox_descriptor_json = Some(descriptor);
+            should_persist = true;
+        }
+    } else {
+        crate::peer_identity::set_public_mailbox(None)?;
+    }
     if let Ok(route_blob) = crate::veilid_adapter::local_route_blob() {
         let published = crate::peer_identity::PublishedIdentity::new(
             &record.signing_key()?,
             bundle.clone(),
             route_blob,
+            public_profile,
+            crate::peer_identity::current_public_mailbox(),
         )?;
         if let Ok((short_code, descriptor)) = crate::veilid_adapter::publish_identity(
             record.dht_descriptor_json.as_deref(),
@@ -303,8 +329,10 @@ mod tests {
         ));
         let directory_text = directory.to_string_lossy().into_owned();
 
-        let first = ensure_identity(&directory_text, "test-device-secret").expect("identity");
-        let second = ensure_identity(&directory_text, "test-device-secret").expect("identity");
+        let first =
+            ensure_identity(&directory_text, "test-device-secret", None, None).expect("identity");
+        let second =
+            ensure_identity(&directory_text, "test-device-secret", None, None).expect("identity");
         assert_eq!(first["identity_id"], second["identity_id"]);
         assert_eq!(first["invitation_code"], second["invitation_code"]);
         let invitation = first["invitation_code"]
@@ -321,7 +349,7 @@ mod tests {
         let vault_bytes = fs::read(&vault_path).expect("vault file");
         assert!(!vault_bytes.windows(9).any(|value| value == b"identity_"));
         assert!(matches!(
-            ensure_identity(&directory_text, "wrong-device-secret"),
+            ensure_identity(&directory_text, "wrong-device-secret", None, None),
             Err(CoreError::AuthenticationFailed)
         ));
         fs::remove_dir_all(&directory).expect("remove isolated test directory");

@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import '../native/native_core.dart';
 import 'models.dart';
 import 'secure_messaging_bridge.dart';
@@ -76,6 +78,21 @@ class SylphyMessagingBridge implements SecureMessagingBridge {
       _core.sendText(conversationId: conversationId, plaintext: plaintext),
     );
   }
+
+  @override
+  Future<void> sendAttachment({
+    required String conversationId,
+    required String fileName,
+    required List<int> bytes,
+  }) async {
+    _requireSuccess(
+      _core.sendAttachment(
+        conversationId: conversationId,
+        fileName: fileName,
+        bytesBase64: base64Encode(bytes),
+      ),
+    );
+  }
 }
 
 void _requireSuccess(NativeCoreResponse response) {
@@ -110,6 +127,10 @@ Conversation _parseConversation(Object? value) {
       _ => throw const SecureMessagingException('invalid_native_response'),
     },
     fingerprint: _requiredString(value, 'fingerprint'),
+    avatarBytes: switch (value['avatar_base64']) {
+      final String encoded when encoded.isNotEmpty => base64Decode(encoded),
+      _ => null,
+    },
   );
 }
 
@@ -131,6 +152,11 @@ ChatMessage _parseMessage(Object? value) {
       'delivered' => DeliveryState.delivered,
       'read' => DeliveryState.read,
       _ => throw const SecureMessagingException('invalid_native_response'),
+    },
+    attachmentName: value['attachment_name'] as String?,
+    attachmentBytes: switch (value['attachment_base64']) {
+      final String encoded when encoded.isNotEmpty => base64Decode(encoded),
+      _ => null,
     },
   );
 }

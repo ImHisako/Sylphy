@@ -129,12 +129,20 @@ void main() {
 }
 
 class _FakeNativeCore implements NativeCoreApi {
+  @override
+  NativeCoreResponse sendAttachment({
+    required String conversationId,
+    required String fileName,
+    required String bytesBase64,
+  }) => throw UnimplementedError();
   String? storageDirectory;
 
   @override
   NativeCoreResponse ensureIdentity({
     required String storageDirectory,
     required String vaultPassword,
+    String? displayName,
+    String? avatarBase64,
   }) => throw UnimplementedError();
 
   @override
