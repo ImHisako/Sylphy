@@ -136,7 +136,17 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
 
       - name: Install Protobuf compiler
-        run: choco install protoc --no-progress -y
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify Protobuf compiler
+        shell: pwsh
+        run: |
+          $protoc = (Get-Command protoc -ErrorAction Stop).Source
+          "PROTOC=$protoc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          & $protoc --version
 
       - name: Build native core
         shell: pwsh
