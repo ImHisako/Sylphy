@@ -115,9 +115,14 @@ class _MessengerHomeState extends State<MessengerHome> {
     );
     try {
       await widget.bridge.markConversationRead(conversationId);
-    } on SecureMessagingException {
+    } on Object catch (error) {
       // A newly imported contact has no authenticated session yet, but its
       // safety details must remain inspectable from the UI.
+      AppLog.instance.recordError(
+        category: 'messenger',
+        action: 'mark_read_failed',
+        error: error,
+      );
     }
     if (!mounted) {
       return;
@@ -941,6 +946,7 @@ class _ChatPaneState extends State<_ChatPane> {
   String _messageSignature = '';
   bool _isSending = false;
   bool _isSendingAttachment = false;
+  String? _lastAcknowledgedIncomingId;
 
   @override
   void initState() {
@@ -959,6 +965,7 @@ class _ChatPaneState extends State<_ChatPane> {
       _composerController.clear();
       _messages = const [];
       _messageSignature = '';
+      _lastAcknowledgedIncomingId = null;
       _reloadMessages(force: true);
     }
   }
@@ -984,8 +991,29 @@ class _ChatPaneState extends State<_ChatPane> {
       _messages = messages;
       _messageSignature = signature;
     });
-    if (messages.any((message) => !message.isOutgoing)) {
-      widget.bridge.markConversationRead(widget.conversation.id);
+    String? latestIncomingId;
+    for (final message in messages.reversed) {
+      if (!message.isOutgoing) {
+        latestIncomingId = message.id;
+        break;
+      }
+    }
+    if (latestIncomingId != null &&
+        latestIncomingId != _lastAcknowledgedIncomingId) {
+      _lastAcknowledgedIncomingId = latestIncomingId;
+      unawaited(_markConversationReadSafely());
+    }
+  }
+
+  Future<void> _markConversationReadSafely() async {
+    try {
+      await widget.bridge.markConversationRead(widget.conversation.id);
+    } on Object catch (error) {
+      AppLog.instance.recordError(
+        category: 'messenger',
+        action: 'mark_read_failed',
+        error: error,
+      );
     }
   }
 
@@ -1006,12 +1034,15 @@ class _ChatPaneState extends State<_ChatPane> {
         conversationId: widget.conversation.id,
         plaintext: text,
       );
-    } on SecureMessagingException catch (error) {
+    } on Object catch (error) {
+      final code = error is SecureMessagingException
+          ? error.code
+          : 'native_call_failed';
       AppLog.instance.record(
         category: 'messenger',
         action: 'send_blocked',
         level: AppLogLevel.warning,
-        result: error.code,
+        result: code,
         force: true,
       );
       if (mounted) {
@@ -1021,12 +1052,12 @@ class _ChatPaneState extends State<_ChatPane> {
         );
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(switch (error.code) {
+            content: Text(switch (code) {
               'network_attach_failed' || 'network_startup_failed' =>
                 'Invio non riuscito: il destinatario non è raggiungibile.',
               'feature_unavailable' =>
                 'Questo contatto usa un vecchio ID. Chiedi il nuovo ID Sylphy breve.',
-              _ => 'Invio sicuro non riuscito (${error.code}).',
+              _ => 'Invio sicuro non riuscito ($code).',
             }),
           ),
         );
@@ -1074,14 +1105,17 @@ class _ChatPaneState extends State<_ChatPane> {
       if (!mounted) return;
       _reloadMessages(force: true);
       widget.onChanged();
-    } on SecureMessagingException catch (error) {
+    } on Object catch (error) {
+      final code = error is SecureMessagingException
+          ? error.code
+          : 'native_call_failed';
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              error.code == 'limit_exceeded'
+              code == 'limit_exceeded'
                   ? 'Allegato troppo grande per l’archivio cifrato.'
-                  : 'Invio dell’allegato non riuscito (${error.code}).',
+                  : 'Invio dell’allegato non riuscito ($code).',
             ),
           ),
         );

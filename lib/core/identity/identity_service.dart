@@ -79,6 +79,7 @@ class IdentityService extends ChangeNotifier {
   final Future<Directory> Function() _applicationSupportDirectory;
   IdentitySnapshot _snapshot;
   bool _isLoading = false;
+  bool _disposed = false;
   Timer? _publishRetryTimer;
   UserProfile? _publicProfile;
   bool _shareDisplayName = true;
@@ -95,7 +96,7 @@ class IdentityService extends ChangeNotifier {
     _shareDisplayName = shareDisplayName;
     _shareProfilePhoto = shareProfilePhoto;
     final core = _nativeCore;
-    if (core == null || _isLoading) {
+    if (core == null || _isLoading || _disposed) {
       return;
     }
     _isLoading = true;
@@ -207,12 +208,14 @@ class IdentityService extends ChangeNotifier {
   }
 
   void _setSnapshot(IdentitySnapshot value) {
+    if (_disposed) return;
     _snapshot = value;
     notifyListeners();
   }
 
   @override
   void dispose() {
+    _disposed = true;
     _publishRetryTimer?.cancel();
     super.dispose();
   }

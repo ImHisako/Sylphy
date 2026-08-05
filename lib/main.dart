@@ -32,7 +32,9 @@ Future<void> main() async {
       action: 'uncaught_error',
       error: error,
     );
-    return false;
+    // The error has been recorded. Returning false forwards it as unhandled
+    // and can terminate release builds on both Android and Windows.
+    return true;
   };
   final nativeCore = NativeCoreClient.tryLoad();
   AppLog.instance.record(
@@ -108,7 +110,11 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     unawaited(_loadProfile());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
-        unawaited(_initializeNativeServices());
+        _runGuarded(
+          _initializeNativeServices(),
+          category: 'app',
+          action: 'native_services_initialization_failed',
+        );
       }
     });
   }
@@ -126,7 +132,27 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     shareProfilePhoto: _privacySettings.value.shareProfilePhoto,
   );
 
-  void _onPrivacyChanged() => unawaited(_publishProfile());
+  void _onPrivacyChanged() => _runGuarded(
+    _publishProfile(),
+    category: 'identity',
+    action: 'privacy_publish_failed',
+  );
+
+  void _runGuarded(
+    Future<void> operation, {
+    required String category,
+    required String action,
+  }) {
+    unawaited(
+      operation.catchError((Object error) {
+        AppLog.instance.recordError(
+          category: category,
+          action: action,
+          error: error,
+        );
+      }),
+    );
+  }
 
   Future<void> _loadProfile() async {
     AppLog.instance.record(
@@ -158,7 +184,13 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       _profile = profile;
       _profileLoaded = true;
     });
-    if (profile != null) unawaited(_publishProfile());
+    if (profile != null) {
+      _runGuarded(
+        _publishProfile(),
+        category: 'identity',
+        action: 'profile_publish_failed',
+      );
+    }
   }
 
   void _completeOnboarding(UserProfile profile) {
@@ -171,7 +203,11 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       _profile = profile;
       _isEditingProfile = false;
     });
-    unawaited(_publishProfile());
+    _runGuarded(
+      _publishProfile(),
+      category: 'identity',
+      action: 'profile_publish_failed',
+    );
   }
 
   void _editProfile() {
