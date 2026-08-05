@@ -79,9 +79,11 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   late final IdentityService _identityService;
   late final bool _ownsIdentityService;
   late final PrivacySettingsController _privacySettings;
+  late final Future<void> _profileLoadFuture;
   UserProfile? _profile;
   bool _profileLoaded = false;
   bool _isEditingProfile = false;
+  bool _nativeServicesReady = false;
 
   @override
   void initState() {
@@ -107,7 +109,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
         IdentityService(nativeCore: widget.nativeCore);
     _privacySettings = widget.privacySettings ?? PrivacySettingsController();
     _privacySettings.addListener(_onPrivacyChanged);
-    unawaited(_loadProfile());
+    _profileLoadFuture = _loadProfile();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         _runGuarded(
@@ -120,10 +122,17 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   }
 
   Future<void> _initializeNativeServices() async {
-    await const MessageNotifications().initialize();
-    if (!_privacySettings.loaded) await _privacySettings.load();
-    await _veilidService.start();
-    await _publishProfile();
+    try {
+      await const MessageNotifications().initialize();
+      if (!_privacySettings.loaded) await _privacySettings.load();
+      await _profileLoadFuture;
+      await _veilidService.start();
+      if (_profile != null) {
+        await _publishProfile();
+      }
+    } finally {
+      _nativeServicesReady = true;
+    }
   }
 
   Future<void> _publishProfile() => _identityService.initialize(
@@ -132,11 +141,16 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     shareProfilePhoto: _privacySettings.value.shareProfilePhoto,
   );
 
-  void _onPrivacyChanged() => _runGuarded(
-    _publishProfile(),
-    category: 'identity',
-    action: 'privacy_publish_failed',
-  );
+  void _onPrivacyChanged() {
+    if (!_nativeServicesReady) {
+      return;
+    }
+    _runGuarded(
+      _publishProfile(),
+      category: 'identity',
+      action: 'privacy_publish_failed',
+    );
+  }
 
   void _runGuarded(
     Future<void> operation, {
@@ -184,13 +198,6 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       _profile = profile;
       _profileLoaded = true;
     });
-    if (profile != null) {
-      _runGuarded(
-        _publishProfile(),
-        category: 'identity',
-        action: 'profile_publish_failed',
-      );
-    }
   }
 
   void _completeOnboarding(UserProfile profile) {

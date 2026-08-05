@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -80,7 +79,6 @@ class IdentityService extends ChangeNotifier {
   IdentitySnapshot _snapshot;
   bool _isLoading = false;
   bool _disposed = false;
-  Timer? _publishRetryTimer;
   UserProfile? _publicProfile;
   bool _shareDisplayName = true;
   bool _shareProfilePhoto = true;
@@ -117,17 +115,28 @@ class IdentityService extends ChangeNotifier {
         '${supportDirectory.path}${Platform.pathSeparator}native',
       );
       await nativeDirectory.create(recursive: true);
-      final response = core.ensureIdentity(
-        storageDirectory: nativeDirectory.path,
-        vaultPassword: vaultPassword,
-        displayName: _shareDisplayName ? _publicProfile?.displayName : null,
-        avatarBase64:
-            _shareProfilePhoto &&
-                _publicProfile?.photoBytes != null &&
-                _publicProfile!.photoBytes!.length <= 36 * 1024
-            ? base64Encode(_publicProfile!.photoBytes!)
-            : null,
-      );
+      final displayName = _shareDisplayName
+          ? _publicProfile?.displayName
+          : null;
+      final avatarBase64 =
+          _shareProfilePhoto &&
+              _publicProfile?.photoBytes != null &&
+              _publicProfile!.photoBytes!.length <= 36 * 1024
+          ? base64Encode(_publicProfile!.photoBytes!)
+          : null;
+      final response = core is NativeCoreClient
+          ? await core.ensureIdentityInBackground(
+              storageDirectory: nativeDirectory.path,
+              vaultPassword: vaultPassword,
+              displayName: displayName,
+              avatarBase64: avatarBase64,
+            )
+          : core.ensureIdentity(
+              storageDirectory: nativeDirectory.path,
+              vaultPassword: vaultPassword,
+              displayName: displayName,
+              avatarBase64: avatarBase64,
+            );
       if (!response.ok) {
         AppLog.instance.record(
           category: 'identity',
@@ -177,14 +186,6 @@ class IdentityService extends ChangeNotifier {
           ).toLocal(),
         ),
       );
-      if (invitationCode.length > 256) {
-        _publishRetryTimer ??= Timer.periodic(const Duration(seconds: 10), (_) {
-          initialize();
-        });
-      } else {
-        _publishRetryTimer?.cancel();
-        _publishRetryTimer = null;
-      }
       AppLog.instance.record(
         category: 'identity',
         action: 'initialization_completed',
@@ -216,7 +217,6 @@ class IdentityService extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    _publishRetryTimer?.cancel();
     super.dispose();
   }
 }

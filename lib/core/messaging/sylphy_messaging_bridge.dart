@@ -11,6 +11,13 @@ class SylphyMessagingBridge implements SecureMessagingBridge {
 
   final NativeCoreApi _core;
 
+  Future<void> _waitUntilCoreIsAvailable() {
+    final core = _core;
+    return core is NativeCoreClient
+        ? core.waitUntilAvailable()
+        : Future.value();
+  }
+
   @override
   List<Conversation> listConversations() {
     final response = _core.listConversations();
@@ -38,6 +45,7 @@ class SylphyMessagingBridge implements SecureMessagingBridge {
     required String displayName,
     required String invitationCode,
   }) async {
+    await _waitUntilCoreIsAvailable();
     final response = _core.addContact(
       displayName: displayName,
       invitationCode: invitationCode,
@@ -48,11 +56,13 @@ class SylphyMessagingBridge implements SecureMessagingBridge {
 
   @override
   Future<void> markConversationRead(String conversationId) async {
+    await _waitUntilCoreIsAvailable();
     _requireSuccess(_core.markConversationRead(conversationId));
   }
 
   @override
   Future<void> deleteConversation(String conversationId) async {
+    await _waitUntilCoreIsAvailable();
     _requireSuccess(_core.deleteConversation(conversationId));
   }
 
@@ -61,6 +71,7 @@ class SylphyMessagingBridge implements SecureMessagingBridge {
     required String conversationId,
     required bool verified,
   }) async {
+    await _waitUntilCoreIsAvailable();
     _requireSuccess(
       _core.setContactVerified(
         conversationId: conversationId,
@@ -74,6 +85,7 @@ class SylphyMessagingBridge implements SecureMessagingBridge {
     required String conversationId,
     required String plaintext,
   }) async {
+    await _waitUntilCoreIsAvailable();
     _requireSuccess(
       _core.sendText(conversationId: conversationId, plaintext: plaintext),
     );
@@ -85,6 +97,7 @@ class SylphyMessagingBridge implements SecureMessagingBridge {
     required String fileName,
     required List<int> bytes,
   }) async {
+    await _waitUntilCoreIsAvailable();
     _requireSuccess(
       _core.sendAttachment(
         conversationId: conversationId,

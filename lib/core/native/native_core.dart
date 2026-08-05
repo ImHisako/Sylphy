@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
 
@@ -71,6 +73,12 @@ class NativeCoreClient implements NativeCoreApi {
   final _DartCall _call;
   final _DartFreeString _freeString;
   final int abiVersion;
+  bool _backgroundCallInProgress = false;
+  Future<void>? _backgroundCall;
+
+  bool get backgroundCallInProgress => _backgroundCallInProgress;
+
+  Future<void> waitUntilAvailable() => _backgroundCall ?? Future.value();
 
   static NativeCoreClient? tryLoad() {
     if (!Platform.isWindows && !Platform.isLinux && !Platform.isAndroid) {
@@ -219,6 +227,62 @@ class NativeCoreClient implements NativeCoreApi {
     });
   }
 
+  Future<NativeCoreResponse> ensureIdentityInBackground({
+    required String storageDirectory,
+    required String vaultPassword,
+    String? displayName,
+    String? avatarBase64,
+  }) async {
+    await waitUntilAvailable();
+    final completer = Completer<void>();
+    _backgroundCallInProgress = true;
+    _backgroundCall = completer.future;
+    final stopwatch = Stopwatch()..start();
+    AppLog.instance.record(
+      category: 'native_core',
+      action: 'background_call_started:ensure_identity',
+      verbose: true,
+    );
+    try {
+      final response = await Isolate.run(() {
+        final client = NativeCoreClient.tryLoad();
+        if (client == null) {
+          return const NativeCoreResponse(
+            ok: false,
+            code: 'feature_unavailable',
+            data: {},
+          );
+        }
+        return client.ensureIdentity(
+          storageDirectory: storageDirectory,
+          vaultPassword: vaultPassword,
+          displayName: displayName,
+          avatarBase64: avatarBase64,
+        );
+      });
+      AppLog.instance.record(
+        category: 'native_core',
+        action: 'background_call_completed:ensure_identity',
+        level: response.ok ? AppLogLevel.debug : AppLogLevel.error,
+        result: '${response.code}.${stopwatch.elapsedMilliseconds}ms',
+        verbose: response.ok,
+        force: !response.ok,
+      );
+      return response;
+    } on Object catch (error) {
+      AppLog.instance.recordError(
+        category: 'native_core',
+        action: 'background_call_failed:ensure_identity',
+        error: error,
+      );
+      rethrow;
+    } finally {
+      _backgroundCallInProgress = false;
+      _backgroundCall = null;
+      completer.complete();
+    }
+  }
+
   @override
   NativeCoreResponse verifyHybridPrimitives() {
     return call(const {'command': 'hybrid_self_test'});
@@ -231,6 +295,13 @@ class NativeCoreClient implements NativeCoreApi {
 
   NativeCoreResponse call(Map<String, Object> request) {
     final command = request['command'] as String? ?? 'unknown';
+    if (_backgroundCallInProgress) {
+      return const NativeCoreResponse(
+        ok: false,
+        code: 'native_core_busy',
+        data: {},
+      );
+    }
     final stopwatch = Stopwatch()..start();
     AppLog.instance.record(
       category: 'native_core',

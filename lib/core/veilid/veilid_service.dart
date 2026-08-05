@@ -197,6 +197,9 @@ class VeilidService extends ChangeNotifier {
     if (core == null || _disposed) {
       return;
     }
+    if (core is NativeCoreClient && core.backgroundCallInProgress) {
+      return;
+    }
     try {
       _setSnapshot(VeilidSnapshot.fromResponse(core.veilidStatus()));
     } on NativeCoreException catch (error) {

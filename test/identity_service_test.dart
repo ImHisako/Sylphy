@@ -29,6 +29,30 @@ void main() {
       expect(core.receivedStorageDirectory, endsWith('native'));
     },
   );
+
+  test(
+    'does not retry a long inline invitation on a periodic timer',
+    () async {
+      final supportDirectory = await Directory.systemTemp.createTemp(
+        'sylphy-identity-inline-test-',
+      );
+      addTearDown(() => supportDirectory.delete(recursive: true));
+      final core = _IdentityNativeCore(invitationCode: 'sylphy:${'a' * 512}');
+      final service = IdentityService(
+        nativeCore: core,
+        deviceSecretStore: _TestDeviceSecretStore(),
+        applicationSupportDirectory: () async => supportDirectory,
+      );
+      addTearDown(service.dispose);
+
+      await service.initialize();
+      await Future<void>.delayed(const Duration(seconds: 11));
+
+      expect(core.ensureIdentityCalls, 1);
+      expect(service.snapshot.phase, IdentityPhase.ready);
+    },
+    timeout: const Timeout(Duration(seconds: 20)),
+  );
 }
 
 class _TestDeviceSecretStore implements DeviceSecretStore {
@@ -37,6 +61,11 @@ class _TestDeviceSecretStore implements DeviceSecretStore {
 }
 
 class _IdentityNativeCore implements NativeCoreApi {
+  _IdentityNativeCore({this.invitationCode = 'sylphy:signed-public-bundle'});
+
+  final String invitationCode;
+  int ensureIdentityCalls = 0;
+
   @override
   NativeCoreResponse sendAttachment({
     required String conversationId,
@@ -53,14 +82,15 @@ class _IdentityNativeCore implements NativeCoreApi {
     String? displayName,
     String? avatarBase64,
   }) {
+    ensureIdentityCalls += 1;
     receivedStorageDirectory = storageDirectory;
     receivedVaultPassword = vaultPassword;
-    return const NativeCoreResponse(
+    return NativeCoreResponse(
       ok: true,
       code: 'ok',
       data: {
         'identity_id': 'AAAA BBBB CCCC DDDD',
-        'invitation_code': 'sylphy:signed-public-bundle',
+        'invitation_code': invitationCode,
         'expires_at_ms': 1800000000000,
       },
     );
