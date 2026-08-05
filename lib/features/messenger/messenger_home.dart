@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../core/diagnostics/app_log.dart';
 import '../../core/messaging/models.dart';
 import '../../core/messaging/secure_messaging_bridge.dart';
 import '../../core/native/native_core.dart';
@@ -7,6 +8,7 @@ import '../../core/identity/identity_service.dart';
 import '../../core/profile/user_profile.dart';
 import '../../core/veilid/veilid_service.dart';
 import '../profile/profile_sheet.dart';
+import '../settings/settings_page.dart';
 
 class MessengerHome extends StatefulWidget {
   const MessengerHome({
@@ -43,6 +45,11 @@ class _MessengerHomeState extends State<MessengerHome> {
   }
 
   Future<void> _selectConversation(String conversationId) async {
+    AppLog.instance.record(
+      category: 'messenger',
+      action: 'conversation_selected',
+      verbose: true,
+    );
     try {
       await widget.bridge.markConversationRead(conversationId);
     } on SecureMessagingException {
@@ -56,6 +63,11 @@ class _MessengerHomeState extends State<MessengerHome> {
   }
 
   Future<void> _addContact() async {
+    AppLog.instance.record(
+      category: 'contacts',
+      action: 'add_dialog_opened',
+      verbose: true,
+    );
     final draft = await showDialog<_ContactDraft>(
       context: context,
       builder: (context) => const _AddContactDialog(),
@@ -72,6 +84,11 @@ class _MessengerHomeState extends State<MessengerHome> {
         return;
       }
       setState(() => _activeConversationId = contactId);
+      AppLog.instance.record(
+        category: 'contacts',
+        action: 'contact_added',
+        verbose: true,
+      );
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -80,6 +97,13 @@ class _MessengerHomeState extends State<MessengerHome> {
         ),
       );
     } on SecureMessagingException catch (error) {
+      AppLog.instance.record(
+        category: 'contacts',
+        action: 'contact_add_failed',
+        level: AppLogLevel.warning,
+        result: error.code,
+        force: true,
+      );
       if (!mounted) {
         return;
       }
@@ -106,11 +130,33 @@ class _MessengerHomeState extends State<MessengerHome> {
   }
 
   void _openProfile() {
+    AppLog.instance.record(
+      category: 'profile',
+      action: 'sheet_opened',
+      verbose: true,
+    );
     showProfileSheet(
       context: context,
       profile: widget.profile,
       identityService: widget.identityService,
       onEditProfile: widget.onEditProfile,
+    );
+  }
+
+  void _openSettings() {
+    AppLog.instance.record(
+      category: 'settings',
+      action: 'opened',
+      verbose: true,
+    );
+    Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        settings: const RouteSettings(name: '/settings'),
+        builder: (context) => SettingsPage(
+          nativeCore: widget.nativeCore,
+          veilidService: widget.veilidService,
+        ),
+      ),
     );
   }
 
@@ -141,6 +187,7 @@ class _MessengerHomeState extends State<MessengerHome> {
             onChanged: _refresh,
             onAddContact: _addContact,
             onProfilePressed: _openProfile,
+            onSettingsPressed: _openSettings,
             showDetails: constraints.maxWidth >= 1180,
           );
         }
@@ -154,6 +201,7 @@ class _MessengerHomeState extends State<MessengerHome> {
           onChanged: _refresh,
           onAddContact: _addContact,
           onProfilePressed: _openProfile,
+          onSettingsPressed: _openSettings,
         );
       },
     );
@@ -172,6 +220,7 @@ class _DesktopMessenger extends StatelessWidget {
     required this.onChanged,
     required this.onAddContact,
     required this.onProfilePressed,
+    required this.onSettingsPressed,
     required this.showDetails,
   });
 
@@ -185,6 +234,7 @@ class _DesktopMessenger extends StatelessWidget {
   final VoidCallback onChanged;
   final VoidCallback onAddContact;
   final VoidCallback onProfilePressed;
+  final VoidCallback onSettingsPressed;
   final bool showDetails;
 
   @override
@@ -200,6 +250,7 @@ class _DesktopMessenger extends StatelessWidget {
               onProfilePressed: onProfilePressed,
               onPrivacyPressed: () =>
                   _showPrivacyOverview(context, nativeCore, veilidService),
+              onSettingsPressed: onSettingsPressed,
             ),
             const VerticalDivider(width: 1),
             SizedBox(
@@ -332,6 +383,7 @@ class _DesktopAppRail extends StatelessWidget {
     required this.onAddContact,
     required this.onProfilePressed,
     required this.onPrivacyPressed,
+    required this.onSettingsPressed,
   });
 
   final VeilidSnapshot snapshot;
@@ -339,6 +391,7 @@ class _DesktopAppRail extends StatelessWidget {
   final VoidCallback onAddContact;
   final VoidCallback onProfilePressed;
   final VoidCallback onPrivacyPressed;
+  final VoidCallback onSettingsPressed;
 
   @override
   Widget build(BuildContext context) {
@@ -416,6 +469,12 @@ class _DesktopAppRail extends StatelessWidget {
                 tooltip: 'Privacy e rete',
                 onPressed: onPrivacyPressed,
               ),
+              _RailButton(
+                key: const ValueKey('open-settings'),
+                icon: Icons.settings_outlined,
+                tooltip: 'Impostazioni',
+                onPressed: onSettingsPressed,
+              ),
               const SizedBox(height: 8),
               _ProfileAvatar(
                 profile: profile,
@@ -432,6 +491,7 @@ class _DesktopAppRail extends StatelessWidget {
 
 class _RailButton extends StatelessWidget {
   const _RailButton({
+    super.key,
     required this.icon,
     required this.tooltip,
     this.selected = false,
@@ -589,6 +649,7 @@ class _MobileConversationList extends StatelessWidget {
     required this.onChanged,
     required this.onAddContact,
     required this.onProfilePressed,
+    required this.onSettingsPressed,
   });
 
   final SecureMessagingBridge bridge;
@@ -600,6 +661,7 @@ class _MobileConversationList extends StatelessWidget {
   final VoidCallback onChanged;
   final VoidCallback onAddContact;
   final VoidCallback onProfilePressed;
+  final VoidCallback onSettingsPressed;
 
   @override
   Widget build(BuildContext context) {
@@ -622,7 +684,13 @@ class _MobileConversationList extends StatelessWidget {
                 _showPrivacyOverview(context, nativeCore, veilidService),
             icon: const Icon(Icons.shield_outlined),
           ),
-          const SizedBox(width: 8),
+          IconButton(
+            key: const ValueKey('open-settings'),
+            tooltip: 'Impostazioni',
+            onPressed: onSettingsPressed,
+            icon: const Icon(Icons.settings_outlined),
+          ),
+          const SizedBox(width: 4),
         ],
       ),
       body: SafeArea(
@@ -798,12 +866,24 @@ class _ChatPaneState extends State<_ChatPane> {
     if (text.trim().isEmpty) {
       return;
     }
+    AppLog.instance.record(
+      category: 'messenger',
+      action: 'send_requested',
+      verbose: true,
+    );
     try {
       await widget.bridge.sendText(
         conversationId: widget.conversation.id,
         plaintext: text,
       );
-    } on SecureMessagingException {
+    } on SecureMessagingException catch (error) {
+      AppLog.instance.record(
+        category: 'messenger',
+        action: 'send_blocked',
+        level: AppLogLevel.warning,
+        result: error.code,
+        force: true,
+      );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -821,6 +901,11 @@ class _ChatPaneState extends State<_ChatPane> {
     _composerController.clear();
     setState(() {});
     widget.onChanged();
+    AppLog.instance.record(
+      category: 'messenger',
+      action: 'send_completed',
+      verbose: true,
+    );
   }
 
   @override

@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../diagnostics/app_log.dart';
 import '../native/native_core.dart';
 
 enum IdentityPhase { unavailable, loading, ready, error }
@@ -85,6 +86,11 @@ class IdentityService extends ChangeNotifier {
       return;
     }
     _isLoading = true;
+    AppLog.instance.record(
+      category: 'identity',
+      action: 'initialization_started',
+      verbose: true,
+    );
     _setSnapshot(const IdentitySnapshot(phase: IdentityPhase.loading));
     try {
       final results = await Future.wait<Object>([
@@ -102,6 +108,13 @@ class IdentityService extends ChangeNotifier {
         vaultPassword: vaultPassword,
       );
       if (!response.ok) {
+        AppLog.instance.record(
+          category: 'identity',
+          action: 'initialization_rejected',
+          level: AppLogLevel.error,
+          result: response.code,
+          force: true,
+        );
         _setSnapshot(
           IdentitySnapshot(
             phase: IdentityPhase.error,
@@ -118,6 +131,12 @@ class IdentityService extends ChangeNotifier {
           invitationCode is! String ||
           !invitationCode.startsWith('sylphy:') ||
           expiresAtMs is! int) {
+        AppLog.instance.record(
+          category: 'identity',
+          action: 'invalid_native_response',
+          level: AppLogLevel.error,
+          force: true,
+        );
         _setSnapshot(
           const IdentitySnapshot(
             phase: IdentityPhase.error,
@@ -137,7 +156,17 @@ class IdentityService extends ChangeNotifier {
           ).toLocal(),
         ),
       );
-    } on Exception {
+      AppLog.instance.record(
+        category: 'identity',
+        action: 'initialization_completed',
+        verbose: true,
+      );
+    } on Exception catch (error) {
+      AppLog.instance.recordError(
+        category: 'identity',
+        action: 'initialization_failed',
+        error: error,
+      );
       _setSnapshot(
         const IdentitySnapshot(
           phase: IdentityPhase.error,

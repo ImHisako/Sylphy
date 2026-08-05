@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 
+import 'core/diagnostics/app_log.dart';
 import 'core/messaging/secure_messaging_bridge.dart';
 import 'core/messaging/sylphy_messaging_bridge.dart';
 import 'core/identity/identity_service.dart';
@@ -11,9 +13,34 @@ import 'core/veilid/veilid_service.dart';
 import 'features/messenger/messenger_home.dart';
 import 'features/onboarding/profile_onboarding.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(SylphyApp(nativeCore: NativeCoreClient.tryLoad()));
+  await AppLog.instance.initialize();
+  FlutterError.onError = (details) {
+    AppLog.instance.recordError(
+      category: 'flutter',
+      action: 'framework_error',
+      error: details.exception,
+    );
+    FlutterError.presentError(details);
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    AppLog.instance.recordError(
+      category: 'dart',
+      action: 'uncaught_error',
+      error: error,
+    );
+    return false;
+  };
+  final nativeCore = NativeCoreClient.tryLoad();
+  AppLog.instance.record(
+    category: 'native_core',
+    action: 'library_load',
+    level: nativeCore == null ? AppLogLevel.error : AppLogLevel.info,
+    result: nativeCore == null ? 'unavailable' : 'abi_${nativeCore.abiVersion}',
+    force: nativeCore == null,
+  );
+  runApp(SylphyApp(nativeCore: nativeCore));
 }
 
 class SylphyApp extends StatefulWidget {
@@ -38,7 +65,7 @@ class SylphyApp extends StatefulWidget {
   State<SylphyApp> createState() => _SylphyAppState();
 }
 
-class _SylphyAppState extends State<SylphyApp> {
+class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   late final SecureMessagingBridge _bridge;
   late final VeilidService _veilidService;
   late final bool _ownsVeilidService;
@@ -52,6 +79,12 @@ class _SylphyAppState extends State<SylphyApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    AppLog.instance.record(
+      category: 'app',
+      action: 'application_started',
+      verbose: true,
+    );
     _bridge =
         widget.bridge ??
         (widget.nativeCore == null
@@ -75,11 +108,27 @@ class _SylphyAppState extends State<SylphyApp> {
   }
 
   Future<void> _loadProfile() async {
+    AppLog.instance.record(
+      category: 'profile',
+      action: 'load_started',
+      verbose: true,
+    );
     UserProfile? profile;
     try {
       profile = await _profileStore.load();
-    } on Exception {
+      AppLog.instance.record(
+        category: 'profile',
+        action: 'load_completed',
+        result: profile == null ? 'missing' : 'available',
+        verbose: true,
+      );
+    } on Exception catch (error) {
       profile = null;
+      AppLog.instance.recordError(
+        category: 'profile',
+        action: 'load_failed',
+        error: error,
+      );
     }
     if (!mounted) {
       return;
@@ -91,18 +140,31 @@ class _SylphyAppState extends State<SylphyApp> {
   }
 
   void _completeOnboarding(UserProfile profile) {
+    AppLog.instance.record(
+      category: 'profile',
+      action: 'onboarding_completed',
+      verbose: true,
+    );
     setState(() {
       _profile = profile;
       _isEditingProfile = false;
     });
   }
 
-  void _editProfile() => setState(() => _isEditingProfile = true);
+  void _editProfile() {
+    AppLog.instance.record(
+      category: 'profile',
+      action: 'edit_opened',
+      verbose: true,
+    );
+    setState(() => _isEditingProfile = true);
+  }
 
   void _cancelProfileEdit() => setState(() => _isEditingProfile = false);
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     if (_ownsVeilidService) {
       unawaited(_veilidService.stop());
       _veilidService.dispose();
@@ -111,6 +173,16 @@ class _SylphyAppState extends State<SylphyApp> {
       _identityService.dispose();
     }
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    AppLog.instance.record(
+      category: 'lifecycle',
+      action: 'state_changed',
+      result: state.name,
+      verbose: true,
+    );
   }
 
   @override
@@ -132,6 +204,7 @@ class _SylphyAppState extends State<SylphyApp> {
     return MaterialApp(
       title: 'Sylphy',
       debugShowCheckedModeBanner: false,
+      navigatorObservers: [_DiagnosticNavigatorObserver()],
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: colorScheme,
@@ -173,6 +246,13 @@ class _SylphyAppState extends State<SylphyApp> {
         snackBarTheme: SnackBarThemeData(
           behavior: SnackBarBehavior.floating,
           backgroundColor: const Color(0xFF252B34),
+          contentTextStyle: const TextStyle(
+            color: Color(0xFFF4F7F2),
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+          ),
+          actionTextColor: primary,
+          disabledActionTextColor: const Color(0xFF9299A5),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(14),
           ),
@@ -200,5 +280,31 @@ class _SylphyAppState extends State<SylphyApp> {
               ),
             ),
     );
+  }
+}
+
+class _DiagnosticNavigatorObserver extends NavigatorObserver {
+  void _record(String action, Route<dynamic>? route) {
+    AppLog.instance.record(
+      category: 'navigation',
+      action: action,
+      result: route?.settings.name ?? route?.runtimeType.toString() ?? 'none',
+      verbose: true,
+    );
+  }
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    _record('route_pushed', route);
+  }
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    _record('route_popped', route);
+  }
+
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) {
+    _record('route_replaced', newRoute);
   }
 }

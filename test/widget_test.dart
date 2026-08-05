@@ -2,12 +2,46 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sylphy/core/diagnostics/app_log.dart';
 import 'package:sylphy/core/messaging/models.dart';
 import 'package:sylphy/core/messaging/secure_messaging_bridge.dart';
 import 'package:sylphy/core/profile/user_profile.dart';
 import 'package:sylphy/main.dart';
 
 void main() {
+  testWidgets('uses readable text in floating notifications', (tester) async {
+    await tester.pumpWidget(SylphyApp(profileStore: _completedProfileStore()));
+    await tester.pumpAndSettle();
+
+    final context = tester.element(find.byType(Scaffold).first);
+    final snackBarTheme = Theme.of(context).snackBarTheme;
+
+    expect(snackBarTheme.backgroundColor, const Color(0xFF252B34));
+    expect(snackBarTheme.contentTextStyle?.color, const Color(0xFFF4F7F2));
+    expect(snackBarTheme.actionTextColor, const Color(0xFFCFF36A));
+  });
+
+  testWidgets('opens Developer Options and exposes diagnostic logs', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    addTearDown(() => AppLog.instance.setVerboseEnabled(false));
+    await tester.pumpWidget(SylphyApp(profileStore: _completedProfileStore()));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('open-settings')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Impostazioni'), findsOneWidget);
+    expect(find.text('DEVELOPER OPTIONS'), findsOneWidget);
+    expect(find.byKey(const ValueKey('developer-log-viewer')), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('developer-logging-switch')));
+    await tester.pump();
+    expect(AppLog.instance.verboseEnabled, isTrue);
+  });
+
   testWidgets('starts closed without demonstration conversations', (
     tester,
   ) async {

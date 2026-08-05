@@ -4,6 +4,8 @@ import 'dart:io';
 
 import 'package:ffi/ffi.dart';
 
+import '../diagnostics/app_log.dart';
+
 const _expectedAbiVersion = 4;
 
 typedef _NativeAbiVersion = Uint32 Function();
@@ -61,6 +63,13 @@ class NativeCoreClient implements NativeCoreApi {
             'sylphy_core_abi_version',
           )();
       if (abiVersion != _expectedAbiVersion) {
+        AppLog.instance.record(
+          category: 'native_core',
+          action: 'abi_mismatch',
+          level: AppLogLevel.error,
+          result: 'expected_$_expectedAbiVersion.actual_$abiVersion',
+          force: true,
+        );
         return null;
       }
       return NativeCoreClient._(
@@ -70,7 +79,12 @@ class NativeCoreClient implements NativeCoreApi {
         ),
         abiVersion,
       );
-    } on ArgumentError {
+    } on Object catch (error) {
+      AppLog.instance.recordError(
+        category: 'native_core',
+        action: 'dynamic_library_load_failed',
+        error: error,
+      );
       return null;
     }
   }
@@ -136,6 +150,13 @@ class NativeCoreClient implements NativeCoreApi {
   }
 
   NativeCoreResponse call(Map<String, Object> request) {
+    final command = request['command'] as String? ?? 'unknown';
+    final stopwatch = Stopwatch()..start();
+    AppLog.instance.record(
+      category: 'native_core',
+      action: 'call_started:$command',
+      verbose: true,
+    );
     final requestPointer = jsonEncode(request).toNativeUtf8();
     Pointer<Utf8>? responsePointer;
     try {
@@ -149,11 +170,32 @@ class NativeCoreClient implements NativeCoreApi {
       if (decoded is! Map<String, dynamic>) {
         throw const NativeCoreException('Risposta non valida dal core nativo.');
       }
-      return NativeCoreResponse.fromJson(decoded);
-    } on FormatException {
+      final response = NativeCoreResponse.fromJson(decoded);
+      AppLog.instance.record(
+        category: 'native_core',
+        action: 'call_completed:$command',
+        level: response.ok ? AppLogLevel.debug : AppLogLevel.error,
+        result: '${response.code}.${stopwatch.elapsedMilliseconds}ms',
+        verbose: response.ok,
+        force: !response.ok,
+      );
+      return response;
+    } on FormatException catch (error) {
+      AppLog.instance.recordError(
+        category: 'native_core',
+        action: 'invalid_json_response:$command',
+        error: error,
+      );
       throw const NativeCoreException(
         'Risposta JSON non valida dal core nativo.',
       );
+    } on Object catch (error) {
+      AppLog.instance.recordError(
+        category: 'native_core',
+        action: 'call_failed:$command',
+        error: error,
+      );
+      rethrow;
     } finally {
       calloc.free(requestPointer);
       if (responsePointer != null && responsePointer != nullptr) {

@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sylphy/core/native/native_core.dart';
+import 'package:sylphy/core/platform/android_bootstrap.dart';
 import 'package:sylphy/core/veilid/veilid_service.dart';
 
 void main() {
@@ -93,6 +94,38 @@ void main() {
     expect(snapshot.phase, VeilidPhase.error);
     expect(snapshot.detail, contains('Archivio sicuro Android'));
   });
+
+  test(
+    'retries Android platform bootstrap without restarting the app',
+    () async {
+      final supportDirectory = await Directory.systemTemp.createTemp(
+        'sylphy-bootstrap-test-',
+      );
+      addTearDown(() => supportDirectory.delete(recursive: true));
+      final core = _FakeNativeCore();
+      var bootstrapAttempts = 0;
+      final service = VeilidService(
+        nativeCore: core,
+        applicationSupportDirectory: () async => supportDirectory,
+        ensureAndroidBootstrap: () async {
+          bootstrapAttempts += 1;
+          return AndroidBootstrapResult(
+            ready: bootstrapAttempts > 1,
+            code: bootstrapAttempts > 1 ? 'ready' : 'jni_initialization_failed',
+          );
+        },
+      );
+      addTearDown(service.dispose);
+
+      await service.start();
+      expect(service.snapshot.diagnosticCode, 'platform_not_initialized');
+      expect(core.storageDirectory, isNull);
+
+      await service.retry();
+      expect(service.snapshot.phase, VeilidPhase.attached);
+      expect(bootstrapAttempts, 2);
+    },
+  );
 }
 
 class _FakeNativeCore implements NativeCoreApi {

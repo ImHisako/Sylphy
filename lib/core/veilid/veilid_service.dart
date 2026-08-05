@@ -4,7 +4,9 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../diagnostics/app_log.dart';
 import '../native/native_core.dart';
+import '../platform/android_bootstrap.dart';
 
 enum VeilidPhase { unavailable, offline, connecting, attached, degraded, error }
 
@@ -116,19 +118,25 @@ class VeilidService extends ChangeNotifier {
   VeilidService({
     required NativeCoreApi? nativeCore,
     Future<Directory> Function()? applicationSupportDirectory,
+    Future<AndroidBootstrapResult> Function()? ensureAndroidBootstrap,
   }) : _nativeCore = nativeCore,
        _applicationSupportDirectory =
            applicationSupportDirectory ?? getApplicationSupportDirectory,
+       _ensureAndroidBootstrap =
+           ensureAndroidBootstrap ??
+           const AndroidBootstrap().ensureVeilidInitialized,
        _snapshot = nativeCore == null
            ? const VeilidSnapshot.unavailable()
            : const VeilidSnapshot(phase: VeilidPhase.connecting);
 
   final NativeCoreApi? _nativeCore;
   final Future<Directory> Function() _applicationSupportDirectory;
+  final Future<AndroidBootstrapResult> Function() _ensureAndroidBootstrap;
   VeilidSnapshot _snapshot;
   Timer? _refreshTimer;
   bool _isStarting = false;
   bool _disposed = false;
+  bool _platformReady = false;
 
   VeilidSnapshot get snapshot => _snapshot;
   bool get hasNativeCore => _nativeCore != null;
@@ -139,9 +147,27 @@ class VeilidService extends ChangeNotifier {
       return;
     }
     _isStarting = true;
+    AppLog.instance.record(
+      category: 'veilid',
+      action: 'start_requested',
+      verbose: true,
+    );
     _ensureRefreshTimer();
     _setSnapshot(const VeilidSnapshot(phase: VeilidPhase.connecting));
     try {
+      if (!_platformReady) {
+        final bootstrap = await _ensureAndroidBootstrap();
+        _platformReady = bootstrap.ready;
+        if (!bootstrap.ready) {
+          _setSnapshot(
+            const VeilidSnapshot(
+              phase: VeilidPhase.error,
+              diagnosticCode: 'platform_not_initialized',
+            ),
+          );
+          return;
+        }
+      }
       final supportDirectory = await _applicationSupportDirectory();
       final storage = Directory(
         '${supportDirectory.path}${Platform.pathSeparator}veilid',
@@ -149,7 +175,12 @@ class VeilidService extends ChangeNotifier {
       await storage.create(recursive: true);
       final response = core.startVeilid(storage.path);
       _setSnapshot(VeilidSnapshot.fromResponse(response));
-    } on Exception {
+    } on Object catch (error) {
+      AppLog.instance.recordError(
+        category: 'veilid',
+        action: 'start_failed',
+        error: error,
+      );
       _setSnapshot(
         const VeilidSnapshot(
           phase: VeilidPhase.error,
@@ -168,7 +199,12 @@ class VeilidService extends ChangeNotifier {
     }
     try {
       _setSnapshot(VeilidSnapshot.fromResponse(core.veilidStatus()));
-    } on NativeCoreException {
+    } on NativeCoreException catch (error) {
+      AppLog.instance.recordError(
+        category: 'veilid',
+        action: 'status_failed',
+        error: error,
+      );
       _setSnapshot(
         const VeilidSnapshot(
           phase: VeilidPhase.error,
@@ -189,7 +225,17 @@ class VeilidService extends ChangeNotifier {
     }
     try {
       _setSnapshot(VeilidSnapshot.fromResponse(core.stopVeilid()));
-    } on NativeCoreException {
+      AppLog.instance.record(
+        category: 'veilid',
+        action: 'stopped',
+        verbose: true,
+      );
+    } on NativeCoreException catch (error) {
+      AppLog.instance.recordError(
+        category: 'veilid',
+        action: 'shutdown_failed',
+        error: error,
+      );
       _setSnapshot(
         const VeilidSnapshot(
           phase: VeilidPhase.error,
@@ -215,7 +261,23 @@ class VeilidService extends ChangeNotifier {
     if (_disposed) {
       return;
     }
+    final changed =
+        _snapshot.phase != value.phase ||
+        _snapshot.diagnosticCode != value.diagnosticCode ||
+        _snapshot.attachmentState != value.attachmentState;
     _snapshot = value;
+    if (changed) {
+      AppLog.instance.record(
+        category: 'veilid',
+        action: 'state_changed',
+        level: value.phase == VeilidPhase.error
+            ? AppLogLevel.error
+            : AppLogLevel.info,
+        result: value.diagnosticCode ?? value.phase.name,
+        verbose: value.phase != VeilidPhase.error,
+        force: value.phase == VeilidPhase.error,
+      );
+    }
     notifyListeners();
   }
 
