@@ -1057,6 +1057,8 @@ class _ChatPaneState extends State<_ChatPane> {
                 'Invio non riuscito: il destinatario non è raggiungibile.',
               'feature_unavailable' =>
                 'Questo contatto usa un vecchio ID. Chiedi il nuovo ID Sylphy breve.',
+              'limit_exceeded' =>
+                'Il messaggio è troppo lungo per l’invio sicuro. Accorcialo e riprova.',
               _ => 'Invio sicuro non riuscito ($code).',
             }),
           ),

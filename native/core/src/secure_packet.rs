@@ -16,7 +16,7 @@ use crate::{
     envelope::{self, EnvelopeMetadata, EnvelopeType, MessageEnvelope},
     error::{CoreError, CoreResult},
     hybrid, identity,
-    peer_identity::PublishedIdentity,
+    peer_identity::{PublicProfile, PublishedIdentity},
 };
 
 const MAX_PACKET_BYTES: usize = 32 * 1024;
@@ -55,7 +55,7 @@ pub fn seal_for(recipient: &PublishedIdentity, plaintext: &str) -> CoreResult<(V
         &signing_key,
         local_bundle.clone(),
         route_blob,
-        crate::peer_identity::current_public_profile(),
+        compact_sender_profile(crate::peer_identity::current_public_profile()),
         crate::peer_identity::current_public_mailbox(),
     )?;
 
@@ -130,6 +130,14 @@ pub fn seal_for(recipient: &PublishedIdentity, plaintext: &str) -> CoreResult<(V
     }
     let id = compact_hex(&packet.message_id);
     Ok((bytes, id))
+}
+
+fn compact_sender_profile(mut profile: PublicProfile) -> PublicProfile {
+    // The full profile is already published with the contact identity. Embedding
+    // an avatar in every packet can exceed Veilid's 32 KiB application-message
+    // ceiling even when the plaintext contains only a few bytes.
+    profile.avatar_base64 = None;
+    profile
 }
 
 pub fn open(payload: &[u8]) -> CoreResult<OpenedPacket> {
@@ -282,4 +290,21 @@ fn current_time_ms() -> CoreResult<u64> {
         .duration_since(UNIX_EPOCH)
         .map_err(|_| CoreError::Internal)?;
     u64::try_from(elapsed.as_millis()).map_err(|_| CoreError::Internal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compact_sender_profile;
+    use crate::peer_identity::PublicProfile;
+
+    #[test]
+    fn compact_sender_profile_keeps_name_but_omits_avatar() {
+        let compact = compact_sender_profile(PublicProfile {
+            display_name: Some("Sylphy User".to_owned()),
+            avatar_base64: Some("aGVsbG8=".to_owned()),
+        });
+
+        assert_eq!(compact.display_name.as_deref(), Some("Sylphy User"));
+        assert!(compact.avatar_base64.is_none());
+    }
 }
