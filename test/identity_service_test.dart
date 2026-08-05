@@ -65,6 +65,26 @@ class _IdentityNativeCore implements NativeCoreApi {
   }) => throw UnimplementedError();
 
   @override
+  NativeCoreResponse sendText({
+    required String conversationId,
+    required String plaintext,
+  }) => throw UnimplementedError();
+
+  @override
+  NativeCoreResponse markConversationRead(String conversationId) =>
+      throw UnimplementedError();
+
+  @override
+  NativeCoreResponse deleteConversation(String conversationId) =>
+      throw UnimplementedError();
+
+  @override
+  NativeCoreResponse setContactVerified({
+    required String conversationId,
+    required bool verified,
+  }) => throw UnimplementedError();
+
+  @override
   NativeCoreResponse listConversations() => throw UnimplementedError();
 
   @override

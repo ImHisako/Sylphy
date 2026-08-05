@@ -4,8 +4,6 @@ import 'secure_messaging_bridge.dart';
 
 /// Fail-closed adapter for messaging records owned by the Rust core.
 ///
-/// The current ABI exposes only validated read models. Sending remains disabled
-/// until the native vault and authenticated session stores are persistent.
 class SylphyMessagingBridge implements SecureMessagingBridge {
   SylphyMessagingBridge({required NativeCoreApi core}) : _core = core;
 
@@ -48,7 +46,25 @@ class SylphyMessagingBridge implements SecureMessagingBridge {
 
   @override
   Future<void> markConversationRead(String conversationId) async {
-    throw const SecureMessagingException('native_store_locked');
+    _requireSuccess(_core.markConversationRead(conversationId));
+  }
+
+  @override
+  Future<void> deleteConversation(String conversationId) async {
+    _requireSuccess(_core.deleteConversation(conversationId));
+  }
+
+  @override
+  Future<void> setContactVerified({
+    required String conversationId,
+    required bool verified,
+  }) async {
+    _requireSuccess(
+      _core.setContactVerified(
+        conversationId: conversationId,
+        verified: verified,
+      ),
+    );
   }
 
   @override
@@ -56,9 +72,9 @@ class SylphyMessagingBridge implements SecureMessagingBridge {
     required String conversationId,
     required String plaintext,
   }) async {
-    // Never pass plaintext through FFI before an authenticated, persistent
-    // native session is available.
-    throw const SecureMessagingException('secure_session_unavailable');
+    _requireSuccess(
+      _core.sendText(conversationId: conversationId, plaintext: plaintext),
+    );
   }
 }
 

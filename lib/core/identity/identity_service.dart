@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -77,6 +78,7 @@ class IdentityService extends ChangeNotifier {
   final Future<Directory> Function() _applicationSupportDirectory;
   IdentitySnapshot _snapshot;
   bool _isLoading = false;
+  Timer? _publishRetryTimer;
 
   IdentitySnapshot get snapshot => _snapshot;
 
@@ -156,6 +158,14 @@ class IdentityService extends ChangeNotifier {
           ).toLocal(),
         ),
       );
+      if (invitationCode.length > 256) {
+        _publishRetryTimer ??= Timer.periodic(const Duration(seconds: 10), (_) {
+          initialize();
+        });
+      } else {
+        _publishRetryTimer?.cancel();
+        _publishRetryTimer = null;
+      }
       AppLog.instance.record(
         category: 'identity',
         action: 'initialization_completed',
@@ -181,5 +191,11 @@ class IdentityService extends ChangeNotifier {
   void _setSnapshot(IdentitySnapshot value) {
     _snapshot = value;
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _publishRetryTimer?.cancel();
+    super.dispose();
   }
 }

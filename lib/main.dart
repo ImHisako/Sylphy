@@ -101,10 +101,14 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     unawaited(_loadProfile());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
-        unawaited(_veilidService.start());
-        unawaited(_identityService.initialize());
+        unawaited(_initializeNativeServices());
       }
     });
+  }
+
+  Future<void> _initializeNativeServices() async {
+    await _veilidService.start();
+    await _identityService.initialize();
   }
 
   Future<void> _loadProfile() async {

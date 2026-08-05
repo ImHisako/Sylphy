@@ -2,6 +2,8 @@ use serde::Serialize;
 
 use crate::error::{CoreError, CoreResult};
 
+use crate::peer_identity::PublishedIdentity;
+
 #[cfg(feature = "veilid")]
 use std::{
     collections::VecDeque,
@@ -65,6 +67,7 @@ pub fn capability_status() -> VeilidCapabilityStatus {
 pub struct VeilidNode {
     api: veilid_core::VeilidAPI,
     inbound_envelopes: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    private_route: Option<veilid_core::RouteBlob>,
 }
 
 #[cfg(feature = "veilid")]
@@ -90,6 +93,7 @@ impl VeilidNode {
         Ok(Self {
             api,
             inbound_envelopes,
+            private_route: None,
         })
     }
 
@@ -97,6 +101,7 @@ impl VeilidNode {
         Self {
             api,
             inbound_envelopes: Arc::new(Mutex::new(VecDeque::new())),
+            private_route: None,
         }
     }
 
@@ -127,9 +132,14 @@ impl VeilidNode {
     }
 
     pub async fn create_private_route(
-        &self,
+        &mut self,
     ) -> Result<veilid_core::RouteBlob, veilid_core::VeilidAPIError> {
-        self.api.new_private_route().await
+        if let Some(route) = &self.private_route {
+            return Ok(route.clone());
+        }
+        let route = self.api.new_private_route().await?;
+        self.private_route = Some(route.clone());
+        Ok(route)
     }
 
     pub async fn import_private_route(
@@ -161,6 +171,151 @@ impl VeilidNode {
     pub async fn shutdown(self) {
         self.api.shutdown().await;
     }
+}
+
+#[cfg(feature = "veilid")]
+pub fn local_route_blob() -> CoreResult<Vec<u8>> {
+    let mut state = lock_runtime()?;
+    let VeilidRuntime { runtime, node } = &mut *state;
+    let node = node.as_mut().ok_or(CoreError::NetworkStartupFailed)?;
+    runtime
+        .block_on(node.create_private_route())
+        .map(|route| route.blob)
+        .map_err(|_| CoreError::NetworkStartupFailed)
+}
+
+#[cfg(not(feature = "veilid"))]
+pub fn local_route_blob() -> CoreResult<Vec<u8>> {
+    Err(CoreError::FeatureUnavailable)
+}
+
+#[cfg(feature = "veilid")]
+pub fn publish_identity(
+    descriptor_json: Option<&str>,
+    identity: &PublishedIdentity,
+) -> CoreResult<(String, String)> {
+    use veilid_core::{CRYPTO_KIND_VLD0, DHTRecordDescriptor, DHTSchema};
+
+    identity.validate()?;
+    let bytes = serde_json::to_vec(identity).map_err(|_| CoreError::Internal)?;
+    let state = lock_runtime()?;
+    let node = state.node.as_ref().ok_or(CoreError::NetworkStartupFailed)?;
+    let routing = node
+        .routing_context()
+        .map_err(|_| CoreError::NetworkStartupFailed)?;
+    let descriptor = if let Some(encoded) = descriptor_json {
+        let stored: DHTRecordDescriptor =
+            serde_json::from_str(encoded).map_err(|_| CoreError::VerificationFailed)?;
+        let _ = state
+            .runtime
+            .block_on(routing.open_dht_record(stored.key(), stored.owner_keypair()))
+            .map_err(|_| CoreError::NetworkStartupFailed)?;
+        stored
+    } else {
+        state
+            .runtime
+            .block_on(routing.create_dht_record(
+                CRYPTO_KIND_VLD0,
+                DHTSchema::dflt(1).map_err(|_| CoreError::Internal)?,
+                None,
+            ))
+            .map_err(|_| CoreError::NetworkStartupFailed)?
+    };
+    let key = descriptor.key();
+    state
+        .runtime
+        .block_on(routing.set_dht_value(key.clone(), 0, bytes, None))
+        .map_err(|_| CoreError::NetworkStartupFailed)?;
+    state
+        .runtime
+        .block_on(routing.close_dht_record(key.clone()))
+        .map_err(|_| CoreError::NetworkStartupFailed)?;
+    let persisted = serde_json::to_string(&descriptor).map_err(|_| CoreError::Internal)?;
+    Ok((format!("sylphy:{key}"), persisted))
+}
+
+#[cfg(not(feature = "veilid"))]
+pub fn publish_identity(
+    _descriptor_json: Option<&str>,
+    _identity: &PublishedIdentity,
+) -> CoreResult<(String, String)> {
+    Err(CoreError::FeatureUnavailable)
+}
+
+#[cfg(feature = "veilid")]
+pub fn resolve_identity(code: &str) -> CoreResult<PublishedIdentity> {
+    use std::str::FromStr as _;
+
+    use veilid_core::RecordKey;
+
+    let normalized = code.trim().strip_prefix("sylphy:").unwrap_or(code.trim());
+    let key = RecordKey::from_str(normalized).map_err(|_| CoreError::InvalidInput)?;
+    let state = lock_runtime()?;
+    let node = state.node.as_ref().ok_or(CoreError::NetworkStartupFailed)?;
+    let routing = node
+        .routing_context()
+        .map_err(|_| CoreError::NetworkStartupFailed)?;
+    let _ = state
+        .runtime
+        .block_on(routing.open_dht_record(key.clone(), None))
+        .map_err(|_| CoreError::NetworkStartupFailed)?;
+    let value = state
+        .runtime
+        .block_on(routing.get_dht_value(key.clone(), 0, true))
+        .map_err(|_| CoreError::NetworkStartupFailed)?
+        .ok_or(CoreError::VerificationFailed)?;
+    let _ = state.runtime.block_on(routing.close_dht_record(key));
+    let identity: PublishedIdentity =
+        serde_json::from_slice(value.data()).map_err(|_| CoreError::VerificationFailed)?;
+    identity.validate()?;
+    Ok(identity)
+}
+
+#[cfg(not(feature = "veilid"))]
+pub fn resolve_identity(_code: &str) -> CoreResult<PublishedIdentity> {
+    Err(CoreError::FeatureUnavailable)
+}
+
+#[cfg(feature = "veilid")]
+pub fn send_payload(route_blob: &[u8], payload: Vec<u8>) -> CoreResult<()> {
+    if route_blob.is_empty() || payload.is_empty() || payload.len() > MAX_INBOUND_ENVELOPE_BYTES {
+        return Err(CoreError::InvalidInput);
+    }
+    let state = lock_runtime()?;
+    let node = state.node.as_ref().ok_or(CoreError::NetworkStartupFailed)?;
+    let route_id = node
+        .api
+        .import_remote_private_route(route_blob.to_vec())
+        .map_err(|_| CoreError::NetworkAttachFailed)?;
+    let result = state.runtime.block_on(async {
+        let routing = node.routing_context()?.with_default_safety()?;
+        routing
+            .app_message(veilid_core::Target::RouteId(route_id.clone()), payload)
+            .await
+    });
+    let _ = node.api.release_private_route(route_id);
+    result.map_err(|_| CoreError::NetworkAttachFailed)
+}
+
+#[cfg(not(feature = "veilid"))]
+pub fn send_payload(_route_blob: &[u8], _payload: Vec<u8>) -> CoreResult<()> {
+    Err(CoreError::FeatureUnavailable)
+}
+
+#[cfg(feature = "veilid")]
+pub fn take_inbound_payloads() -> CoreResult<Vec<Vec<u8>>> {
+    let state = lock_runtime()?;
+    let node = state.node.as_ref().ok_or(CoreError::NetworkStartupFailed)?;
+    let mut inbox = node
+        .inbound_envelopes
+        .lock()
+        .map_err(|_| CoreError::Internal)?;
+    Ok(inbox.drain(..).collect())
+}
+
+#[cfg(not(feature = "veilid"))]
+pub fn take_inbound_payloads() -> CoreResult<Vec<Vec<u8>>> {
+    Ok(Vec::new())
 }
 
 #[cfg(feature = "veilid")]

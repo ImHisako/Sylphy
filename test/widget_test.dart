@@ -77,6 +77,51 @@ void main() {
     expect(find.text('Messaggio di prova'), findsAtLeastNWidgets(1));
   });
 
+  testWidgets('lets the user verify a contact without blocking messages', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final bridge = _TestMessagingBridge(initiallyVerified: false);
+
+    await tester.pumpWidget(
+      SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('message-composer')), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('conversation-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Sicurezza').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('toggle-contact-verification')));
+    await tester.pumpAndSettle();
+
+    expect(bridge.conversation.safety, ContactSafety.verified);
+  });
+
+  testWidgets('deletes a conversation after explicit confirmation', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final bridge = _TestMessagingBridge();
+
+    await tester.pumpWidget(
+      SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('conversation-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cancella chat').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('confirm-delete-conversation')));
+    await tester.pumpAndSettle();
+
+    expect(bridge.deleted, isTrue);
+    expect(find.text('Nessuna conversazione sicura'), findsOneWidget);
+  });
+
   testWidgets('keeps the real empty state readable on a mobile viewport', (
     tester,
   ) async {
@@ -196,7 +241,7 @@ class _MemoryProfileStore implements UserProfileStore {
 }
 
 class _TestMessagingBridge implements SecureMessagingBridge {
-  _TestMessagingBridge()
+  _TestMessagingBridge({bool initiallyVerified = true})
     : _conversation = Conversation(
         id: 'test-contact',
         name: 'Contatto di test',
@@ -204,12 +249,17 @@ class _TestMessagingBridge implements SecureMessagingBridge {
         accentValue: 0xFFA5E5D3,
         lastMessage: '',
         lastActivity: DateTime(2026),
-        safety: ContactSafety.verified,
+        safety: initiallyVerified
+            ? ContactSafety.verified
+            : ContactSafety.pending,
         fingerprint: 'TEST',
       );
 
   Conversation _conversation;
+  bool deleted = false;
   final List<ChatMessage> _messages = [];
+
+  Conversation get conversation => _conversation;
 
   @override
   Future<String> addContact({
@@ -218,13 +268,29 @@ class _TestMessagingBridge implements SecureMessagingBridge {
   }) async => 'test-contact';
 
   @override
-  List<Conversation> listConversations() => [_conversation];
+  List<Conversation> listConversations() => deleted ? [] : [_conversation];
 
   @override
   List<ChatMessage> listMessages(String conversationId) => _messages;
 
   @override
   Future<void> markConversationRead(String conversationId) async {}
+
+  @override
+  Future<void> deleteConversation(String conversationId) async {
+    _messages.clear();
+    deleted = true;
+  }
+
+  @override
+  Future<void> setContactVerified({
+    required String conversationId,
+    required bool verified,
+  }) async {
+    _conversation = _conversation.copyWith(
+      safety: verified ? ContactSafety.verified : ContactSafety.pending,
+    );
+  }
 
   @override
   Future<void> sendText({

@@ -2,6 +2,7 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -32,13 +33,17 @@ const INVITATION_LIFETIME_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 const MAX_STORAGE_PATH_BYTES: usize = 4096;
 const MAX_VAULT_PASSWORD_BYTES: usize = 512;
 
-#[derive(Debug, Deserialize, Serialize)]
-struct IdentityRecord {
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct IdentityRecord {
     version: u8,
     signing_secret: Vec<u8>,
     x25519_secret: Vec<u8>,
     mlkem_seed: Vec<u8>,
     expires_at_ms: u64,
+    #[serde(default)]
+    message_storage_secret: Vec<u8>,
+    #[serde(default)]
+    dht_descriptor_json: Option<String>,
 }
 
 impl Drop for IdentityRecord {
@@ -46,6 +51,7 @@ impl Drop for IdentityRecord {
         self.signing_secret.zeroize();
         self.x25519_secret.zeroize();
         self.mlkem_seed.zeroize();
+        self.message_storage_secret.zeroize();
     }
 }
 
@@ -55,12 +61,16 @@ impl IdentityRecord {
         let x25519_secret = StaticSecret::random_from_rng(OsRng);
         let mut mlkem_seed = vec![0_u8; ML_KEM_SEED_LENGTH];
         OsRng.fill_bytes(&mut mlkem_seed);
+        let mut message_storage_secret = vec![0_u8; 32];
+        OsRng.fill_bytes(&mut message_storage_secret);
         Self {
             version: IDENTITY_RECORD_VERSION,
             signing_secret: signing_key.to_bytes().to_vec(),
             x25519_secret: x25519_secret.to_bytes().to_vec(),
             mlkem_seed,
             expires_at_ms,
+            message_storage_secret,
+            dht_descriptor_json: None,
         }
     }
 
@@ -79,13 +89,14 @@ impl IdentityRecord {
             || self.signing_secret.len() != ED25519_LENGTH
             || self.x25519_secret.len() != X25519_SECRET_LENGTH
             || self.mlkem_seed.len() != ML_KEM_SEED_LENGTH
+            || self.message_storage_secret.len() != 32
         {
             return Err(CoreError::VerificationFailed);
         }
         Ok(())
     }
 
-    fn public_bundle(&self) -> CoreResult<PublicBundle> {
+    pub(crate) fn public_bundle(&self) -> CoreResult<PublicBundle> {
         self.validate()?;
         let signing_secret: [u8; ED25519_LENGTH] = self
             .signing_secret
@@ -115,6 +126,51 @@ impl IdentityRecord {
     }
 }
 
+static ACTIVE_IDENTITY: OnceLock<Mutex<Option<IdentityRecord>>> = OnceLock::new();
+
+fn active_identity_store() -> &'static Mutex<Option<IdentityRecord>> {
+    ACTIVE_IDENTITY.get_or_init(|| Mutex::new(None))
+}
+
+pub(crate) fn active_identity() -> CoreResult<IdentityRecord> {
+    active_identity_store()
+        .lock()
+        .map_err(|_| CoreError::Internal)?
+        .clone()
+        .ok_or(CoreError::FeatureUnavailable)
+}
+
+impl IdentityRecord {
+    pub(crate) fn signing_key(&self) -> CoreResult<SigningKey> {
+        let bytes: [u8; ED25519_LENGTH] = self
+            .signing_secret
+            .as_slice()
+            .try_into()
+            .map_err(|_| CoreError::VerificationFailed)?;
+        Ok(SigningKey::from_bytes(&bytes))
+    }
+
+    pub(crate) fn x25519_secret(&self) -> CoreResult<StaticSecret> {
+        let bytes: [u8; X25519_SECRET_LENGTH] = self
+            .x25519_secret
+            .as_slice()
+            .try_into()
+            .map_err(|_| CoreError::VerificationFailed)?;
+        Ok(StaticSecret::from(bytes))
+    }
+
+    pub(crate) fn mlkem_seed(&self) -> CoreResult<Seed> {
+        Seed::try_from(self.mlkem_seed.as_slice()).map_err(|_| CoreError::VerificationFailed)
+    }
+
+    pub(crate) fn storage_password(&self) -> CoreResult<String> {
+        if self.message_storage_secret.len() != 32 {
+            return Err(CoreError::VerificationFailed);
+        }
+        Ok(STANDARD_NO_PAD.encode(&self.message_storage_secret))
+    }
+}
+
 pub fn ensure_identity(storage_directory: &str, vault_password: &str) -> CoreResult<Value> {
     validate_inputs(storage_directory, vault_password)?;
     let directory = PathBuf::from(storage_directory).join("identity");
@@ -130,21 +186,45 @@ pub fn ensure_identity(storage_directory: &str, vault_password: &str) -> CoreRes
     } else {
         IdentityRecord::generate(next_expiration)
     };
-    let should_persist = !path.exists() || record.expires_at_ms <= now_ms;
+    let mut should_persist = !path.exists() || record.expires_at_ms <= now_ms;
+    if record.message_storage_secret.len() != 32 {
+        record.message_storage_secret.resize(32, 0);
+        OsRng.fill_bytes(&mut record.message_storage_secret);
+        should_persist = true;
+    }
     if record.expires_at_ms <= now_ms {
         record.rotate_prekeys(next_expiration);
     }
     record.validate()?;
-    if should_persist {
-        persist_record(&path, vault_password, &record)?;
-    }
-
     let bundle = record.public_bundle()?;
     bundle.validate()?;
     let identity_hash = Sha256::digest(&bundle.identity_ed25519);
-    let identity_id = grouped_hex(&identity_hash);
+    let identity_id = grouped_hex(&identity_hash[..8]);
     let serialized_bundle = serde_json::to_vec(&bundle).map_err(|_| CoreError::Internal)?;
-    let invitation_code = format!("sylphy:{}", STANDARD_NO_PAD.encode(serialized_bundle));
+    let mut invitation_code = format!("sylphy:{}", STANDARD_NO_PAD.encode(serialized_bundle));
+    if let Ok(route_blob) = crate::veilid_adapter::local_route_blob() {
+        let published = crate::peer_identity::PublishedIdentity::new(
+            &record.signing_key()?,
+            bundle.clone(),
+            route_blob,
+        )?;
+        if let Ok((short_code, descriptor)) = crate::veilid_adapter::publish_identity(
+            record.dht_descriptor_json.as_deref(),
+            &published,
+        ) {
+            invitation_code = short_code;
+            if record.dht_descriptor_json.as_deref() != Some(descriptor.as_str()) {
+                record.dht_descriptor_json = Some(descriptor);
+                should_persist = true;
+            }
+        }
+    }
+    if should_persist {
+        persist_record(&path, vault_password, &record)?;
+    }
+    *active_identity_store()
+        .lock()
+        .map_err(|_| CoreError::Internal)? = Some(record);
     Ok(json!({
         "identity_id": identity_id,
         "invitation_code": invitation_code,
@@ -168,7 +248,6 @@ fn load_record(path: &Path, vault_password: &str) -> CoreResult<IdentityRecord> 
     let plaintext = vault::open(vault_password, &encrypted)?;
     let record: IdentityRecord =
         serde_json::from_slice(plaintext.as_slice()).map_err(|_| CoreError::VerificationFailed)?;
-    record.validate()?;
     Ok(record)
 }
 

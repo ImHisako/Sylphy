@@ -5,8 +5,10 @@ Client Flutter responsive per una messenger privata, pensato per **Windows**, **
 ## Funzionalità incluse
 
 - onboarding al primo avvio e pannello “Il mio profilo”, apribile dall’avatar, per vedere o modificare nome e foto;
-- ID Sylphy stabile con invito firmato copiabile, identità Ed25519 e prekey X25519/ML-KEM-768 custodite nel vault nativo;
-- import di una persona dalla home tramite codice invito Sylphy validato dal core nativo, con stato iniziale “in attesa di verifica”;
+- ID Sylphy breve e stabile basato su un record DHT Veilid firmato, con identità Ed25519 e prekey X25519/ML-KEM-768 custodite nel vault nativo;
+- import di una persona dalla home tramite ID Sylphy risolto e validato dal core nativo;
+- ricezione immediata da mittenti nuovi, con creazione automatica della chat e verifica del fingerprint facoltativa;
+- cancellazione locale di chat, messaggi e contatto con conferma esplicita;
 - inbox nativa fail-closed, senza contatti o messaggi dimostrativi;
 - chat e composer disponibili solo per record validati dal core nativo;
 - schermate per fingerprint e stato di verifica del contatto;
@@ -53,7 +55,7 @@ Gli script compilano il core con le feature `veilid,signal-ratchet`. La build ri
 
 Quando `sylphy_core.dll` o `libsylphy_core.so` è disponibile, l'app crea uno storage applicativo persistente, avvia `veilid-core 0.5.7`, esegue `attach` e aggiorna periodicamente lo stato mostrato nella UI. Gli errori di rete e lo stato detached attivano un retry automatico; una build realmente priva della feature Veilid viene invece segnalata senza retry infinito. Su Android il manifest release concede i permessi di rete, `MainActivity` registra Context/JVM prima di avviare Flutter e il protected store usa `androidx.security:security-crypto 1.1.0`. La configurazione mantiene i default Veilid per rete/TLS e modifica solo le directory persistenti dei tre store. Lo shutdown dell'app arresta il nodo in modo deterministico.
 
-Il callback nativo conserva in una coda limitata soltanto gli `AppMessage` opachi ricevuti. Veilid non riceve plaintext: l'adapter accetta `MessageEnvelope` applicativi già autenticati e cifrati, impone un limite di 32 KiB e non espone NodeId, route o payload nelle risposte FFI.
+Il callback nativo conserva in una coda limitata soltanto gli `AppMessage` opachi ricevuti. Veilid non riceve plaintext: il core crea per ogni messaggio un handshake ibrido one-shot X25519 + ML-KEM-768, autentica il pacchetto con Ed25519, cifra il contenuto con XChaCha20-Poly1305 e impone un limite di 32 KiB. Il client svuota l'inbox ogni secondo; un mittente valido ma sconosciuto viene mostrato subito come contatto non verificato.
 
 ## GitHub Actions
 
@@ -63,7 +65,7 @@ Il callback nativo conserva in una coda limitata soltanto gli `AppMessage` opach
 
 L'app non carica conversazioni dimostrative. Con ABI nativa assente mostra un inbox vuoto; con ABI v4 usa `SylphyMessagingBridge`, che legge soltanto record restituiti dal core Rust. Il pannello profilo mostra il fingerprint pubblico e copia un invito `sylphy:` firmato completo; la chiave che apre il record identità cifrato è conservata dal secure storage della piattaforma. Un invito è accettato solo dopo la decodifica e la verifica nativa del bundle pubblico Ed25519/X25519/ML-KEM; il relativo contatto resta pending e non abilita il composer. Il composer non inoltra plaintext finché vault, contatto verificato e sessione persistente non sono disponibili.
 
-Il core include `signalapp/libsignal` fissato al tag `v0.99.3` e implementa creazione prekey, apertura sessione, cifratura/decrittazione, rotazione DH/PQ e gestione dei messaggi fuori ordine. Il self-test FFI verifica l'intero percorso e la serializzazione opaca destinata a Veilid. L'invio UI resta intenzionalmente disabilitato finché identity store, prekey store e session store non saranno persistiti nel vault cifrato: non esiste alcun fallback a sessioni effimere o non ratchettate.
+Il core include `signalapp/libsignal` fissato al tag `v0.99.3` e mantiene il self-test della Double Ratchet. Il percorso di messaggistica attivo usa envelope ibridi one-shot autenticati e salva la cronologia in un vault cifrato; non inoltra mai plaintext a Veilid. La verifica umana del fingerprint modifica soltanto l'indicatore di fiducia e non impedisce di leggere o inviare messaggi già protetti crittograficamente.
 
 `libsignal` è distribuito con licenza AGPL-3.0-only. Prima di distribuire binari combinati, verificare e soddisfare gli obblighi indicati in `THIRD_PARTY_NOTICES.md`.
 

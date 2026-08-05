@@ -43,7 +43,7 @@ class VeilidSnapshot {
   String get detail => switch (phase) {
     VeilidPhase.unavailable =>
       diagnosticCode == 'feature_unavailable'
-          ? 'Questa build non include Veilid. Installa la build Android ABI 4 più recente.'
+          ? 'Questa build non include Veilid. Installa la build Android ABI 5 più recente.'
           : 'Installa la libreria nativa per connetterti.',
     VeilidPhase.offline => 'Nodo arrestato · nuovo tentativo automatico',
     VeilidPhase.connecting => 'Avvio del nodo privato in corso.',

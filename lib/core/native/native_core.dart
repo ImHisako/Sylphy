@@ -6,7 +6,7 @@ import 'package:ffi/ffi.dart';
 
 import '../diagnostics/app_log.dart';
 
-const _expectedAbiVersion = 4;
+const _expectedAbiVersion = 5;
 
 typedef _NativeAbiVersion = Uint32 Function();
 typedef _DartAbiVersion = int Function();
@@ -31,6 +31,20 @@ abstract interface class NativeCoreApi {
   NativeCoreResponse addContact({
     required String displayName,
     required String invitationCode,
+  });
+
+  NativeCoreResponse sendText({
+    required String conversationId,
+    required String plaintext,
+  });
+
+  NativeCoreResponse markConversationRead(String conversationId);
+
+  NativeCoreResponse deleteConversation(String conversationId);
+
+  NativeCoreResponse setContactVerified({
+    required String conversationId,
+    required bool verified,
   });
 
   NativeCoreResponse ensureIdentity({
@@ -124,6 +138,46 @@ class NativeCoreClient implements NativeCoreApi {
       'command': 'add_contact',
       'display_name': displayName,
       'invitation_code': invitationCode,
+    });
+  }
+
+  @override
+  NativeCoreResponse sendText({
+    required String conversationId,
+    required String plaintext,
+  }) {
+    return call({
+      'command': 'send_text',
+      'conversation_id': conversationId,
+      'plaintext': plaintext,
+    });
+  }
+
+  @override
+  NativeCoreResponse markConversationRead(String conversationId) {
+    return call({
+      'command': 'mark_conversation_read',
+      'conversation_id': conversationId,
+    });
+  }
+
+  @override
+  NativeCoreResponse deleteConversation(String conversationId) {
+    return call({
+      'command': 'delete_conversation',
+      'conversation_id': conversationId,
+    });
+  }
+
+  @override
+  NativeCoreResponse setContactVerified({
+    required String conversationId,
+    required bool verified,
+  }) {
+    return call({
+      'command': 'set_contact_verified',
+      'conversation_id': conversationId,
+      'verified': verified,
     });
   }
 

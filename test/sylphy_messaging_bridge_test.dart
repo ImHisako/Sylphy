@@ -1,5 +1,4 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sylphy/core/messaging/secure_messaging_bridge.dart';
 import 'package:sylphy/core/messaging/sylphy_messaging_bridge.dart';
 import 'package:sylphy/core/native/native_core.dart';
 
@@ -11,19 +10,13 @@ void main() {
     expect(bridge.listMessages('contact-1'), isEmpty);
   });
 
-  test('refuses plaintext until a persistent secure session exists', () async {
-    final bridge = SylphyMessagingBridge(core: _FakeNativeCore());
+  test('sends plaintext only through the native secure core', () async {
+    final core = _FakeNativeCore();
+    final bridge = SylphyMessagingBridge(core: core);
 
-    await expectLater(
-      bridge.sendText(conversationId: 'contact-1', plaintext: 'secret'),
-      throwsA(
-        isA<SecureMessagingException>().having(
-          (error) => error.code,
-          'code',
-          'secure_session_unavailable',
-        ),
-      ),
-    );
+    await bridge.sendText(conversationId: 'contact-1', plaintext: 'secret');
+    expect(core.sentConversationId, 'contact-1');
+    expect(core.sentPlaintext, 'secret');
   });
 
   test('imports contacts only through the native core', () async {
@@ -44,6 +37,8 @@ void main() {
 class _FakeNativeCore implements NativeCoreApi {
   String? importedName;
   String? importedInvitation;
+  String? sentConversationId;
+  String? sentPlaintext;
 
   @override
   NativeCoreResponse ensureIdentity({
@@ -64,6 +59,30 @@ class _FakeNativeCore implements NativeCoreApi {
       data: {'contact_id': 'contact-verified'},
     );
   }
+
+  @override
+  NativeCoreResponse sendText({
+    required String conversationId,
+    required String plaintext,
+  }) {
+    sentConversationId = conversationId;
+    sentPlaintext = plaintext;
+    return const NativeCoreResponse(ok: true, code: 'ok', data: {});
+  }
+
+  @override
+  NativeCoreResponse markConversationRead(String conversationId) =>
+      const NativeCoreResponse(ok: true, code: 'ok', data: {});
+
+  @override
+  NativeCoreResponse deleteConversation(String conversationId) =>
+      const NativeCoreResponse(ok: true, code: 'ok', data: {});
+
+  @override
+  NativeCoreResponse setContactVerified({
+    required String conversationId,
+    required bool verified,
+  }) => const NativeCoreResponse(ok: true, code: 'ok', data: {});
 
   @override
   NativeCoreResponse listConversations() => const NativeCoreResponse(

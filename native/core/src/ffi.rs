@@ -29,6 +29,20 @@ enum CoreRequest {
         display_name: String,
         invitation_code: String,
     },
+    SendText {
+        conversation_id: String,
+        plaintext: String,
+    },
+    MarkConversationRead {
+        conversation_id: String,
+    },
+    DeleteConversation {
+        conversation_id: String,
+    },
+    SetContactVerified {
+        conversation_id: String,
+        verified: bool,
+    },
     EnsureIdentity {
         storage_directory: String,
         vault_password: String,
@@ -140,6 +154,32 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
             ok: true,
             code: "ok",
             data: messaging_adapter::add_contact(&display_name, &invitation_code)?,
+        }),
+        CoreRequest::SendText {
+            conversation_id,
+            plaintext,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::send_text(&conversation_id, &plaintext)?,
+        }),
+        CoreRequest::MarkConversationRead { conversation_id } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::mark_conversation_read(&conversation_id)?,
+        }),
+        CoreRequest::DeleteConversation { conversation_id } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::delete_conversation(&conversation_id)?,
+        }),
+        CoreRequest::SetContactVerified {
+            conversation_id,
+            verified,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::set_contact_verified(&conversation_id, verified)?,
         }),
         CoreRequest::EnsureIdentity {
             storage_directory,

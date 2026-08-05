@@ -12,6 +12,13 @@ abstract class SecureMessagingBridge {
 
   Future<void> markConversationRead(String conversationId);
 
+  Future<void> deleteConversation(String conversationId);
+
+  Future<void> setContactVerified({
+    required String conversationId,
+    required bool verified,
+  });
+
   Future<void> sendText({
     required String conversationId,
     required String plaintext,
@@ -37,6 +44,19 @@ class UnavailableMessagingBridge implements SecureMessagingBridge {
 
   @override
   Future<void> markConversationRead(String conversationId) async {}
+
+  @override
+  Future<void> deleteConversation(String conversationId) async {
+    throw const SecureMessagingException('native_core_unavailable');
+  }
+
+  @override
+  Future<void> setContactVerified({
+    required String conversationId,
+    required bool verified,
+  }) async {
+    throw const SecureMessagingException('native_core_unavailable');
+  }
 
   @override
   Future<void> sendText({

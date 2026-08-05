@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../core/diagnostics/app_log.dart';
@@ -34,6 +36,7 @@ class MessengerHome extends StatefulWidget {
 
 class _MessengerHomeState extends State<MessengerHome> {
   String? _activeConversationId;
+  Timer? _inboxTimer;
 
   @override
   void initState() {
@@ -42,6 +45,17 @@ class _MessengerHomeState extends State<MessengerHome> {
     _activeConversationId = conversations.isEmpty
         ? null
         : conversations.first.id;
+    _inboxTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) {
+        setState(() {});
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _inboxTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _selectConversation(String conversationId) async {
@@ -92,7 +106,7 @@ class _MessengerHomeState extends State<MessengerHome> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            '${draft.displayName} è stato aggiunto. Verifica il fingerprint prima di scrivere.',
+            '${draft.displayName} è stato aggiunto. Puoi scrivere subito; la verifica del fingerprint è facoltativa.',
           ),
         ),
       );
@@ -109,7 +123,7 @@ class _MessengerHomeState extends State<MessengerHome> {
       }
       final message = switch (error.code) {
         'native_core_unavailable' =>
-          'Il core nativo non è disponibile: ricompila l’app con ABI 4.',
+          'Il core nativo non è disponibile: ricompila l’app con ABI 5.',
         'feature_unavailable' =>
           'Lo storage nativo non è ancora pronto. Attendi l’avvio del nodo e riprova.',
         'verification_failed' =>
@@ -812,8 +826,25 @@ class _MobileChatScreen extends StatelessWidget {
         actions: [
           IconButton(
             tooltip: 'Sicurezza conversazione',
-            onPressed: () => _showSecuritySheet(context, conversation),
+            onPressed: () =>
+                _showSecuritySheet(context, conversation, bridge, onChanged),
             icon: const Icon(Icons.verified_user_outlined),
+          ),
+          IconButton(
+            key: const ValueKey('delete-conversation-mobile'),
+            tooltip: 'Cancella chat',
+            onPressed: () async {
+              final deleted = await _confirmDeleteConversation(
+                context,
+                bridge,
+                conversation,
+              );
+              if (deleted && context.mounted) {
+                Navigator.of(context).pop();
+                onChanged();
+              }
+            },
+            icon: const Icon(Icons.delete_outline_rounded),
           ),
         ],
       ),
@@ -886,10 +917,14 @@ class _ChatPaneState extends State<_ChatPane> {
       );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Invio bloccato: vault e sessione verificata non disponibili.',
-            ),
+          SnackBar(
+            content: Text(switch (error.code) {
+              'network_attach_failed' || 'network_startup_failed' =>
+                'Invio non riuscito: il destinatario non è raggiungibile.',
+              'feature_unavailable' =>
+                'Questo contatto usa un vecchio ID. Chiedi il nuovo ID Sylphy breve.',
+              _ => 'Invio sicuro non riuscito (${error.code}).',
+            }),
           ),
         );
       }
@@ -921,7 +956,12 @@ class _ChatPaneState extends State<_ChatPane> {
       ),
       child: Column(
         children: [
-          if (widget.showHeader) _ChatHeader(conversation: widget.conversation),
+          if (widget.showHeader)
+            _ChatHeader(
+              conversation: widget.conversation,
+              bridge: widget.bridge,
+              onChanged: widget.onChanged,
+            ),
           Expanded(
             child: ListView.builder(
               padding: const EdgeInsets.fromLTRB(22, 20, 22, 12),
@@ -948,9 +988,15 @@ class _ChatPaneState extends State<_ChatPane> {
 }
 
 class _ChatHeader extends StatelessWidget {
-  const _ChatHeader({required this.conversation});
+  const _ChatHeader({
+    required this.conversation,
+    required this.bridge,
+    required this.onChanged,
+  });
 
   final Conversation conversation;
+  final SecureMessagingBridge bridge;
+  final VoidCallback onChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -992,9 +1038,44 @@ class _ChatHeader extends StatelessWidget {
           ),
           _SafetyBadge(safety: conversation.safety),
           const SizedBox(width: 8),
-          IconButton(
-            tooltip: 'Sicurezza conversazione',
-            onPressed: () => _showSecuritySheet(context, conversation),
+          PopupMenuButton<String>(
+            key: const ValueKey('conversation-menu'),
+            tooltip: 'Azioni conversazione',
+            onSelected: (value) async {
+              if (value == 'security') {
+                await _showSecuritySheet(
+                  context,
+                  conversation,
+                  bridge,
+                  onChanged,
+                );
+              } else if (value == 'delete') {
+                final deleted = await _confirmDeleteConversation(
+                  context,
+                  bridge,
+                  conversation,
+                );
+                if (deleted) {
+                  onChanged();
+                }
+              }
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'security',
+                child: ListTile(
+                  leading: Icon(Icons.verified_user_outlined),
+                  title: Text('Sicurezza'),
+                ),
+              ),
+              PopupMenuItem(
+                value: 'delete',
+                child: ListTile(
+                  leading: Icon(Icons.delete_outline_rounded),
+                  title: Text('Cancella chat'),
+                ),
+              ),
+            ],
             icon: const Icon(Icons.more_horiz_rounded),
           ),
         ],
@@ -1605,7 +1686,7 @@ class _AddContactDialogState extends State<_AddContactDialog> {
                     SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        'Il contatto resterà in attesa finché non confronterai il fingerprint di sicurezza.',
+                        'Puoi ricevere e inviare subito. Verifica il fingerprint solo se vuoi contrassegnare questa persona come sicura.',
                         style: TextStyle(
                           color: Color(0xFF9299A5),
                           fontSize: 12,
@@ -2106,8 +2187,13 @@ class _PrivacyOverviewSheetState extends State<_PrivacyOverviewSheet> {
   }
 }
 
-void _showSecuritySheet(BuildContext context, Conversation conversation) {
-  showModalBottomSheet<void>(
+Future<void> _showSecuritySheet(
+  BuildContext context,
+  Conversation conversation,
+  SecureMessagingBridge bridge,
+  VoidCallback onChanged,
+) {
+  return showModalBottomSheet<void>(
     context: context,
     backgroundColor: const Color(0xFF1A1E25),
     showDragHandle: true,
@@ -2146,14 +2232,91 @@ void _showSecuritySheet(BuildContext context, Conversation conversation) {
             ),
             const SizedBox(height: 20),
             const Text(
-              'Il bridge di produzione deve verificare l’identità, inizializzare la sessione ibrida e cifrare l’envelope prima dell’invio.',
+              'I messaggi sono visibili subito. La verifica è facoltativa e serve a confermare, confrontando il fingerprint fuori da Sylphy, che stai parlando con la persona giusta.',
               style: TextStyle(color: Color(0xFFC1C8D2), height: 1.45),
+            ),
+            const SizedBox(height: 20),
+            FilledButton.icon(
+              key: const ValueKey('toggle-contact-verification'),
+              onPressed: () async {
+                try {
+                  await bridge.setContactVerified(
+                    conversationId: conversation.id,
+                    verified: conversation.safety != ContactSafety.verified,
+                  );
+                  onChanged();
+                  if (context.mounted) {
+                    Navigator.of(context).pop();
+                  }
+                } on SecureMessagingException catch (error) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          'Impossibile aggiornare la verifica (${error.code}).',
+                        ),
+                      ),
+                    );
+                  }
+                }
+              },
+              icon: Icon(
+                conversation.safety == ContactSafety.verified
+                    ? Icons.remove_moderator_outlined
+                    : Icons.verified_user_outlined,
+              ),
+              label: Text(
+                conversation.safety == ContactSafety.verified
+                    ? 'Rimuovi verifica'
+                    : 'Segna come verificato',
+              ),
             ),
           ],
         ),
       ),
     ),
   );
+}
+
+Future<bool> _confirmDeleteConversation(
+  BuildContext context,
+  SecureMessagingBridge bridge,
+  Conversation conversation,
+) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Cancellare la chat?'),
+      content: Text(
+        'Verranno eliminati dal dispositivo la conversazione con ${conversation.name}, i messaggi e il contatto. Questa operazione non cancella le copie sull’altro dispositivo.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(false),
+          child: const Text('Annulla'),
+        ),
+        FilledButton(
+          key: const ValueKey('confirm-delete-conversation'),
+          onPressed: () => Navigator.of(dialogContext).pop(true),
+          child: const Text('Cancella'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true) {
+    return false;
+  }
+  try {
+    await bridge.deleteConversation(conversation.id);
+    return true;
+  } on SecureMessagingException catch (error) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Cancellazione non riuscita (${error.code}).')),
+      );
+    }
+    return false;
+  }
 }
 
 class _PrivacyLine extends StatelessWidget {
