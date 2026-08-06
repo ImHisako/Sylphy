@@ -112,7 +112,6 @@ pub fn configure_storage(storage_directory: &str) -> CoreResult<()> {
 }
 
 pub fn list_conversations() -> CoreResult<Value> {
-    sync_inbound();
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     ensure_messages_loaded(&mut store)?;
     let messages = &store.messages;
@@ -165,7 +164,6 @@ pub fn list_conversations() -> CoreResult<Value> {
 
 pub fn list_messages(conversation_id: &str) -> CoreResult<Value> {
     validate_conversation_id(conversation_id)?;
-    sync_inbound();
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     ensure_messages_loaded(&mut store)?;
     let mut messages = store
@@ -427,79 +425,101 @@ pub fn set_contact_verified(conversation_id: &str, verified: bool) -> CoreResult
     }))
 }
 
-fn sync_inbound() {
-    let Ok(payloads) = veilid_adapter::take_inbound_payloads() else {
-        return;
-    };
+pub fn sync_inbound_messages() -> CoreResult<Value> {
+    // Loading/decrypting a large vault can be expensive. This command is
+    // always invoked on the Dart background executor, so warm it here before
+    // synchronous UI reads access the in-memory message index.
+    {
+        let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+        ensure_messages_loaded(&mut store)?;
+    }
+    let payloads = veilid_adapter::take_inbound_payloads()?;
+    let mut persisted = 0_usize;
+    let mut discarded = 0_usize;
     for payload in payloads {
-        let Ok(opened) = secure_packet::open(&payload) else {
-            continue;
-        };
-        let Ok(mut store) = contact_store().lock() else {
-            continue;
-        };
-        let Some(contact_path) = store.path.clone() else {
-            continue;
-        };
-        let Some(message_path) = store.message_path.clone() else {
-            continue;
-        };
-        let id = contact_id(&opened.sender.bundle.identity_ed25519);
-        let mut contacts_changed = false;
-        if let Some(contact) = store.contacts.iter_mut().find(|contact| contact.id == id) {
-            contact.bundle = opened.sender.bundle.clone();
-            contact.published_identity = Some(opened.sender.clone());
-        } else if store.contacts.len() < MAX_CONTACTS {
-            let fingerprint = fingerprint(&opened.sender.bundle.identity_ed25519);
-            let suffix = fingerprint.replace(' ', "");
-            let suffix = &suffix[suffix.len().saturating_sub(8)..];
-            store.contacts.push(StoredContact {
-                id: id.clone(),
-                display_name: format!("Nuovo contatto {suffix}"),
-                fingerprint,
-                added_at_ms: opened.sent_at_ms,
-                bundle: opened.sender.bundle.clone(),
-                published_identity: Some(opened.sender.clone()),
-                verified: false,
-            });
-            contacts_changed = true;
-        } else {
-            continue;
-        }
-        if ensure_messages_loaded(&mut store).is_err() {
-            continue;
-        }
-        if store
-            .messages
-            .iter()
-            .any(|message| message.id == opened.message_id)
-        {
-            continue;
-        }
-        let Ok((body, attachment_name, attachment_base64)) =
-            decode_incoming_content(&opened.plaintext)
-        else {
-            continue;
-        };
-        store.messages.push(StoredMessage {
-            id: opened.message_id,
-            conversation_id: id.clone(),
-            author_id: id,
-            body,
-            sent_at_ms: opened.sent_at_ms,
-            is_outgoing: false,
-            is_read: false,
-            delivery_state: "delivered".to_owned(),
-            attachment_name,
-            attachment_base64,
-        });
-        if persist_messages(&message_path, &store.messages).is_err() {
-            continue;
-        }
-        if contacts_changed {
-            let _ = persist_contacts(&contact_path, &store.contacts);
+        match persist_inbound_payload(&payload.payload) {
+            Ok(()) => {
+                persisted += 1;
+                let _ = veilid_adapter::acknowledge_inbound_payload(payload);
+            }
+            Err(error) if should_discard_inbound(&error) => {
+                // A permanently invalid packet must not poison one of the
+                // finite mailbox slots. Transient storage/network failures are
+                // deliberately left unacknowledged and will be fetched again.
+                discarded += 1;
+                let _ = veilid_adapter::acknowledge_inbound_payload(payload);
+            }
+            Err(_) => {}
         }
     }
+    Ok(json!({"persisted": persisted, "discarded": discarded}))
+}
+
+fn should_discard_inbound(error: &CoreError) -> bool {
+    matches!(
+        error,
+        CoreError::InvalidInput
+            | CoreError::UnsupportedVersion
+            | CoreError::AuthenticationFailed
+            | CoreError::VerificationFailed
+    )
+}
+
+fn persist_inbound_payload(payload: &[u8]) -> CoreResult<()> {
+    let opened = secure_packet::open(payload)?;
+    let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    let contact_path = store.path.clone().ok_or(CoreError::FeatureUnavailable)?;
+    let message_path = store
+        .message_path
+        .clone()
+        .ok_or(CoreError::FeatureUnavailable)?;
+    let id = contact_id(&opened.sender.bundle.identity_ed25519);
+    if let Some(contact) = store.contacts.iter_mut().find(|contact| contact.id == id) {
+        contact.bundle = opened.sender.bundle.clone();
+        contact.published_identity = Some(opened.sender.clone());
+    } else if store.contacts.len() < MAX_CONTACTS {
+        let fingerprint = fingerprint(&opened.sender.bundle.identity_ed25519);
+        let suffix = fingerprint.replace(' ', "");
+        let suffix = &suffix[suffix.len().saturating_sub(8)..];
+        store.contacts.push(StoredContact {
+            id: id.clone(),
+            display_name: format!("Nuovo contatto {suffix}"),
+            fingerprint,
+            added_at_ms: opened.sent_at_ms,
+            bundle: opened.sender.bundle.clone(),
+            published_identity: Some(opened.sender.clone()),
+            verified: false,
+        });
+    } else {
+        return Err(CoreError::LimitExceeded);
+    }
+    ensure_messages_loaded(&mut store)?;
+    if store
+        .messages
+        .iter()
+        .any(|message| message.id == opened.message_id)
+    {
+        persist_contacts(&contact_path, &store.contacts)?;
+        return Ok(());
+    }
+    let (body, attachment_name, attachment_base64) = decode_incoming_content(&opened.plaintext)?;
+    persist_contacts(&contact_path, &store.contacts)?;
+    let mut updated_messages = store.messages.clone();
+    updated_messages.push(StoredMessage {
+        id: opened.message_id,
+        conversation_id: id.clone(),
+        author_id: id,
+        body,
+        sent_at_ms: opened.sent_at_ms,
+        is_outgoing: false,
+        is_read: false,
+        delivery_state: "delivered".to_owned(),
+        attachment_name,
+        attachment_base64,
+    });
+    persist_messages(&message_path, &updated_messages)?;
+    store.messages = updated_messages;
+    Ok(())
 }
 
 fn decode_invitation(code: &str) -> CoreResult<(PublicBundle, Option<PublishedIdentity>)> {

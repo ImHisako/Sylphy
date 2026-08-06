@@ -43,7 +43,7 @@ class VeilidSnapshot {
   String get detail => switch (phase) {
     VeilidPhase.unavailable =>
       diagnosticCode == 'feature_unavailable'
-          ? 'Questa build non include Veilid. Installa la build Android ABI 5 più recente.'
+          ? 'Questa build non include Veilid. Installa la build Android ABI 6 più recente.'
           : 'Installa la libreria nativa per connetterti.',
     VeilidPhase.offline => 'Nodo arrestato · nuovo tentativo automatico',
     VeilidPhase.connecting => 'Avvio del nodo privato in corso.',
@@ -173,7 +173,9 @@ class VeilidService extends ChangeNotifier {
         '${supportDirectory.path}${Platform.pathSeparator}veilid',
       );
       await storage.create(recursive: true);
-      final response = core.startVeilid(storage.path);
+      final response = core is NativeCoreClient
+          ? await core.startVeilidInBackground(storage.path)
+          : core.startVeilid(storage.path);
       _setSnapshot(VeilidSnapshot.fromResponse(response));
     } on Object catch (error) {
       AppLog.instance.recordError(
@@ -227,7 +229,10 @@ class VeilidService extends ChangeNotifier {
       return;
     }
     try {
-      _setSnapshot(VeilidSnapshot.fromResponse(core.stopVeilid()));
+      final response = core is NativeCoreClient
+          ? await core.stopVeilidInBackground()
+          : core.stopVeilid();
+      _setSnapshot(VeilidSnapshot.fromResponse(response));
       AppLog.instance.record(
         category: 'veilid',
         action: 'stopped',

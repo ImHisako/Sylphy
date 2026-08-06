@@ -11,7 +11,8 @@ use crate::{
 
 const MAX_ROUTE_BLOB_BYTES: usize = 16 * 1024;
 const MAX_PUBLIC_NAME_CHARS: usize = 64;
-const MAX_AVATAR_BASE64_BYTES: usize = 48 * 1024;
+// The complete PublishedIdentity must fit Veilid's 32 KiB subkey limit.
+const MAX_AVATAR_BASE64_BYTES: usize = 12 * 1024;
 const MAX_MAILBOX_FIELD_BYTES: usize = 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

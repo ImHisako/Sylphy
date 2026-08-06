@@ -1,9 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:image/image.dart' as image;
 import 'package:path_provider/path_provider.dart';
 
 import '../diagnostics/app_log.dart';
@@ -11,6 +13,10 @@ import '../native/native_core.dart';
 import '../profile/user_profile.dart';
 
 enum IdentityPhase { unavailable, loading, ready, error }
+
+// Veilid DHT subkeys are capped at 32 KiB. Keep ample room for the signed
+// identity bundle, route and mailbox metadata in the same record.
+const int maxPublishedAvatarBytes = 8 * 1024;
 
 @immutable
 class IdentitySnapshot {
@@ -119,10 +125,8 @@ class IdentityService extends ChangeNotifier {
           ? _publicProfile?.displayName
           : null;
       final avatarBase64 =
-          _shareProfilePhoto &&
-              _publicProfile?.photoBytes != null &&
-              _publicProfile!.photoBytes!.length <= 36 * 1024
-          ? base64Encode(_publicProfile!.photoBytes!)
+          _shareProfilePhoto && _publicProfile?.photoBytes != null
+          ? await _encodePublishedAvatar(_publicProfile!.photoBytes!)
           : null;
       final response = core is NativeCoreClient
           ? await core.ensureIdentityInBackground(
@@ -219,4 +223,36 @@ class IdentityService extends ChangeNotifier {
     _disposed = true;
     super.dispose();
   }
+}
+
+Future<String?> _encodePublishedAvatar(Uint8List source) async {
+  final bytes = await Isolate.run(() => _compactAvatar(source));
+  return bytes == null ? null : base64Encode(bytes);
+}
+
+Uint8List? _compactAvatar(Uint8List source) {
+  final decoded = image.decodeImage(source);
+  if (decoded == null) return null;
+  if (source.length <= maxPublishedAvatarBytes) return source;
+
+  final oriented = image.bakeOrientation(decoded);
+  const sizes = [320, 256, 224, 192, 160, 128, 96, 64];
+  const qualities = [82, 72, 62, 52, 42, 32];
+  for (final size in sizes) {
+    final resized = oriented.width > size || oriented.height > size
+        ? image.copyResize(
+            oriented,
+            width: oriented.width >= oriented.height ? size : null,
+            height: oriented.height > oriented.width ? size : null,
+            interpolation: image.Interpolation.average,
+          )
+        : oriented;
+    for (final quality in qualities) {
+      final encoded = Uint8List.fromList(
+        image.encodeJpg(resized, quality: quality),
+      );
+      if (encoded.length <= maxPublishedAvatarBytes) return encoded;
+    }
+  }
+  return null;
 }

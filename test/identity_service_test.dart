@@ -1,8 +1,12 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as image;
 import 'package:sylphy/core/identity/identity_service.dart';
 import 'package:sylphy/core/native/native_core.dart';
+import 'package:sylphy/core/profile/user_profile.dart';
 
 void main() {
   test(
@@ -27,6 +31,49 @@ void main() {
       expect(service.snapshot.invitationCode, startsWith('sylphy:'));
       expect(core.receivedVaultPassword, 'device-bound-test-secret');
       expect(core.receivedStorageDirectory, endsWith('native'));
+    },
+  );
+
+  test(
+    'publishes a compact profile photo instead of silently omitting it',
+    () async {
+      final supportDirectory = await Directory.systemTemp.createTemp(
+        'sylphy-avatar-service-test-',
+      );
+      addTearDown(() => supportDirectory.delete(recursive: true));
+      final source = image.Image(width: 640, height: 640);
+      for (var y = 0; y < source.height; y++) {
+        for (var x = 0; x < source.width; x++) {
+          source.setPixelRgba(
+            x,
+            y,
+            (x * 17 + y * 31) & 0xff,
+            (x * 47 + y * 13) & 0xff,
+            (x * 7 + y * 71) & 0xff,
+            255,
+          );
+        }
+      }
+      final original = image.encodePng(source);
+      expect(original.length, greaterThan(maxPublishedAvatarBytes));
+      final core = _IdentityNativeCore();
+      final service = IdentityService(
+        nativeCore: core,
+        deviceSecretStore: _TestDeviceSecretStore(),
+        applicationSupportDirectory: () async => supportDirectory,
+      );
+      addTearDown(service.dispose);
+
+      await service.initialize(
+        profile: UserProfile(
+          displayName: 'Ada',
+          photoBytes: Uint8List.fromList(original),
+        ),
+      );
+
+      final published = base64Decode(core.receivedAvatarBase64!);
+      expect(published.length, lessThanOrEqualTo(maxPublishedAvatarBytes));
+      expect(image.decodeImage(published), isNotNull);
     },
   );
 
@@ -74,6 +121,7 @@ class _IdentityNativeCore implements NativeCoreApi {
   }) => throw UnimplementedError();
   String? receivedStorageDirectory;
   String? receivedVaultPassword;
+  String? receivedAvatarBase64;
 
   @override
   NativeCoreResponse ensureIdentity({
@@ -85,6 +133,7 @@ class _IdentityNativeCore implements NativeCoreApi {
     ensureIdentityCalls += 1;
     receivedStorageDirectory = storageDirectory;
     receivedVaultPassword = vaultPassword;
+    receivedAvatarBase64 = avatarBase64;
     return NativeCoreResponse(
       ok: true,
       code: 'ok',

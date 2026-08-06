@@ -13,6 +13,7 @@ class MessageNotifications {
     if (!Platform.isAndroid) return;
     try {
       await _channel.invokeMethod<void>('requestNotificationPermission');
+      await _channel.invokeMethod<void>('startBackgroundMessaging');
     } on Object catch (error) {
       AppLog.instance.recordError(
         category: 'notifications',

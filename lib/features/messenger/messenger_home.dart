@@ -12,6 +12,7 @@ import '../../core/identity/identity_service.dart';
 import '../../core/profile/user_profile.dart';
 import '../../core/privacy/privacy_settings.dart';
 import '../../core/platform/message_notifications.dart';
+import '../../core/platform/attachment_downloads.dart';
 import '../../core/veilid/veilid_service.dart';
 import '../profile/profile_sheet.dart';
 import '../settings/settings_page.dart';
@@ -46,6 +47,7 @@ class _MessengerHomeState extends State<MessengerHome> {
   List<Conversation> _conversations = const [];
   String _conversationSignature = '';
   Map<String, int> _unreadCounts = const {};
+  bool _isRefreshingInbox = false;
 
   @override
   void initState() {
@@ -60,7 +62,7 @@ class _MessengerHomeState extends State<MessengerHome> {
         ? null
         : _conversations.first.id;
     _inboxTimer = Timer.periodic(
-      const Duration(milliseconds: 1400),
+      const Duration(seconds: 3),
       (_) => _refreshInbox(),
     );
   }
@@ -73,7 +75,23 @@ class _MessengerHomeState extends State<MessengerHome> {
     }
   }
 
-  void _refreshInbox({bool force = false}) {
+  Future<void> _refreshInbox({bool force = false}) async {
+    if (!mounted || _isRefreshingInbox) return;
+    _isRefreshingInbox = true;
+    try {
+      final bridge = widget.bridge;
+      if (bridge is InboxRefreshingBridge) {
+        await (bridge as InboxRefreshingBridge).refreshInbox();
+      }
+    } on Object catch (error) {
+      AppLog.instance.recordError(
+        category: 'messenger',
+        action: 'inbox_refresh_failed',
+        error: error,
+      );
+    } finally {
+      _isRefreshingInbox = false;
+    }
     if (!mounted) return;
     final conversations = _readConversations();
     final signature = _signatureForConversations(conversations);
@@ -177,7 +195,7 @@ class _MessengerHomeState extends State<MessengerHome> {
       }
       final message = switch (error.code) {
         'native_core_unavailable' =>
-          'Il core nativo non è disponibile: ricompila l’app con ABI 5.',
+          'Il core nativo non è disponibile: ricompila l’app con ABI 6.',
         'feature_unavailable' =>
           'Lo storage nativo non è ancora pronto. Attendi l’avvio del nodo e riprova.',
         'verification_failed' =>
@@ -191,7 +209,7 @@ class _MessengerHomeState extends State<MessengerHome> {
     }
   }
 
-  void _refresh() => _refreshInbox(force: true);
+  void _refresh() => unawaited(_refreshInbox(force: true));
 
   void _openProfile() {
     AppLog.instance.record(
@@ -1547,6 +1565,85 @@ class _MessageBubble extends StatelessWidget {
   final ChatMessage message;
   final bool showReceipt;
 
+  bool get _isImageAttachment {
+    final name = message.attachmentName?.toLowerCase();
+    return name != null &&
+        (name.endsWith('.jpg') ||
+            name.endsWith('.jpeg') ||
+            name.endsWith('.png') ||
+            name.endsWith('.webp') ||
+            name.endsWith('.gif') ||
+            name.endsWith('.bmp'));
+  }
+
+  Future<void> _downloadAttachment(BuildContext context) async {
+    final bytes = message.attachmentBytes;
+    final name = message.attachmentName;
+    if (bytes == null || name == null) return;
+    try {
+      final location = await const AttachmentDownloads().save(
+        fileName: name,
+        bytes: bytes,
+      );
+      if (!context.mounted || location == null) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('File salvato: $location')));
+    } on Object {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Non è stato possibile salvare il file.')),
+      );
+    }
+  }
+
+  void _showImage(BuildContext context) {
+    final bytes = message.attachmentBytes;
+    if (bytes == null) return;
+    showDialog<void>(
+      context: context,
+      builder: (context) => Dialog(
+        backgroundColor: const Color(0xFF0C0F14),
+        insetPadding: const EdgeInsets.all(20),
+        child: Stack(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: InteractiveViewer(
+                minScale: 0.5,
+                maxScale: 5,
+                child: Image.memory(
+                  bytes,
+                  fit: BoxFit.contain,
+                  errorBuilder: (context, error, stackTrace) => const Padding(
+                    padding: EdgeInsets.all(32),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.broken_image_outlined, size: 48),
+                        SizedBox(height: 12),
+                        Text('Impossibile visualizzare questa immagine.'),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              right: 6,
+              top: 6,
+              child: IconButton.filledTonal(
+                tooltip: 'Chiudi',
+                onPressed: () => Navigator.of(context).pop(),
+                icon: const Icon(Icons.close_rounded),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final outgoing = message.isOutgoing;
@@ -1582,37 +1679,82 @@ class _MessageBubble extends StatelessWidget {
                   color: foreground.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: Row(
+                child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.insert_drive_file_rounded, color: foreground),
-                    const SizedBox(width: 10),
-                    Flexible(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            fileName,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: foreground,
-                              fontWeight: FontWeight.w700,
+                    if (_isImageAttachment &&
+                        message.attachmentBytes != null) ...[
+                      GestureDetector(
+                        onTap: () => _showImage(context),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(9),
+                          child: Image.memory(
+                            message.attachmentBytes!,
+                            width: 300,
+                            height: 220,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, _, _) => SizedBox(
+                              width: 300,
+                              height: 120,
+                              child: Icon(
+                                Icons.broken_image_outlined,
+                                color: foreground,
+                                size: 42,
+                              ),
                             ),
                           ),
-                          Text(
-                            _fileSizeLabel(
-                              message.attachmentBytes?.length ?? 0,
-                            ),
-                            style: TextStyle(
-                              color: foreground.withValues(alpha: 0.68),
-                              fontSize: 11,
-                            ),
-                          ),
-                        ],
+                        ),
                       ),
+                      const SizedBox(height: 8),
+                    ],
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _isImageAttachment
+                              ? Icons.image_rounded
+                              : Icons.insert_drive_file_rounded,
+                          color: foreground,
+                        ),
+                        const SizedBox(width: 10),
+                        Flexible(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                fileName,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: foreground,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              Text(
+                                _fileSizeLabel(
+                                  message.attachmentBytes?.length ?? 0,
+                                ),
+                                style: TextStyle(
+                                  color: foreground.withValues(alpha: 0.68),
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        if (message.attachmentBytes != null)
+                          IconButton(
+                            tooltip: 'Scarica file',
+                            visualDensity: VisualDensity.compact,
+                            onPressed: () => _downloadAttachment(context),
+                            icon: Icon(
+                              Icons.download_rounded,
+                              color: foreground,
+                            ),
+                          ),
+                        Icon(Icons.lock_rounded, size: 16, color: foreground),
+                      ],
                     ),
-                    const SizedBox(width: 8),
-                    Icon(Icons.lock_rounded, size: 16, color: foreground),
                   ],
                 ),
               )

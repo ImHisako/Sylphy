@@ -230,7 +230,7 @@ class _ProfileOnboardingState extends State<ProfileOnboarding> {
                     ],
                     const SizedBox(height: 12),
                     const Text(
-                      'La foto è facoltativa e rimane nello storage locale dell’app.',
+                      'La foto originale rimane locale; se la condivisione è attiva, ai contatti viene pubblicata una copia ridotta e firmata.',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: Color(0xFF858F9D), fontSize: 12),
                     ),

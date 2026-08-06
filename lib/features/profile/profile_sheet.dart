@@ -182,7 +182,7 @@ class _IdentityContent extends StatelessWidget {
           const SizedBox(height: 6),
           Text(
             snapshot.phase == IdentityPhase.unavailable
-                ? 'Il core nativo ABI 5 non è incluso in questa build.'
+                ? 'Il core nativo ABI 6 non è incluso in questa build.'
                 : 'Non è stato possibile aprire il vault dell’identità (${snapshot.errorCode ?? 'errore sconosciuto'}).',
             style: const TextStyle(color: Color(0xFFAEB7C3), height: 1.4),
           ),

@@ -3,6 +3,7 @@ package com.example.sylphy
 import android.content.Context
 import android.content.ContextWrapper
 import android.Manifest
+import android.app.Activity
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -16,6 +17,8 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import io.flutter.embedding.engine.FlutterEngineCache
 
 internal fun veilidBinaryClassName(name: String): String = name.replace('/', '.')
 
@@ -39,6 +42,13 @@ class MainActivity : FlutterActivity() {
     private var nativeLibraryLoaded = false
     private var veilidBootstrapReady = false
     private var veilidBootstrapCode = "not_started"
+    private var pendingSaveResult: MethodChannel.Result? = null
+    private var pendingSaveBytes: ByteArray? = null
+
+    override fun provideFlutterEngine(context: Context): FlutterEngine? =
+        FlutterEngineCache.getInstance().get(ENGINE_ID)
+
+    override fun shouldDestroyEngineWithHost(): Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         ensureVeilidInitialized()
@@ -49,6 +59,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        FlutterEngineCache.getInstance().put(ENGINE_ID, flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, PLATFORM_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -69,9 +80,74 @@ class MainActivity : FlutterActivity() {
                         showMessageNotification()
                         result.success(true)
                     }
+                    "startBackgroundMessaging" -> {
+                        try {
+                            ContextCompat.startForegroundService(
+                                applicationContext,
+                                Intent(applicationContext, MessagingService::class.java),
+                            )
+                            result.success(true)
+                        } catch (error: Throwable) {
+                            Log.e("Sylphy", "Unable to start background messaging", error)
+                            result.error(
+                                "background_messaging_unavailable",
+                                "Il servizio messaggi in background non è disponibile.",
+                                null,
+                            )
+                        }
+                    }
+                    "saveFile" -> saveFile(call.arguments, result)
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun saveFile(arguments: Any?, result: MethodChannel.Result) {
+        if (pendingSaveResult != null) {
+            result.error("save_in_progress", "Un salvataggio è già in corso.", null)
+            return
+        }
+        val values = arguments as? Map<String, Any?>
+        val fileName = values?.get("fileName") as? String
+        val bytes = values?.get("bytes") as? ByteArray
+        if (fileName.isNullOrBlank() || bytes == null || bytes.isEmpty()) {
+            result.error("invalid_file", "File non valido.", null)
+            return
+        }
+        pendingSaveResult = result
+        pendingSaveBytes = bytes
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/octet-stream"
+            putExtra(Intent.EXTRA_TITLE, fileName)
+        }
+        startActivityForResult(intent, SAVE_FILE_REQUEST)
+    }
+
+    @Deprecated("Deprecated in Android; required by FlutterActivity compatibility")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode != SAVE_FILE_REQUEST) {
+            super.onActivityResult(requestCode, resultCode, data)
+            return
+        }
+        val result = pendingSaveResult
+        val bytes = pendingSaveBytes
+        pendingSaveResult = null
+        pendingSaveBytes = null
+        if (resultCode != Activity.RESULT_OK || data?.data == null) {
+            result?.success(null)
+            return
+        }
+        val destination = data.data!!
+        try {
+            contentResolver.openOutputStream(destination, "w").use { output ->
+                requireNotNull(output).write(requireNotNull(bytes))
+            }
+            result?.success(destination.toString())
+        } catch (error: Throwable) {
+            result?.error("save_failed", "Impossibile salvare il file.", null)
+        }
     }
 
     private fun createMessageChannel() {
@@ -169,6 +245,8 @@ class MainActivity : FlutterActivity() {
         const val PLATFORM_CHANNEL = "sylphy/platform"
         const val MESSAGE_CHANNEL_ID = "sylphy_messages"
         const val NOTIFICATION_PERMISSION_REQUEST = 4102
+        const val SAVE_FILE_REQUEST = 4103
+        const val ENGINE_ID = "sylphy_messaging_engine"
         val REQUIRED_PROTECTED_STORE_CLASSES = listOf(
             "androidx.security.crypto.MasterKey",
             "androidx.security.crypto.MasterKey\$Builder",

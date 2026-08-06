@@ -8,7 +8,7 @@ import 'package:ffi/ffi.dart';
 
 import '../diagnostics/app_log.dart';
 
-const _expectedAbiVersion = 5;
+const _expectedAbiVersion = 6;
 
 typedef _NativeAbiVersion = Uint32 Function();
 typedef _DartAbiVersion = int Function();
@@ -73,12 +73,12 @@ class NativeCoreClient implements NativeCoreApi {
   final _DartCall _call;
   final _DartFreeString _freeString;
   final int abiVersion;
-  bool _backgroundCallInProgress = false;
-  Future<void>? _backgroundCall;
+  int _pendingBackgroundCalls = 0;
+  Future<void> _backgroundTail = Future.value();
 
-  bool get backgroundCallInProgress => _backgroundCallInProgress;
+  bool get backgroundCallInProgress => _pendingBackgroundCalls > 0;
 
-  Future<void> waitUntilAvailable() => _backgroundCall ?? Future.value();
+  Future<void> waitUntilAvailable() => _backgroundTail;
 
   static NativeCoreClient? tryLoad() {
     if (!Platform.isWindows && !Platform.isLinux && !Platform.isAndroid) {
@@ -126,11 +126,20 @@ class NativeCoreClient implements NativeCoreApi {
   NativeCoreResponse startVeilid(String storageDirectory) =>
       call({'command': 'start_veilid', 'storage_directory': storageDirectory});
 
+  Future<NativeCoreResponse> startVeilidInBackground(String storageDirectory) =>
+      _callInBackground({
+        'command': 'start_veilid',
+        'storage_directory': storageDirectory,
+      });
+
   @override
   NativeCoreResponse veilidStatus() => call(const {'command': 'veilid_status'});
 
   @override
   NativeCoreResponse stopVeilid() => call(const {'command': 'stop_veilid'});
+
+  Future<NativeCoreResponse> stopVeilidInBackground() =>
+      _callInBackground(const {'command': 'stop_veilid'});
 
   @override
   NativeCoreResponse listConversations() {
@@ -145,6 +154,9 @@ class NativeCoreClient implements NativeCoreApi {
     });
   }
 
+  Future<NativeCoreResponse> syncInboundInBackground() =>
+      _callInBackground(const {'command': 'sync_inbound'});
+
   @override
   NativeCoreResponse addContact({
     required String displayName,
@@ -157,6 +169,15 @@ class NativeCoreClient implements NativeCoreApi {
     });
   }
 
+  Future<NativeCoreResponse> addContactInBackground({
+    required String displayName,
+    required String invitationCode,
+  }) => _callInBackground({
+    'command': 'add_contact',
+    'display_name': displayName,
+    'invitation_code': invitationCode,
+  });
+
   @override
   NativeCoreResponse sendText({
     required String conversationId,
@@ -168,6 +189,15 @@ class NativeCoreClient implements NativeCoreApi {
       'plaintext': plaintext,
     });
   }
+
+  Future<NativeCoreResponse> sendTextInBackground({
+    required String conversationId,
+    required String plaintext,
+  }) => _callInBackground({
+    'command': 'send_text',
+    'conversation_id': conversationId,
+    'plaintext': plaintext,
+  });
 
   @override
   NativeCoreResponse sendAttachment({
@@ -183,6 +213,17 @@ class NativeCoreClient implements NativeCoreApi {
     });
   }
 
+  Future<NativeCoreResponse> sendAttachmentInBackground({
+    required String conversationId,
+    required String fileName,
+    required String bytesBase64,
+  }) => _callInBackground({
+    'command': 'send_attachment',
+    'conversation_id': conversationId,
+    'file_name': fileName,
+    'bytes_base64': bytesBase64,
+  });
+
   @override
   NativeCoreResponse markConversationRead(String conversationId) {
     return call({
@@ -191,6 +232,13 @@ class NativeCoreClient implements NativeCoreApi {
     });
   }
 
+  Future<NativeCoreResponse> markConversationReadInBackground(
+    String conversationId,
+  ) => _callInBackground({
+    'command': 'mark_conversation_read',
+    'conversation_id': conversationId,
+  });
+
   @override
   NativeCoreResponse deleteConversation(String conversationId) {
     return call({
@@ -198,6 +246,13 @@ class NativeCoreClient implements NativeCoreApi {
       'conversation_id': conversationId,
     });
   }
+
+  Future<NativeCoreResponse> deleteConversationInBackground(
+    String conversationId,
+  ) => _callInBackground({
+    'command': 'delete_conversation',
+    'conversation_id': conversationId,
+  });
 
   @override
   NativeCoreResponse setContactVerified({
@@ -210,6 +265,15 @@ class NativeCoreClient implements NativeCoreApi {
       'verified': verified,
     });
   }
+
+  Future<NativeCoreResponse> setContactVerifiedInBackground({
+    required String conversationId,
+    required bool verified,
+  }) => _callInBackground({
+    'command': 'set_contact_verified',
+    'conversation_id': conversationId,
+    'verified': verified,
+  });
 
   @override
   NativeCoreResponse ensureIdentity({
@@ -232,15 +296,33 @@ class NativeCoreClient implements NativeCoreApi {
     required String vaultPassword,
     String? displayName,
     String? avatarBase64,
-  }) async {
-    await waitUntilAvailable();
+  }) => _callInBackground({
+    'command': 'ensure_identity',
+    'storage_directory': storageDirectory,
+    'vault_password': vaultPassword,
+    if (displayName != null) 'display_name': displayName,
+    if (avatarBase64 != null) 'avatar_base64': avatarBase64,
+  });
+
+  Future<NativeCoreResponse> _callInBackground(Map<String, Object> request) {
+    final previous = _backgroundTail;
     final completer = Completer<void>();
-    _backgroundCallInProgress = true;
-    _backgroundCall = completer.future;
+    _pendingBackgroundCalls += 1;
+    _backgroundTail = completer.future;
+    return _executeBackgroundCall(previous, completer, request);
+  }
+
+  Future<NativeCoreResponse> _executeBackgroundCall(
+    Future<void> previous,
+    Completer<void> completer,
+    Map<String, Object> request,
+  ) async {
+    await previous;
+    final command = request['command'] as String? ?? 'unknown';
     final stopwatch = Stopwatch()..start();
     AppLog.instance.record(
       category: 'native_core',
-      action: 'background_call_started:ensure_identity',
+      action: 'background_call_started:$command',
       verbose: true,
     );
     try {
@@ -253,16 +335,11 @@ class NativeCoreClient implements NativeCoreApi {
             data: {},
           );
         }
-        return client.ensureIdentity(
-          storageDirectory: storageDirectory,
-          vaultPassword: vaultPassword,
-          displayName: displayName,
-          avatarBase64: avatarBase64,
-        );
+        return client.call(request);
       });
       AppLog.instance.record(
         category: 'native_core',
-        action: 'background_call_completed:ensure_identity',
+        action: 'background_call_completed:$command',
         level: response.ok ? AppLogLevel.debug : AppLogLevel.error,
         result: '${response.code}.${stopwatch.elapsedMilliseconds}ms',
         verbose: response.ok,
@@ -272,13 +349,12 @@ class NativeCoreClient implements NativeCoreApi {
     } on Object catch (error) {
       AppLog.instance.recordError(
         category: 'native_core',
-        action: 'background_call_failed:ensure_identity',
+        action: 'background_call_failed:$command',
         error: error,
       );
       rethrow;
     } finally {
-      _backgroundCallInProgress = false;
-      _backgroundCall = null;
+      _pendingBackgroundCalls -= 1;
       completer.complete();
     }
   }
@@ -295,7 +371,7 @@ class NativeCoreClient implements NativeCoreApi {
 
   NativeCoreResponse call(Map<String, Object> request) {
     final command = request['command'] as String? ?? 'unknown';
-    if (_backgroundCallInProgress) {
+    if (backgroundCallInProgress) {
       return const NativeCoreResponse(
         ok: false,
         code: 'native_core_busy',

@@ -51,12 +51,13 @@ pub fn seal_for(recipient: &PublishedIdentity, plaintext: &str) -> CoreResult<(V
     let signing_key = local.signing_key()?;
     let local_bundle = local.public_bundle()?;
     let route_blob = crate::veilid_adapter::local_route_blob()?;
+    let mailbox = crate::peer_identity::current_public_mailbox();
     let sender = PublishedIdentity::new(
         &signing_key,
         local_bundle.clone(),
         route_blob,
-        compact_sender_profile(crate::peer_identity::current_public_profile()),
-        crate::peer_identity::current_public_mailbox(),
+        crate::peer_identity::current_public_profile(),
+        mailbox.clone(),
     )?;
 
     let remote_x: [u8; 32] = recipient
@@ -124,7 +125,25 @@ pub fn seal_for(recipient: &PublishedIdentity, plaintext: &str) -> CoreResult<(V
         .sign(&packet.signing_payload()?)
         .to_bytes()
         .to_vec();
-    let bytes = serde_json::to_vec(&packet).map_err(|_| CoreError::Internal)?;
+    let mut bytes = serde_json::to_vec(&packet).map_err(|_| CoreError::Internal)?;
+    if bytes.len() > MAX_PACKET_BYTES && packet.sender.profile.avatar_base64.is_some() {
+        // Prefer propagating the current avatar to existing contacts, but keep
+        // message delivery available when route/envelope overhead is unusually
+        // large and would cross Veilid's application-message ceiling.
+        packet.sender = PublishedIdentity::new(
+            &signing_key,
+            local_bundle,
+            packet.sender.route_blob.clone(),
+            compact_sender_profile(packet.sender.profile.clone()),
+            mailbox,
+        )?;
+        packet.signature.clear();
+        packet.signature = signing_key
+            .sign(&packet.signing_payload()?)
+            .to_bytes()
+            .to_vec();
+        bytes = serde_json::to_vec(&packet).map_err(|_| CoreError::Internal)?;
+    }
     if bytes.len() > MAX_PACKET_BYTES {
         return Err(CoreError::LimitExceeded);
     }
@@ -133,9 +152,8 @@ pub fn seal_for(recipient: &PublishedIdentity, plaintext: &str) -> CoreResult<(V
 }
 
 fn compact_sender_profile(mut profile: PublicProfile) -> PublicProfile {
-    // The full profile is already published with the contact identity. Embedding
-    // an avatar in every packet can exceed Veilid's 32 KiB application-message
-    // ceiling even when the plaintext contains only a few bytes.
+    // Fallback for packets whose route/envelope overhead leaves no room for the
+    // compact avatar under Veilid's 32 KiB application-message ceiling.
     profile.avatar_base64 = None;
     profile
 }

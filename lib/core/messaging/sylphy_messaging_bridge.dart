@@ -6,16 +6,25 @@ import 'secure_messaging_bridge.dart';
 
 /// Fail-closed adapter for messaging records owned by the Rust core.
 ///
-class SylphyMessagingBridge implements SecureMessagingBridge {
+class SylphyMessagingBridge
+    implements SecureMessagingBridge, InboxRefreshingBridge {
   SylphyMessagingBridge({required NativeCoreApi core}) : _core = core;
 
   final NativeCoreApi _core;
+  final Map<String, ChatMessage> _messageCache = {};
 
   Future<void> _waitUntilCoreIsAvailable() {
     final core = _core;
     return core is NativeCoreClient
         ? core.waitUntilAvailable()
         : Future.value();
+  }
+
+  @override
+  Future<void> refreshInbox() async {
+    final core = _core;
+    if (core is! NativeCoreClient) return;
+    _requireSuccess(await core.syncInboundInBackground());
   }
 
   @override
@@ -37,7 +46,25 @@ class SylphyMessagingBridge implements SecureMessagingBridge {
     if (records is! List) {
       throw const SecureMessagingException('invalid_native_response');
     }
-    return List.unmodifiable(records.map(_parseMessage));
+    final messages = records.map((record) {
+      if (record is! Map<String, dynamic>) {
+        throw const SecureMessagingException('invalid_native_response');
+      }
+      final id = _requiredString(record, 'id');
+      final cacheKey = '$conversationId:$id';
+      final message = _parseMessage(record, cached: _messageCache[cacheKey]);
+      _messageCache[cacheKey] = message;
+      return message;
+    }).toList(growable: false);
+    if (_messageCache.length > 4096) {
+      final staleKeys = _messageCache.keys
+          .take(_messageCache.length - 2048)
+          .toList(growable: false);
+      for (final key in staleKeys) {
+        _messageCache.remove(key);
+      }
+    }
+    return List.unmodifiable(messages);
   }
 
   @override
@@ -46,10 +73,16 @@ class SylphyMessagingBridge implements SecureMessagingBridge {
     required String invitationCode,
   }) async {
     await _waitUntilCoreIsAvailable();
-    final response = _core.addContact(
-      displayName: displayName,
-      invitationCode: invitationCode,
-    );
+    final core = _core;
+    final response = core is NativeCoreClient
+        ? await core.addContactInBackground(
+            displayName: displayName,
+            invitationCode: invitationCode,
+          )
+        : core.addContact(
+            displayName: displayName,
+            invitationCode: invitationCode,
+          );
     _requireSuccess(response);
     return _requiredString(response.data, 'contact_id');
   }
@@ -57,13 +90,23 @@ class SylphyMessagingBridge implements SecureMessagingBridge {
   @override
   Future<void> markConversationRead(String conversationId) async {
     await _waitUntilCoreIsAvailable();
-    _requireSuccess(_core.markConversationRead(conversationId));
+    final core = _core;
+    _requireSuccess(
+      core is NativeCoreClient
+          ? await core.markConversationReadInBackground(conversationId)
+          : core.markConversationRead(conversationId),
+    );
   }
 
   @override
   Future<void> deleteConversation(String conversationId) async {
     await _waitUntilCoreIsAvailable();
-    _requireSuccess(_core.deleteConversation(conversationId));
+    final core = _core;
+    _requireSuccess(
+      core is NativeCoreClient
+          ? await core.deleteConversationInBackground(conversationId)
+          : core.deleteConversation(conversationId),
+    );
   }
 
   @override
@@ -72,11 +115,17 @@ class SylphyMessagingBridge implements SecureMessagingBridge {
     required bool verified,
   }) async {
     await _waitUntilCoreIsAvailable();
+    final core = _core;
     _requireSuccess(
-      _core.setContactVerified(
-        conversationId: conversationId,
-        verified: verified,
-      ),
+      core is NativeCoreClient
+          ? await core.setContactVerifiedInBackground(
+              conversationId: conversationId,
+              verified: verified,
+            )
+          : core.setContactVerified(
+              conversationId: conversationId,
+              verified: verified,
+            ),
     );
   }
 
@@ -86,8 +135,14 @@ class SylphyMessagingBridge implements SecureMessagingBridge {
     required String plaintext,
   }) async {
     await _waitUntilCoreIsAvailable();
+    final core = _core;
     _requireSuccess(
-      _core.sendText(conversationId: conversationId, plaintext: plaintext),
+      core is NativeCoreClient
+          ? await core.sendTextInBackground(
+              conversationId: conversationId,
+              plaintext: plaintext,
+            )
+          : core.sendText(conversationId: conversationId, plaintext: plaintext),
     );
   }
 
@@ -98,12 +153,20 @@ class SylphyMessagingBridge implements SecureMessagingBridge {
     required List<int> bytes,
   }) async {
     await _waitUntilCoreIsAvailable();
+    final core = _core;
+    final encoded = base64Encode(bytes);
     _requireSuccess(
-      _core.sendAttachment(
-        conversationId: conversationId,
-        fileName: fileName,
-        bytesBase64: base64Encode(bytes),
-      ),
+      core is NativeCoreClient
+          ? await core.sendAttachmentInBackground(
+              conversationId: conversationId,
+              fileName: fileName,
+              bytesBase64: encoded,
+            )
+          : core.sendAttachment(
+              conversationId: conversationId,
+              fileName: fileName,
+              bytesBase64: encoded,
+            ),
     );
   }
 }
@@ -147,26 +210,44 @@ Conversation _parseConversation(Object? value) {
   );
 }
 
-ChatMessage _parseMessage(Object? value) {
+ChatMessage _parseMessage(Object? value, {ChatMessage? cached}) {
   if (value is! Map<String, dynamic>) {
     throw const SecureMessagingException('invalid_native_response');
   }
+  final id = _requiredString(value, 'id');
+  final authorId = _requiredString(value, 'author_id');
+  final body = _requiredString(value, 'body');
+  final sentAt = DateTime.fromMillisecondsSinceEpoch(
+    _requiredInt(value, 'sent_at_ms'),
+    isUtc: true,
+  ).toLocal();
+  final isOutgoing = value['is_outgoing'] == true;
+  final attachmentName = value['attachment_name'] as String?;
+  final deliveryState = switch (_requiredString(value, 'delivery_state')) {
+    'sent' => DeliveryState.sent,
+    'delivered' => DeliveryState.delivered,
+    'read' => DeliveryState.read,
+    _ => throw const SecureMessagingException('invalid_native_response'),
+  };
+  if (cached != null &&
+      cached.id == id &&
+      cached.authorId == authorId &&
+      cached.body == body &&
+      cached.sentAt == sentAt &&
+      cached.isOutgoing == isOutgoing &&
+      cached.attachmentName == attachmentName) {
+    return cached.deliveryState == deliveryState
+        ? cached
+        : cached.copyWith(deliveryState: deliveryState);
+  }
   return ChatMessage(
-    id: _requiredString(value, 'id'),
-    authorId: _requiredString(value, 'author_id'),
-    body: _requiredString(value, 'body'),
-    sentAt: DateTime.fromMillisecondsSinceEpoch(
-      _requiredInt(value, 'sent_at_ms'),
-      isUtc: true,
-    ).toLocal(),
-    isOutgoing: value['is_outgoing'] == true,
-    deliveryState: switch (_requiredString(value, 'delivery_state')) {
-      'sent' => DeliveryState.sent,
-      'delivered' => DeliveryState.delivered,
-      'read' => DeliveryState.read,
-      _ => throw const SecureMessagingException('invalid_native_response'),
-    },
-    attachmentName: value['attachment_name'] as String?,
+    id: id,
+    authorId: authorId,
+    body: body,
+    sentAt: sentAt,
+    isOutgoing: isOutgoing,
+    deliveryState: deliveryState,
+    attachmentName: attachmentName,
     attachmentBytes: switch (value['attachment_base64']) {
       final String encoded when encoded.isNotEmpty => base64Decode(encoded),
       _ => null,

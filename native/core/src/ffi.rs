@@ -22,6 +22,7 @@ enum CoreRequest {
     VeilidStatus,
     StopVeilid,
     ListConversations,
+    SyncInbound,
     ListMessages {
         conversation_id: String,
     },
@@ -150,6 +151,11 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
             ok: true,
             code: "ok",
             data: messaging_adapter::list_conversations()?,
+        }),
+        CoreRequest::SyncInbound => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::sync_inbound_messages()?,
         }),
         CoreRequest::ListMessages { conversation_id } => Ok(CoreResponse {
             ok: true,
