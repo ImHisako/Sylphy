@@ -46,16 +46,21 @@ class SylphyMessagingBridge
     if (records is! List) {
       throw const SecureMessagingException('invalid_native_response');
     }
-    final messages = records.map((record) {
-      if (record is! Map<String, dynamic>) {
-        throw const SecureMessagingException('invalid_native_response');
-      }
-      final id = _requiredString(record, 'id');
-      final cacheKey = '$conversationId:$id';
-      final message = _parseMessage(record, cached: _messageCache[cacheKey]);
-      _messageCache[cacheKey] = message;
-      return message;
-    }).toList(growable: false);
+    final messages = records
+        .map((record) {
+          if (record is! Map<String, dynamic>) {
+            throw const SecureMessagingException('invalid_native_response');
+          }
+          final id = _requiredString(record, 'id');
+          final cacheKey = '$conversationId:$id';
+          final message = _parseMessage(
+            record,
+            cached: _messageCache[cacheKey],
+          );
+          _messageCache[cacheKey] = message;
+          return message;
+        })
+        .toList(growable: false);
     if (_messageCache.length > 4096) {
       final staleKeys = _messageCache.keys
           .take(_messageCache.length - 2048)
