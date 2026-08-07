@@ -56,6 +56,7 @@ class _MessengerHomeState extends State<MessengerHome>
   String _conversationSignature = '';
   Map<String, int> _unreadCounts = const {};
   bool _isRefreshingInbox = false;
+  bool _isLoadingConversations = false;
   bool _forceRefreshAfterCurrent = false;
   int _lastInboxRevision = 0;
 
@@ -64,7 +65,13 @@ class _MessengerHomeState extends State<MessengerHome>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     widget.identityService.addListener(_onIdentityChanged);
-    _conversations = _readConversations();
+    final cachedBridge = widget.bridge;
+    if (cachedBridge is CachedMessagingBridge) {
+      _conversations = cachedBridge.cachedConversations ?? const [];
+      _isLoadingConversations = cachedBridge.cachedConversations == null;
+    } else {
+      _conversations = _readConversations();
+    }
     _conversationSignature = _signatureForConversations(_conversations);
     _unreadCounts = {
       for (final conversation in _conversations)
@@ -82,8 +89,13 @@ class _MessengerHomeState extends State<MessengerHome>
       (_) => _refreshInbox(),
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) unawaited(_refreshInbox(force: true));
+      if (mounted) unawaited(_initialRefresh());
     });
+  }
+
+  Future<void> _initialRefresh() async {
+    await _loadConversations(force: true);
+    if (mounted) await _refreshInbox(force: true);
   }
 
   @override
@@ -120,6 +132,69 @@ class _MessengerHomeState extends State<MessengerHome>
     }
   }
 
+  Future<void> _loadConversations({bool force = false}) async {
+    List<Conversation> conversations;
+    try {
+      final bridge = widget.bridge;
+      conversations = bridge is CachedMessagingBridge
+          ? await bridge.refreshConversations()
+          : _readConversations();
+    } on Object catch (error) {
+      AppLog.instance.recordError(
+        category: 'messenger',
+        action: 'conversation_load_failed',
+        error: error,
+      );
+      if (mounted && _isLoadingConversations) {
+        setState(() => _isLoadingConversations = false);
+      }
+      return;
+    }
+    if (!mounted) return;
+    final signature = _signatureForConversations(conversations);
+    if (!force && signature == _conversationSignature) {
+      if (_isLoadingConversations) {
+        setState(() => _isLoadingConversations = false);
+      }
+      return;
+    }
+    setState(() {
+      _conversations = conversations;
+      _conversationSignature = signature;
+      _isLoadingConversations = false;
+      _unreadCounts = {
+        for (final conversation in conversations)
+          conversation.id: conversation.unreadCount,
+      };
+      if (_activeConversationId == null ||
+          !conversations.any((item) => item.id == _activeConversationId)) {
+        _activeConversationId = conversations.isEmpty
+            ? null
+            : conversations.first.id;
+      }
+    });
+    unawaited(_prefetchRecentMessages(conversations));
+  }
+
+  Future<void> _prefetchRecentMessages(List<Conversation> conversations) async {
+    final bridge = widget.bridge;
+    if (bridge is! CachedMessagingBridge) return;
+    for (final conversation in conversations.take(8)) {
+      if (!mounted || conversation.id == _activeConversationId) continue;
+      if (bridge.cachedMessages(conversation.id) != null) continue;
+      try {
+        await bridge.refreshMessages(conversation.id);
+      } on Object catch (error) {
+        AppLog.instance.recordError(
+          category: 'messenger',
+          action: 'message_prefetch_failed',
+          error: error,
+        );
+        return;
+      }
+    }
+  }
+
   Future<void> _refreshInbox({bool force = false}) async {
     if (!mounted) return;
     if (_isRefreshingInbox) {
@@ -150,7 +225,20 @@ class _MessengerHomeState extends State<MessengerHome>
     }
     if (!mounted) return;
     if (!force && !revisionChanged) return;
-    final conversations = _readConversations();
+    List<Conversation> conversations;
+    try {
+      final bridge = widget.bridge;
+      conversations = bridge is CachedMessagingBridge
+          ? await bridge.refreshConversations()
+          : _readConversations();
+    } on Object catch (error) {
+      AppLog.instance.recordError(
+        category: 'messenger',
+        action: 'conversation_refresh_failed',
+        error: error,
+      );
+      return;
+    }
     final signature = _signatureForConversations(conversations);
     if (!force && signature == _conversationSignature) return;
     final hasNewMessage = conversations.any(
@@ -163,6 +251,7 @@ class _MessengerHomeState extends State<MessengerHome>
     setState(() {
       _conversations = conversations;
       _conversationSignature = signature;
+      _isLoadingConversations = false;
       _unreadCounts = {
         for (final conversation in conversations)
           conversation.id: conversation.unreadCount,
@@ -174,6 +263,7 @@ class _MessengerHomeState extends State<MessengerHome>
             : conversations.first.id;
       }
     });
+    unawaited(_prefetchRecentMessages(conversations));
   }
 
   @override
@@ -190,6 +280,9 @@ class _MessengerHomeState extends State<MessengerHome>
       action: 'conversation_selected',
       verbose: true,
     );
+    if (mounted && _activeConversationId != conversationId) {
+      setState(() => _activeConversationId = conversationId);
+    }
     try {
       await widget.bridge.markConversationRead(conversationId);
     } on Object catch (error) {
@@ -204,7 +297,6 @@ class _MessengerHomeState extends State<MessengerHome>
     if (!mounted) {
       return;
     }
-    setState(() => _activeConversationId = conversationId);
     unawaited(_refreshInbox(force: true));
   }
 
@@ -311,6 +403,9 @@ class _MessengerHomeState extends State<MessengerHome>
 
   @override
   Widget build(BuildContext context) {
+    if (_isLoadingConversations && _conversations.isEmpty) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
     return LayoutBuilder(
       builder: (context, constraints) {
         final conversations = _conversations;
@@ -886,22 +981,20 @@ class _MobileConversationList extends StatelessWidget {
             final conversation = conversations[index - 2];
             return _ConversationTile(
               conversation: conversation,
-              onTap: () async {
-                await onConversationSelected(conversation.id);
-                if (!context.mounted) {
-                  return;
-                }
-                await Navigator.of(context).push<void>(
-                  MaterialPageRoute(
-                    builder: (context) => _MobileChatScreen(
-                      bridge: bridge,
-                      conversationId: conversation.id,
-                      onChanged: onChanged,
-                      privacySettings: privacySettings,
-                    ),
-                  ),
-                );
-                onChanged();
+              onTap: () {
+                unawaited(onConversationSelected(conversation.id));
+                Navigator.of(context)
+                    .push<void>(
+                      MaterialPageRoute(
+                        builder: (context) => _MobileChatScreen(
+                          bridge: bridge,
+                          conversation: conversation,
+                          onChanged: onChanged,
+                          privacySettings: privacySettings,
+                        ),
+                      ),
+                    )
+                    .then((_) => onChanged());
               },
             );
           },
@@ -922,21 +1015,18 @@ class _MobileConversationList extends StatelessWidget {
 class _MobileChatScreen extends StatelessWidget {
   const _MobileChatScreen({
     required this.bridge,
-    required this.conversationId,
+    required this.conversation,
     required this.onChanged,
     required this.privacySettings,
   });
 
   final SecureMessagingBridge bridge;
-  final String conversationId;
+  final Conversation conversation;
   final VoidCallback onChanged;
   final PrivacySettingsController privacySettings;
 
   @override
   Widget build(BuildContext context) {
-    final conversation = bridge.listConversations().firstWhere(
-      (item) => item.id == conversationId,
-    );
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 0,
@@ -1033,12 +1123,27 @@ class _ChatPaneState extends State<_ChatPane> {
   String? _lastAcknowledgedIncomingId;
   int _lastInboxRevision = 0;
   bool _isRefreshingMessages = false;
+  bool _isLoadingMessages = false;
+  int _messageLoadGeneration = 0;
 
   @override
   void initState() {
     super.initState();
-    _reloadMessages(force: true);
     final bridge = widget.bridge;
+    if (bridge is CachedMessagingBridge) {
+      final cached = bridge.cachedMessages(widget.conversation.id);
+      if (cached == null) {
+        _isLoadingMessages = true;
+      } else {
+        _messages = cached;
+        _messageSignature = _signatureForMessages(cached);
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_reloadMessagesAsync(force: true));
+      });
+    } else {
+      _reloadMessages(force: true);
+    }
     if (bridge is InboxRefreshingBridge) {
       _lastInboxRevision = (bridge as InboxRefreshingBridge).inboxRevision;
       if (!widget.showHeader) {
@@ -1054,17 +1159,32 @@ class _ChatPaneState extends State<_ChatPane> {
   void didUpdateWidget(covariant _ChatPane oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.conversation.id != widget.conversation.id) {
+      _messageLoadGeneration++;
       _composerController.clear();
-      _messages = const [];
       _optimisticMessages.clear();
-      _messageSignature = '';
       _lastAcknowledgedIncomingId = null;
-      _reloadMessages(force: true);
+      final bridge = widget.bridge;
+      if (bridge is CachedMessagingBridge) {
+        final cached = bridge.cachedMessages(widget.conversation.id);
+        _messages = cached ?? const [];
+        _messageSignature = cached == null ? '' : _signatureForMessages(cached);
+        _isLoadingMessages = cached == null;
+        unawaited(_reloadMessagesAsync(force: true));
+      } else {
+        _messages = const [];
+        _messageSignature = '';
+        _reloadMessages(force: true);
+      }
     } else if (oldWidget.conversation.lastActivity !=
             widget.conversation.lastActivity ||
         oldWidget.conversation.unreadCount != widget.conversation.unreadCount ||
         oldWidget.conversation.lastMessage != widget.conversation.lastMessage) {
-      _reloadMessages(force: true);
+      final bridge = widget.bridge;
+      if (bridge is CachedMessagingBridge) {
+        unawaited(_reloadMessagesAsync(force: true));
+      } else {
+        _reloadMessages(force: true);
+      }
     }
   }
 
@@ -1077,7 +1197,7 @@ class _ChatPaneState extends State<_ChatPane> {
       final revision = await (bridge as InboxRefreshingBridge).refreshInbox();
       if (!mounted || revision == _lastInboxRevision) return;
       _lastInboxRevision = revision;
-      _reloadMessages(force: true);
+      await _reloadMessagesAsync(force: true);
       widget.onChanged();
     } on Object catch (error) {
       AppLog.instance.recordError(
@@ -1105,11 +1225,51 @@ class _ChatPaneState extends State<_ChatPane> {
     } on Object {
       return;
     }
+    _applyMessages(messages, force: force);
+  }
+
+  Future<void> _reloadMessagesAsync({bool force = false}) async {
+    final bridge = widget.bridge;
+    if (bridge is! CachedMessagingBridge) {
+      _reloadMessages(force: force);
+      return;
+    }
+    final conversationId = widget.conversation.id;
+    final generation = ++_messageLoadGeneration;
+    final cached = bridge.cachedMessages(conversationId);
+    if (cached != null) {
+      _applyMessages(cached, force: force);
+    } else if (_messages.isEmpty && mounted && !_isLoadingMessages) {
+      setState(() => _isLoadingMessages = true);
+    }
+    try {
+      final messages = await bridge.refreshMessages(conversationId);
+      if (!mounted ||
+          generation != _messageLoadGeneration ||
+          widget.conversation.id != conversationId) {
+        return;
+      }
+      _applyMessages(messages, force: force);
+    } on Object catch (error) {
+      AppLog.instance.recordError(
+        category: 'messenger',
+        action: 'message_load_failed',
+        error: error,
+      );
+      if (mounted && generation == _messageLoadGeneration) {
+        setState(() => _isLoadingMessages = false);
+      }
+    }
+  }
+
+  void _applyMessages(List<ChatMessage> messages, {required bool force}) {
+    if (!mounted) return;
     final signature = _signatureForMessages(messages);
     if (!force && signature == _messageSignature) return;
     setState(() {
       _messages = messages;
       _messageSignature = signature;
+      _isLoadingMessages = false;
     });
     String? latestIncomingId;
     for (final message in messages.reversed) {
@@ -1201,9 +1361,16 @@ class _ChatPaneState extends State<_ChatPane> {
     if (!mounted) {
       return;
     }
-    setState(() => _optimisticMessages.remove(optimistic));
     if (widget.conversation.id == conversationId) {
-      _reloadMessages(force: true);
+      final bridge = widget.bridge;
+      if (bridge is CachedMessagingBridge) {
+        await _reloadMessagesAsync(force: true);
+      } else {
+        _reloadMessages(force: true);
+      }
+    }
+    if (mounted) {
+      setState(() => _optimisticMessages.remove(optimistic));
     }
     widget.onChanged();
     AppLog.instance.record(
@@ -1252,7 +1419,12 @@ class _ChatPaneState extends State<_ChatPane> {
         bytes: bytes,
       );
       if (!mounted) return;
-      _reloadMessages(force: true);
+      final bridge = widget.bridge;
+      if (bridge is CachedMessagingBridge) {
+        await _reloadMessagesAsync(force: true);
+      } else {
+        _reloadMessages(force: true);
+      }
       widget.onChanged();
     } on Object catch (error) {
       final code = error is SecureMessagingException
@@ -1295,20 +1467,23 @@ class _ChatPaneState extends State<_ChatPane> {
               onChanged: widget.onChanged,
             ),
           Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.fromLTRB(22, 20, 22, 12),
-              itemCount: visibleMessages.length + 1,
-              itemBuilder: (context, index) {
-                if (index == 0) {
-                  return const _DaySeparator();
-                }
-                final message = visibleMessages[index - 1];
-                return _MessageBubble(
-                  message: message,
-                  showReceipt: widget.privacySettings.value.showReadReceipts,
-                );
-              },
-            ),
+            child: _isLoadingMessages && _messages.isEmpty
+                ? const Center(child: CircularProgressIndicator())
+                : ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(22, 20, 22, 12),
+                    itemCount: visibleMessages.length + 1,
+                    itemBuilder: (context, index) {
+                      if (index == 0) {
+                        return const _DaySeparator();
+                      }
+                      final message = visibleMessages[index - 1];
+                      return _MessageBubble(
+                        message: message,
+                        showReceipt:
+                            widget.privacySettings.value.showReadReceipts,
+                      );
+                    },
+                  ),
           ),
           _Composer(
             controller: _composerController,

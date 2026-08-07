@@ -38,6 +38,19 @@ abstract interface class InboxRefreshingBridge {
   Future<int> refreshInbox();
 }
 
+/// Optional fast-path used by the UI to render local data immediately while
+/// disk/network refreshes continue on the native worker isolate.
+abstract interface class CachedMessagingBridge
+    implements SecureMessagingBridge {
+  List<Conversation>? get cachedConversations;
+
+  List<ChatMessage>? cachedMessages(String conversationId);
+
+  Future<List<Conversation>> refreshConversations();
+
+  Future<List<ChatMessage>> refreshMessages(String conversationId);
+}
+
 class UnavailableMessagingBridge implements SecureMessagingBridge {
   const UnavailableMessagingBridge();
 

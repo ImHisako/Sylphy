@@ -7,16 +7,33 @@ import 'secure_messaging_bridge.dart';
 /// Fail-closed adapter for messaging records owned by the Rust core.
 ///
 class SylphyMessagingBridge
-    implements SecureMessagingBridge, InboxRefreshingBridge {
+    implements
+        SecureMessagingBridge,
+        InboxRefreshingBridge,
+        CachedMessagingBridge {
   SylphyMessagingBridge({required NativeCoreApi core}) : _core = core;
 
   final NativeCoreApi _core;
   final Map<String, ChatMessage> _messageCache = {};
+  final Map<String, List<ChatMessage>> _messageListCache = {};
+  final Map<String, Future<List<ChatMessage>>> _messageRefreshes = {};
+  List<Conversation>? _conversationCache;
+  Future<List<Conversation>>? _conversationRefresh;
   Future<int>? _inboxRefresh;
   int _inboxRevision = 0;
 
   @override
   int get inboxRevision => _inboxRevision;
+
+  @override
+  List<Conversation>? get cachedConversations => _conversationCache;
+
+  @override
+  List<ChatMessage>? cachedMessages(String conversationId) {
+    final cached = _messageListCache.remove(conversationId);
+    if (cached != null) _messageListCache[conversationId] = cached;
+    return cached;
+  }
 
   Future<void> _waitUntilCoreIsAvailable() {
     // Mutations are queued by NativeCoreClient's persistent priority worker.
@@ -45,18 +62,67 @@ class SylphyMessagingBridge
 
   @override
   List<Conversation> listConversations() {
-    final response = _core.listConversations();
+    return _conversationCache ?? _parseConversations(_core.listConversations());
+  }
+
+  @override
+  Future<List<Conversation>> refreshConversations() {
+    return _conversationRefresh ??= _performConversationRefresh().whenComplete(
+      () => _conversationRefresh = null,
+    );
+  }
+
+  Future<List<Conversation>> _performConversationRefresh() async {
+    final core = _core;
+    final response = core is NativeCoreClient
+        ? await core.listConversationsInBackground()
+        : core.listConversations();
+    return _parseConversations(response);
+  }
+
+  List<Conversation> _parseConversations(NativeCoreResponse response) {
     _requireSuccess(response);
     final records = response.data['conversations'];
     if (records is! List) {
       throw const SecureMessagingException('invalid_native_response');
     }
-    return List.unmodifiable(records.map(_parseConversation));
+    final conversations = List<Conversation>.unmodifiable(
+      records.map(_parseConversation),
+    );
+    _conversationCache = conversations;
+    return conversations;
   }
 
   @override
   List<ChatMessage> listMessages(String conversationId) {
-    final response = _core.listMessages(conversationId);
+    return cachedMessages(conversationId) ??
+        _parseMessages(conversationId, _core.listMessages(conversationId));
+  }
+
+  @override
+  Future<List<ChatMessage>> refreshMessages(String conversationId) {
+    return _messageRefreshes[conversationId] ??=
+        _performMessageRefresh(conversationId).whenComplete(() {
+          // Do not return the removed Future from this callback: whenComplete
+          // would wait on that same Future and create a self-referential deadlock.
+          _messageRefreshes.remove(conversationId);
+        });
+  }
+
+  Future<List<ChatMessage>> _performMessageRefresh(
+    String conversationId,
+  ) async {
+    final core = _core;
+    final response = core is NativeCoreClient
+        ? await core.listMessagesInBackground(conversationId)
+        : core.listMessages(conversationId);
+    return _parseMessages(conversationId, response);
+  }
+
+  List<ChatMessage> _parseMessages(
+    String conversationId,
+    NativeCoreResponse response,
+  ) {
     _requireSuccess(response);
     final records = response.data['messages'];
     if (records is! List) {
@@ -85,7 +151,13 @@ class SylphyMessagingBridge
         _messageCache.remove(key);
       }
     }
-    return List.unmodifiable(messages);
+    final immutable = List<ChatMessage>.unmodifiable(messages);
+    _messageListCache.remove(conversationId);
+    _messageListCache[conversationId] = immutable;
+    while (_messageListCache.length > 24) {
+      _messageListCache.remove(_messageListCache.keys.first);
+    }
+    return immutable;
   }
 
   @override
@@ -105,6 +177,7 @@ class SylphyMessagingBridge
             invitationCode: invitationCode,
           );
     _requireSuccess(response);
+    _conversationCache = null;
     return _requiredString(response.data, 'contact_id');
   }
 
@@ -117,6 +190,7 @@ class SylphyMessagingBridge
           ? await core.markConversationReadInBackground(conversationId)
           : core.markConversationRead(conversationId),
     );
+    _conversationCache = null;
   }
 
   @override
@@ -128,6 +202,9 @@ class SylphyMessagingBridge
           ? await core.deleteConversationInBackground(conversationId)
           : core.deleteConversation(conversationId),
     );
+    _conversationCache = null;
+    _messageListCache.remove(conversationId);
+    _messageCache.removeWhere((key, _) => key.startsWith('$conversationId:'));
   }
 
   @override
@@ -148,6 +225,7 @@ class SylphyMessagingBridge
               verified: verified,
             ),
     );
+    _conversationCache = null;
   }
 
   @override
@@ -165,6 +243,8 @@ class SylphyMessagingBridge
             )
           : core.sendText(conversationId: conversationId, plaintext: plaintext),
     );
+    _conversationCache = null;
+    _messageListCache.remove(conversationId);
   }
 
   @override
@@ -189,6 +269,8 @@ class SylphyMessagingBridge
               bytesBase64: encoded,
             ),
     );
+    _conversationCache = null;
+    _messageListCache.remove(conversationId);
   }
 }
 

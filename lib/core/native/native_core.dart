@@ -156,6 +156,9 @@ class NativeCoreClient implements NativeCoreApi {
     return call(const {'command': 'list_conversations'});
   }
 
+  Future<NativeCoreResponse> listConversationsInBackground() =>
+      _callInBackground(const {'command': 'list_conversations'});
+
   @override
   NativeCoreResponse listMessages(String conversationId) {
     return call({
@@ -163,6 +166,12 @@ class NativeCoreClient implements NativeCoreApi {
       'conversation_id': conversationId,
     });
   }
+
+  Future<NativeCoreResponse> listMessagesInBackground(String conversationId) =>
+      _callInBackground({
+        'command': 'list_messages',
+        'conversation_id': conversationId,
+      });
 
   Future<NativeCoreResponse> syncInboundInBackground() =>
       _callInBackground(const {'command': 'sync_inbound'});

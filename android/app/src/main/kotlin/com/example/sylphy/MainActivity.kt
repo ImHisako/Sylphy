@@ -18,7 +18,6 @@ import io.flutter.plugin.common.MethodChannel
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import io.flutter.embedding.engine.FlutterEngineCache
 
 internal fun veilidBinaryClassName(name: String): String = name.replace('/', '.')
 
@@ -45,11 +44,6 @@ class MainActivity : FlutterActivity() {
     private var pendingSaveResult: MethodChannel.Result? = null
     private var pendingSaveBytes: ByteArray? = null
 
-    override fun provideFlutterEngine(context: Context): FlutterEngine? =
-        FlutterEngineCache.getInstance().get(ENGINE_ID)
-
-    override fun shouldDestroyEngineWithHost(): Boolean = false
-
     override fun onCreate(savedInstanceState: Bundle?) {
         ensureVeilidInitialized()
         // Veilid needs Android's Context/JVM before Flutter can invoke FFI.
@@ -59,7 +53,6 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        FlutterEngineCache.getInstance().put(ENGINE_ID, flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, PLATFORM_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -246,7 +239,6 @@ class MainActivity : FlutterActivity() {
         const val MESSAGE_CHANNEL_ID = "sylphy_messages"
         const val NOTIFICATION_PERMISSION_REQUEST = 4102
         const val SAVE_FILE_REQUEST = 4103
-        const val ENGINE_ID = "sylphy_messaging_engine"
         val REQUIRED_PROTECTED_STORE_CLASSES = listOf(
             "androidx.security.crypto.MasterKey",
             "androidx.security.crypto.MasterKey\$Builder",

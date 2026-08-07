@@ -17,7 +17,10 @@ import 'features/onboarding/profile_onboarding.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await AppLog.instance.initialize();
+  // Diagnostics must never delay Flutter's first frame. In particular, a
+  // stalled platform storage call previously left Android on its launch
+  // window with no way to recover until the process was force-stopped.
+  unawaited(AppLog.instance.initialize());
   FlutterError.onError = (details) {
     AppLog.instance.recordError(
       category: 'flutter',

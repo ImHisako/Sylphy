@@ -48,6 +48,27 @@ void main() {
     expect(core.sentAttachmentName, 'documento.txt');
     expect(base64Decode(core.sentAttachmentBase64!), utf8.encode('contenuto'));
   });
+
+  test('reuses bounded UI caches and refreshes them explicitly', () async {
+    final core = _FakeNativeCore();
+    final bridge = SylphyMessagingBridge(core: core);
+
+    bridge.listConversations();
+    bridge.listConversations();
+    bridge.listMessages('contact-1');
+    bridge.listMessages('contact-1');
+
+    expect(core.listConversationCalls, 1);
+    expect(core.listMessageCalls, 1);
+
+    await bridge.refreshConversations();
+    await bridge.refreshMessages('contact-1');
+
+    expect(core.listConversationCalls, 2);
+    expect(core.listMessageCalls, 2);
+    expect(bridge.cachedConversations, isNotNull);
+    expect(bridge.cachedMessages('contact-1'), isNotNull);
+  });
 }
 
 class _FakeNativeCore implements NativeCoreApi {
@@ -69,6 +90,8 @@ class _FakeNativeCore implements NativeCoreApi {
   String? sentPlaintext;
   String? sentAttachmentName;
   String? sentAttachmentBase64;
+  int listConversationCalls = 0;
+  int listMessageCalls = 0;
 
   @override
   NativeCoreResponse ensureIdentity({
@@ -117,22 +140,28 @@ class _FakeNativeCore implements NativeCoreApi {
   }) => const NativeCoreResponse(ok: true, code: 'ok', data: {});
 
   @override
-  NativeCoreResponse listConversations() => const NativeCoreResponse(
-    ok: true,
-    code: 'ok',
-    data: {
-      'state': 'vault_locked',
-      'can_send': false,
-      'conversations': <Object>[],
-    },
-  );
+  NativeCoreResponse listConversations() {
+    listConversationCalls += 1;
+    return const NativeCoreResponse(
+      ok: true,
+      code: 'ok',
+      data: {
+        'state': 'vault_locked',
+        'can_send': false,
+        'conversations': <Object>[],
+      },
+    );
+  }
 
   @override
-  NativeCoreResponse listMessages(String conversationId) => NativeCoreResponse(
-    ok: true,
-    code: 'ok',
-    data: {'conversation_id': conversationId, 'messages': const <Object>[]},
-  );
+  NativeCoreResponse listMessages(String conversationId) {
+    listMessageCalls += 1;
+    return NativeCoreResponse(
+      ok: true,
+      code: 'ok',
+      data: {'conversation_id': conversationId, 'messages': const <Object>[]},
+    );
+  }
 
   @override
   NativeCoreResponse startVeilid(String storageDirectory) =>

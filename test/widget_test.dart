@@ -211,6 +211,26 @@ void main() {
     expect(find.text('Messaggio arrivato ora'), findsOneWidget);
   });
 
+  testWidgets('opens a mobile chat without waiting for the read receipt', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final markReadGate = Completer<void>();
+    final bridge = _TestMessagingBridge(markReadGate: markReadGate);
+    await tester.pumpWidget(
+      SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Contatto di test'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('message-composer')), findsOneWidget);
+    markReadGate.complete();
+    await tester.pump();
+  });
+
   testWidgets('lets the user verify a contact without blocking messages', (
     tester,
   ) async {
@@ -379,6 +399,7 @@ class _TestMessagingBridge
   _TestMessagingBridge({
     bool initiallyVerified = true,
     this.sendGate,
+    this.markReadGate,
     this.hiddenUntilFirstRefresh = false,
   }) : _conversation = Conversation(
          id: 'test-contact',
@@ -397,6 +418,7 @@ class _TestMessagingBridge
   bool deleted = false;
   final List<ChatMessage> _messages = [];
   final Completer<void>? sendGate;
+  final Completer<void>? markReadGate;
   final bool hiddenUntilFirstRefresh;
   int refreshCount = 0;
   int _inboxRevision = 0;
@@ -468,7 +490,9 @@ class _TestMessagingBridge
   List<ChatMessage> listMessages(String conversationId) => _messages;
 
   @override
-  Future<void> markConversationRead(String conversationId) async {}
+  Future<void> markConversationRead(String conversationId) async {
+    await markReadGate?.future;
+  }
 
   @override
   Future<void> deleteConversation(String conversationId) async {
