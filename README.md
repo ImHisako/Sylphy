@@ -154,6 +154,8 @@ attivo usa attualmente gli envelope ibridi one-shot descritti sopra. Il README
 non attribuisce quindi al prodotto forward secrecy post-compromise non ancora
 integrata nel flusso reale.
 
+To-Do >>
+
 ## Struttura del repository
 
 ```text
