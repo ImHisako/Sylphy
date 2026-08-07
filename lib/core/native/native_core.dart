@@ -9,7 +9,7 @@ import 'package:ffi/ffi.dart';
 
 import '../diagnostics/app_log.dart';
 
-const _expectedAbiVersion = 7;
+const _expectedAbiVersion = 8;
 
 typedef _NativeAbiVersion = Uint32 Function();
 typedef _DartAbiVersion = int Function();
@@ -312,6 +312,30 @@ class NativeCoreClient implements NativeCoreApi {
     'vault_password': vaultPassword,
     if (displayName != null) 'display_name': displayName,
     if (avatarBase64 != null) 'avatar_base64': avatarBase64,
+  });
+
+  Future<NativeCoreResponse> exportAccountInBackground({
+    required String transferPassword,
+    required String displayName,
+    String? avatarBase64,
+  }) => _callInBackground({
+    'command': 'export_account',
+    'transfer_password': transferPassword,
+    'display_name': displayName,
+    if (avatarBase64 != null) 'avatar_base64': avatarBase64,
+  });
+
+  Future<NativeCoreResponse> importAccountInBackground({
+    required String transferPassword,
+    required String backupBase64,
+    required String storageDirectory,
+    required String vaultPassword,
+  }) => _callInBackground({
+    'command': 'import_account',
+    'transfer_password': transferPassword,
+    'backup_base64': backupBase64,
+    'storage_directory': storageDirectory,
+    'vault_password': vaultPassword,
   });
 
   Future<NativeCoreResponse> _callInBackground(Map<String, Object> request) {

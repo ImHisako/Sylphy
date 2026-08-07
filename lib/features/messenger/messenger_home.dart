@@ -27,6 +27,9 @@ class MessengerHome extends StatefulWidget {
     required this.identityService,
     required this.privacySettings,
     required this.onEditProfile,
+    required this.servicesReady,
+    required this.servicesGeneration,
+    required this.onAccountImported,
     this.nativeCore,
   });
 
@@ -37,12 +40,16 @@ class MessengerHome extends StatefulWidget {
   final IdentityService identityService;
   final PrivacySettingsController privacySettings;
   final VoidCallback onEditProfile;
+  final bool servicesReady;
+  final int servicesGeneration;
+  final ValueChanged<UserProfile> onAccountImported;
 
   @override
   State<MessengerHome> createState() => _MessengerHomeState();
 }
 
-class _MessengerHomeState extends State<MessengerHome> {
+class _MessengerHomeState extends State<MessengerHome>
+    with WidgetsBindingObserver {
   String? _activeConversationId;
   Timer? _inboxTimer;
   List<Conversation> _conversations = const [];
@@ -55,6 +62,8 @@ class _MessengerHomeState extends State<MessengerHome> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    widget.identityService.addListener(_onIdentityChanged);
     _conversations = _readConversations();
     _conversationSignature = _signatureForConversations(_conversations);
     _unreadCounts = {
@@ -72,6 +81,35 @@ class _MessengerHomeState extends State<MessengerHome> {
       const Duration(seconds: 3),
       (_) => _refreshInbox(),
     );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_refreshInbox(force: true));
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant MessengerHome oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.identityService != widget.identityService) {
+      oldWidget.identityService.removeListener(_onIdentityChanged);
+      widget.identityService.addListener(_onIdentityChanged);
+    }
+    if ((!oldWidget.servicesReady && widget.servicesReady) ||
+        oldWidget.servicesGeneration != widget.servicesGeneration) {
+      unawaited(_refreshInbox(force: true));
+    }
+  }
+
+  void _onIdentityChanged() {
+    if (widget.identityService.snapshot.phase == IdentityPhase.ready) {
+      unawaited(_refreshInbox(force: true));
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_refreshInbox(force: true));
+    }
   }
 
   List<Conversation> _readConversations() {
@@ -140,6 +178,8 @@ class _MessengerHomeState extends State<MessengerHome> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    widget.identityService.removeListener(_onIdentityChanged);
     _inboxTimer?.cancel();
     super.dispose();
   }
@@ -219,7 +259,7 @@ class _MessengerHomeState extends State<MessengerHome> {
       }
       final message = switch (error.code) {
         'native_core_unavailable' =>
-          'Il core nativo non è disponibile: ricompila l’app con ABI 7.',
+          'Il core nativo non è disponibile: ricompila l’app con ABI 8.',
         'feature_unavailable' =>
           'Lo storage nativo non è ancora pronto. Attendi l’avvio del nodo e riprova.',
         'verification_failed' =>
@@ -262,6 +302,8 @@ class _MessengerHomeState extends State<MessengerHome> {
           nativeCore: widget.nativeCore,
           veilidService: widget.veilidService,
           privacySettings: widget.privacySettings,
+          profile: widget.profile,
+          onAccountImported: widget.onAccountImported,
         ),
       ),
     );

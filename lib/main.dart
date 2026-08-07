@@ -84,6 +84,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   bool _profileLoaded = false;
   bool _isEditingProfile = false;
   bool _nativeServicesReady = false;
+  int _nativeServicesGeneration = 0;
   Timer? _identityRepublishTimer;
 
   @override
@@ -133,6 +134,9 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       }
     } finally {
       _nativeServicesReady = true;
+      if (mounted) {
+        setState(() => _nativeServicesGeneration++);
+      }
     }
   }
 
@@ -256,6 +260,19 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
 
   void _cancelProfileEdit() => setState(() => _isEditingProfile = false);
 
+  void _accountImported(UserProfile profile) {
+    setState(() {
+      _profile = profile;
+      _isEditingProfile = false;
+      _nativeServicesGeneration++;
+    });
+    _runGuarded(
+      _resumeNativeServices(),
+      category: 'account',
+      action: 'import_resume_failed',
+    );
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -279,6 +296,23 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       result: state.name,
       verbose: true,
     );
+    if (state == AppLifecycleState.resumed) {
+      _runGuarded(
+        _resumeNativeServices(),
+        category: 'lifecycle',
+        action: 'resume_failed',
+      );
+    }
+  }
+
+  Future<void> _resumeNativeServices() async {
+    await _veilidService.start();
+    if (_profile != null) {
+      await _publishProfile();
+    }
+    if (mounted) {
+      setState(() => _nativeServicesGeneration++);
+    }
   }
 
   @override
@@ -374,6 +408,9 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
                 identityService: _identityService,
                 privacySettings: _privacySettings,
                 onEditProfile: _editProfile,
+                servicesReady: _nativeServicesReady,
+                servicesGeneration: _nativeServicesGeneration,
+                onAccountImported: _accountImported,
               ),
             ),
     );

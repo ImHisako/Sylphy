@@ -365,6 +365,84 @@ mod signal {
         Ok(())
     }
 
+    pub fn export_account_backup() -> CoreResult<serde_json::Value> {
+        let runtime = store().lock().map_err(|_| CoreError::Internal)?;
+        let root = runtime.root.as_ref().ok_or(CoreError::FeatureUnavailable)?;
+        let global_path = root.join(STORE_FILE);
+        let global = if global_path.exists() {
+            STANDARD_NO_PAD.encode(fs::read(global_path).map_err(|_| CoreError::Internal)?)
+        } else {
+            String::new()
+        };
+        let session_root = root.join(SESSION_DIRECTORY);
+        let mut sessions = serde_json::Map::new();
+        for entry in fs::read_dir(&session_root).map_err(|_| CoreError::Internal)? {
+            let entry = entry.map_err(|_| CoreError::Internal)?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if name.len() != 70
+                || !name.ends_with(".vault")
+                || !name[..64].chars().all(|value| value.is_ascii_hexdigit())
+            {
+                continue;
+            }
+            sessions.insert(
+                name.to_owned(),
+                serde_json::Value::String(
+                    STANDARD_NO_PAD.encode(fs::read(path).map_err(|_| CoreError::Internal)?),
+                ),
+            );
+        }
+        Ok(serde_json::json!({
+            "version": 1,
+            "global": global,
+            "sessions": sessions,
+        }))
+    }
+
+    pub fn import_account_backup(value: serde_json::Value) -> CoreResult<()> {
+        let version = value.get("version").and_then(serde_json::Value::as_u64);
+        let global = value.get("global").and_then(serde_json::Value::as_str);
+        let sessions = value.get("sessions").and_then(serde_json::Value::as_object);
+        if version != Some(1) || global.is_none() || sessions.is_none() {
+            return Err(CoreError::VerificationFailed);
+        }
+        let mut runtime = store().lock().map_err(|_| CoreError::Internal)?;
+        let root = runtime.root.clone().ok_or(CoreError::FeatureUnavailable)?;
+        let session_root = root.join(SESSION_DIRECTORY);
+        fs::create_dir_all(&session_root).map_err(|_| CoreError::Internal)?;
+        let global_bytes = STANDARD_NO_PAD
+            .decode(global.unwrap_or_default())
+            .map_err(|_| CoreError::VerificationFailed)?;
+        if !global_bytes.is_empty() {
+            atomic_file::replace(&root.join(STORE_FILE), &global_bytes)?;
+        }
+        let sessions = sessions.ok_or(CoreError::VerificationFailed)?;
+        if sessions.len() > MAX_SESSIONS {
+            return Err(CoreError::LimitExceeded);
+        }
+        for (name, encoded) in sessions {
+            if name.len() != 70
+                || !name.ends_with(".vault")
+                || !name[..64].chars().all(|value| value.is_ascii_hexdigit())
+            {
+                return Err(CoreError::VerificationFailed);
+            }
+            let bytes = STANDARD_NO_PAD
+                .decode(encoded.as_str().ok_or(CoreError::VerificationFailed)?)
+                .map_err(|_| CoreError::VerificationFailed)?;
+            atomic_file::replace(&session_root.join(name), &bytes)?;
+        }
+        runtime.loaded = false;
+        runtime.global = None;
+        runtime.sessions = PersistentSessionStore::default();
+        runtime.loaded_sessions.clear();
+        runtime.session_file_count = sessions.len();
+        Ok(())
+    }
+
     pub fn public_pre_key_bundle() -> CoreResult<SignalPreKeyBundle> {
         let mut runtime = store().lock().map_err(|_| CoreError::Internal)?;
         ensure_loaded(&mut runtime)?;
@@ -788,6 +866,26 @@ pub fn configure_storage(storage_directory: &str) -> CoreResult<()> {
 
 #[cfg(not(feature = "signal-ratchet"))]
 pub fn configure_storage(_storage_directory: &str) -> CoreResult<()> {
+    Ok(())
+}
+
+#[cfg(feature = "signal-ratchet")]
+pub(crate) fn export_account_backup() -> CoreResult<serde_json::Value> {
+    signal::export_account_backup()
+}
+
+#[cfg(not(feature = "signal-ratchet"))]
+pub(crate) fn export_account_backup() -> CoreResult<serde_json::Value> {
+    Ok(serde_json::json!({"version": 1, "global": "", "sessions": {}}))
+}
+
+#[cfg(feature = "signal-ratchet")]
+pub(crate) fn import_account_backup(value: serde_json::Value) -> CoreResult<()> {
+    signal::import_account_backup(value)
+}
+
+#[cfg(not(feature = "signal-ratchet"))]
+pub(crate) fn import_account_backup(_value: serde_json::Value) -> CoreResult<()> {
     Ok(())
 }
 

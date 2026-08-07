@@ -36,6 +36,7 @@ const MAX_MESSAGES: usize = 100_000;
 const MAX_ATTACHMENT_BYTES: usize = 700 * 1024;
 const MAX_ATTACHMENT_NAME_CHARS: usize = 128;
 const ATTACHMENT_PREFIX: &str = "sylphy-attachment-v1:";
+const DEVICE_SYNC_PREFIX: &[u8] = b"SYLPHY-DEVICE-SYNC-V1\0";
 const CONTACT_STORE_FILE: &str = "contacts-v1.json";
 const MESSAGE_STORE_FILE: &str = "messages-v1.vault";
 const MESSAGE_LOG_FILE: &str = "messages-v2.log";
@@ -74,11 +75,30 @@ struct StoredMessage {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+struct MessagingAccountBackup {
+    version: u8,
+    contacts: Vec<StoredContact>,
+    messages: Vec<StoredMessage>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 enum MessageEvent {
     Upsert { message: StoredMessage },
     MarkRead { conversation_id: String },
     DeleteConversation { conversation_id: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+enum DeviceSyncEvent {
+    UpsertContact {
+        contact: StoredContact,
+    },
+    UpsertMessage {
+        contact: StoredContact,
+        message: StoredMessage,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -127,6 +147,53 @@ pub fn configure_storage(storage_directory: &str) -> CoreResult<()> {
     store.messages_loaded = false;
     store.message_event_count = 0;
     store.revision = 0;
+    Ok(())
+}
+
+pub(crate) fn export_account_backup() -> CoreResult<Value> {
+    let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    ensure_messages_loaded(&mut store)?;
+    serde_json::to_value(MessagingAccountBackup {
+        version: 1,
+        contacts: store.contacts.clone(),
+        messages: store.messages.clone(),
+    })
+    .map_err(|_| CoreError::Internal)
+}
+
+pub(crate) fn import_account_backup(value: Value) -> CoreResult<()> {
+    let backup: MessagingAccountBackup =
+        serde_json::from_value(value).map_err(|_| CoreError::VerificationFailed)?;
+    if backup.version != 1
+        || backup.contacts.len() > MAX_CONTACTS
+        || backup.messages.len() > MAX_MESSAGES
+    {
+        return Err(CoreError::LimitExceeded);
+    }
+    for contact in &backup.contacts {
+        validate_conversation_id(&contact.id)?;
+        validate_display_name(&contact.display_name)?;
+        contact.bundle.validate()?;
+        if let Some(identity) = &contact.published_identity {
+            identity.validate()?;
+        }
+    }
+    for message in &backup.messages {
+        validate_conversation_id(&message.conversation_id)?;
+    }
+    let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    let contact_path = store.path.clone().ok_or(CoreError::FeatureUnavailable)?;
+    let message_path = store
+        .message_path
+        .clone()
+        .ok_or(CoreError::FeatureUnavailable)?;
+    persist_contacts(&contact_path, &backup.contacts)?;
+    write_message_snapshot(&message_path, &backup.messages)?;
+    store.contacts = backup.contacts;
+    store.messages = backup.messages;
+    store.messages_loaded = true;
+    store.message_event_count = store.messages.len();
+    store.revision = store.revision.wrapping_add(1);
     Ok(())
 }
 
@@ -258,6 +325,11 @@ pub fn add_contact(_legacy_display_name: &str, invitation_code: &str) -> CoreRes
     )?;
     store.contacts = updated;
     store.revision = store.revision.wrapping_add(1);
+    let sync_contact = store.contacts.iter().find(|item| item.id == id).cloned();
+    drop(store);
+    if let Some(contact) = sync_contact {
+        let _ = broadcast_device_sync(&DeviceSyncEvent::UpsertContact { contact });
+    }
     Ok(json!({"contact_id": id, "fingerprint": fingerprint, "safety": "pending"}))
 }
 
@@ -305,9 +377,18 @@ pub fn send_text(conversation_id: &str, plaintext: &str) -> CoreResult<Value> {
         },
     )?;
     store.message_event_count += 1;
-    store.messages.push(message);
+    store.messages.push(message.clone());
     store.revision = store.revision.wrapping_add(1);
     let _ = compact_message_log_if_needed(&mut store);
+    let sync_contact = store
+        .contacts
+        .iter()
+        .find(|item| item.id == conversation_id)
+        .cloned();
+    drop(store);
+    if let Some(contact) = sync_contact {
+        let _ = broadcast_device_sync(&DeviceSyncEvent::UpsertMessage { contact, message });
+    }
     Ok(json!({"message_id": message_id, "delivery_state": "sent"}))
 }
 
@@ -388,9 +469,29 @@ pub fn send_attachment(
         },
     )?;
     store.message_event_count += 1;
-    store.messages.push(message);
+    store.messages.push(message.clone());
     store.revision = store.revision.wrapping_add(1);
     let _ = compact_message_log_if_needed(&mut store);
+    let sync_contact = store
+        .contacts
+        .iter()
+        .find(|item| item.id == conversation_id)
+        .cloned();
+    drop(store);
+    if let Some(contact) = sync_contact {
+        let mut sync_message = message;
+        if sync_message
+            .attachment_base64
+            .as_ref()
+            .is_some_and(|value| value.len() > 20 * 1024)
+        {
+            sync_message.attachment_base64 = None;
+        }
+        let _ = broadcast_device_sync(&DeviceSyncEvent::UpsertMessage {
+            contact,
+            message: sync_message,
+        });
+    }
     Ok(json!({"message_id": message_id, "delivery_state": "sent"}))
 }
 
@@ -497,10 +598,15 @@ pub fn sync_inbound_messages() -> CoreResult<Value> {
     let mut persisted = 0_usize;
     let mut discarded = 0_usize;
     for payload in payloads {
+        let is_device_sync = payload.payload.starts_with(DEVICE_SYNC_PREFIX);
         match persist_inbound_payload(&payload.payload) {
             Ok(()) => {
                 persisted += 1;
-                let _ = veilid_adapter::acknowledge_inbound_payload(payload);
+                // Device-sync events form a small rolling journal. Keeping them
+                // in the mailbox lets another linked device fetch them later.
+                if !is_device_sync {
+                    let _ = veilid_adapter::acknowledge_inbound_payload(payload);
+                }
             }
             Err(error) if should_discard_inbound(&error) => {
                 // A permanently invalid packet must not poison one of the
@@ -530,6 +636,9 @@ fn should_discard_inbound(error: &CoreError) -> bool {
 }
 
 fn persist_inbound_payload(payload: &[u8]) -> CoreResult<()> {
+    if let Some(encrypted) = payload.strip_prefix(DEVICE_SYNC_PREFIX) {
+        return apply_device_sync(encrypted);
+    }
     let opened = secure_packet::open(payload)?;
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     let contact_path = store.path.clone().ok_or(CoreError::FeatureUnavailable)?;
@@ -571,7 +680,7 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<()> {
     let message = StoredMessage {
         id: opened.message_id,
         conversation_id: id.clone(),
-        author_id: id,
+        author_id: id.clone(),
         body,
         sent_at_ms: opened.sent_at_ms,
         is_outgoing: false,
@@ -587,10 +696,107 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<()> {
         },
     )?;
     store.message_event_count += 1;
-    store.messages.push(message);
+    store.messages.push(message.clone());
     store.revision = store.revision.wrapping_add(1);
     let _ = compact_message_log_if_needed(&mut store);
+    let sync_contact = store.contacts.iter().find(|item| item.id == id).cloned();
+    drop(store);
+    if let Some(contact) = sync_contact {
+        let mut sync_message = message;
+        if sync_message
+            .attachment_base64
+            .as_ref()
+            .is_some_and(|value| value.len() > 20 * 1024)
+        {
+            sync_message.attachment_base64 = None;
+        }
+        let _ = broadcast_device_sync(&DeviceSyncEvent::UpsertMessage {
+            contact,
+            message: sync_message,
+        });
+    }
     Ok(())
+}
+
+fn broadcast_device_sync(event: &DeviceSyncEvent) -> CoreResult<()> {
+    let Some(mailbox) = crate::peer_identity::current_public_mailbox() else {
+        return Ok(());
+    };
+    let encoded = serde_json::to_vec(event).map_err(|_| CoreError::Internal)?;
+    let encrypted = vault::seal_with_key(&identity::active_identity()?.storage_key()?, &encoded)?;
+    let mut payload = Vec::with_capacity(DEVICE_SYNC_PREFIX.len() + encrypted.len());
+    payload.extend_from_slice(DEVICE_SYNC_PREFIX);
+    payload.extend_from_slice(&encrypted);
+    veilid_adapter::store_mailbox_payload(&mailbox, &payload)
+}
+
+fn apply_device_sync(encrypted: &[u8]) -> CoreResult<()> {
+    let plaintext = vault::open_with_key(&identity::active_identity()?.storage_key()?, encrypted)?;
+    let event: DeviceSyncEvent =
+        serde_json::from_slice(&plaintext).map_err(|_| CoreError::VerificationFailed)?;
+    let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    let contact_path = store.path.clone().ok_or(CoreError::FeatureUnavailable)?;
+    let message_path = store
+        .message_path
+        .clone()
+        .ok_or(CoreError::FeatureUnavailable)?;
+    ensure_messages_loaded(&mut store)?;
+    let mut changed = false;
+    match event {
+        DeviceSyncEvent::UpsertContact { contact } => {
+            validate_conversation_id(&contact.id)?;
+            contact.bundle.validate()?;
+            if let Some(existing) = store.contacts.iter_mut().find(|item| item.id == contact.id) {
+                if !same_contact(existing, &contact) {
+                    *existing = contact;
+                    changed = true;
+                }
+            } else if store.contacts.len() < MAX_CONTACTS {
+                store.contacts.push(contact);
+                changed = true;
+            }
+        }
+        DeviceSyncEvent::UpsertMessage { contact, message } => {
+            validate_conversation_id(&contact.id)?;
+            validate_conversation_id(&message.conversation_id)?;
+            contact.bundle.validate()?;
+            if let Some(existing) = store.contacts.iter_mut().find(|item| item.id == contact.id) {
+                if !same_contact(existing, &contact) {
+                    *existing = contact;
+                    changed = true;
+                }
+            } else if store.contacts.len() < MAX_CONTACTS {
+                store.contacts.push(contact);
+                changed = true;
+            }
+            if !store.messages.iter().any(|item| item.id == message.id)
+                && store.messages.len() < MAX_MESSAGES
+            {
+                append_message_event(
+                    &message_path,
+                    &MessageEvent::Upsert {
+                        message: message.clone(),
+                    },
+                )?;
+                store.messages.push(message);
+                store.message_event_count += 1;
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        persist_contacts(&contact_path, &store.contacts)?;
+        store.revision = store.revision.wrapping_add(1);
+        let _ = compact_message_log_if_needed(&mut store);
+    }
+    Ok(())
+}
+
+fn same_contact(first: &StoredContact, second: &StoredContact) -> bool {
+    match (serde_json::to_vec(first), serde_json::to_vec(second)) {
+        (Ok(first), Ok(second)) => first == second,
+        _ => false,
+    }
 }
 
 fn decode_invitation(code: &str) -> CoreResult<(PublicBundle, Option<PublishedIdentity>)> {

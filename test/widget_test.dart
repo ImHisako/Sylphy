@@ -87,6 +87,23 @@ void main() {
     expect(find.text('Messaggio di prova'), findsAtLeastNWidgets(1));
   });
 
+  testWidgets('reloads persisted conversations after native startup', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final bridge = _TestMessagingBridge(hiddenUntilFirstRefresh: true);
+
+    await tester.pumpWidget(
+      SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+    );
+    await tester.pumpAndSettle();
+
+    expect(bridge.refreshCount, greaterThan(0));
+    expect(find.text('Contatto di test'), findsAtLeastNWidgets(1));
+    expect(find.byKey(const ValueKey('message-composer')), findsOneWidget);
+  });
+
   testWidgets('sends with Enter on desktop', (tester) async {
     await tester.binding.setSurfaceSize(const Size(1280, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -359,31 +376,39 @@ class _MemoryProfileStore implements UserProfileStore {
 
 class _TestMessagingBridge
     implements SecureMessagingBridge, InboxRefreshingBridge {
-  _TestMessagingBridge({bool initiallyVerified = true, this.sendGate})
-    : _conversation = Conversation(
-        id: 'test-contact',
-        name: 'Contatto di test',
-        initials: 'CT',
-        accentValue: 0xFFA5E5D3,
-        lastMessage: '',
-        lastActivity: DateTime(2026),
-        safety: initiallyVerified
-            ? ContactSafety.verified
-            : ContactSafety.pending,
-        fingerprint: 'TEST',
-      );
+  _TestMessagingBridge({
+    bool initiallyVerified = true,
+    this.sendGate,
+    this.hiddenUntilFirstRefresh = false,
+  }) : _conversation = Conversation(
+         id: 'test-contact',
+         name: 'Contatto di test',
+         initials: 'CT',
+         accentValue: 0xFFA5E5D3,
+         lastMessage: '',
+         lastActivity: DateTime(2026),
+         safety: initiallyVerified
+             ? ContactSafety.verified
+             : ContactSafety.pending,
+         fingerprint: 'TEST',
+       );
 
   Conversation _conversation;
   bool deleted = false;
   final List<ChatMessage> _messages = [];
   final Completer<void>? sendGate;
+  final bool hiddenUntilFirstRefresh;
+  int refreshCount = 0;
   int _inboxRevision = 0;
 
   @override
   int get inboxRevision => _inboxRevision;
 
   @override
-  Future<int> refreshInbox() async => _inboxRevision;
+  Future<int> refreshInbox() async {
+    refreshCount += 1;
+    return _inboxRevision;
+  }
 
   Conversation get conversation => _conversation;
 
@@ -434,7 +459,10 @@ class _TestMessagingBridge
   }) async => 'test-contact';
 
   @override
-  List<Conversation> listConversations() => deleted ? [] : [_conversation];
+  List<Conversation> listConversations() =>
+      deleted || (hiddenUntilFirstRefresh && refreshCount == 0)
+      ? []
+      : [_conversation];
 
   @override
   List<ChatMessage> listMessages(String conversationId) => _messages;

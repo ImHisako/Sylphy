@@ -4,13 +4,13 @@ import 'package:flutter/services.dart';
 import '../../core/identity/identity_service.dart';
 import '../../core/profile/user_profile.dart';
 
-Future<void> showProfileSheet({
+Future<bool> showProfileSheet({
   required BuildContext context,
   required UserProfile profile,
   required IdentityService identityService,
   required VoidCallback onEditProfile,
 }) {
-  return showModalBottomSheet<void>(
+  return showModalBottomSheet<bool>(
     context: context,
     isScrollControlled: true,
     backgroundColor: const Color(0xFF1A1E25),
@@ -21,12 +21,17 @@ Future<void> showProfileSheet({
         profile: profile,
         identityService: identityService,
         onEditProfile: () {
-          Navigator.of(sheetContext).pop();
-          onEditProfile();
+          Navigator.of(sheetContext).pop(true);
         },
       ),
     ),
-  );
+  ).then((shouldEdit) {
+    if (shouldEdit == true) {
+      onEditProfile();
+      return true;
+    }
+    return false;
+  });
 }
 
 class _ProfileSheetContent extends StatelessWidget {
@@ -182,7 +187,7 @@ class _IdentityContent extends StatelessWidget {
           const SizedBox(height: 6),
           Text(
             snapshot.phase == IdentityPhase.unavailable
-                ? 'Il core nativo ABI 7 non è incluso in questa build.'
+                ? 'Il core nativo ABI 8 non è incluso in questa build.'
                 : 'Non è stato possibile aprire il vault dell’identità (${snapshot.errorCode ?? 'errore sconosciuto'}).',
             style: const TextStyle(color: Color(0xFFAEB7C3), height: 1.4),
           ),

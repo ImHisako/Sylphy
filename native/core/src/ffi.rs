@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    CORE_ABI_VERSION, PROTOCOL_VERSION, bundle::PublicBundle, error::CoreError, hybrid, identity,
-    messaging_adapter, ratchet_adapter, vault, veilid_adapter,
+    CORE_ABI_VERSION, PROTOCOL_VERSION, account_backup, bundle::PublicBundle, error::CoreError,
+    hybrid, identity, messaging_adapter, ratchet_adapter, vault, veilid_adapter,
 };
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +66,18 @@ enum CoreRequest {
     },
     HybridSelfTest,
     RatchetSelfTest,
+    ExportAccount {
+        transfer_password: String,
+        display_name: String,
+        #[serde(default)]
+        avatar_base64: Option<String>,
+    },
+    ImportAccount {
+        transfer_password: String,
+        backup_base64: String,
+        storage_directory: String,
+        vault_password: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -279,6 +291,30 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
                 }),
             })
         }
+        CoreRequest::ExportAccount {
+            transfer_password,
+            display_name,
+            avatar_base64,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: account_backup::export(&transfer_password, &display_name, avatar_base64)?,
+        }),
+        CoreRequest::ImportAccount {
+            transfer_password,
+            backup_base64,
+            storage_directory,
+            vault_password,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: account_backup::import(
+                &transfer_password,
+                &backup_base64,
+                &storage_directory,
+                &vault_password,
+            )?,
+        }),
     }
 }
 

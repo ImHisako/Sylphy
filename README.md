@@ -34,6 +34,10 @@ server centrale che custodisca account, contatti e conversazioni.
   l'interfaccia dell'app è chiusa;
 - allegati cifrati, pulsante di download e anteprima delle immagini direttamente
   nella conversazione;
+- collegamento cifrato tra computer e telefono tramite file account protetto da
+  password, con identità, contatti, cronologia e sessioni Double Ratchet;
+- sincronizzazione multi-dispositivo dei nuovi contatti e messaggi attraverso
+  un journal cifrato conservato nella mailbox Veilid condivisa;
 - UI Flutter adattiva per telefono e desktop;
 - core Rust fail-closed: in assenza dell'ABI nativa l'app non simula contatti,
   messaggi o stato di rete.
@@ -100,7 +104,7 @@ flowchart TB
         UI --> DS --> BG
     end
 
-    BG -->|"JSON FFI · ABI 7"| FFI["Boundary C/Rust"]
+    BG -->|"JSON FFI · ABI 8"| FFI["Boundary C/Rust"]
 
     subgraph Core["Core nativo Rust"]
         FFI --> ID["Identità e vault"]

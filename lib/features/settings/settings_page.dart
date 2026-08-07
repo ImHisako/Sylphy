@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../core/diagnostics/app_log.dart';
+import '../../core/identity/account_transfer_service.dart';
 import '../../core/native/native_core.dart';
+import '../../core/profile/user_profile.dart';
 import '../../core/privacy/privacy_settings.dart';
 import '../../core/veilid/veilid_service.dart';
 
@@ -11,12 +13,16 @@ class SettingsPage extends StatefulWidget {
     super.key,
     required this.veilidService,
     required this.privacySettings,
+    required this.profile,
+    required this.onAccountImported,
     this.nativeCore,
   });
 
   final VeilidService veilidService;
   final NativeCoreApi? nativeCore;
   final PrivacySettingsController privacySettings;
+  final UserProfile profile;
+  final ValueChanged<UserProfile> onAccountImported;
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -25,6 +31,153 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage> {
   String? _diagnosticResult;
   bool _diagnosticRunning = false;
+  bool _accountTransferRunning = false;
+  String? _accountTransferResult;
+
+  Future<String?> _requestTransferPassword({required bool confirm}) async {
+    final first = TextEditingController();
+    final second = TextEditingController();
+    String? error;
+    final result = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(confirm ? 'Proteggi il trasferimento' : 'Apri account'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                confirm
+                    ? 'Scegli una password di almeno 10 caratteri. Servirà sull’altro dispositivo e non viene salvata.'
+                    : 'Inserisci la password scelta quando hai creato il file account.',
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: first,
+                obscureText: true,
+                autofocus: true,
+                decoration: const InputDecoration(labelText: 'Password'),
+              ),
+              if (confirm) ...[
+                const SizedBox(height: 10),
+                TextField(
+                  controller: second,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Ripeti password',
+                  ),
+                ),
+              ],
+              if (error != null) ...[
+                const SizedBox(height: 10),
+                Text(error!, style: const TextStyle(color: Color(0xFFFF9D95))),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Annulla'),
+            ),
+            FilledButton(
+              onPressed: () {
+                if (first.text.characters.length < 10) {
+                  setDialogState(() => error = 'Usa almeno 10 caratteri.');
+                  return;
+                }
+                if (confirm && first.text != second.text) {
+                  setDialogState(() => error = 'Le password non coincidono.');
+                  return;
+                }
+                Navigator.of(dialogContext).pop(first.text);
+              },
+              child: Text(confirm ? 'Crea file' : 'Scegli file'),
+            ),
+          ],
+        ),
+      ),
+    );
+    first.dispose();
+    second.dispose();
+    return result;
+  }
+
+  Future<void> _exportAccount() async {
+    final core = widget.nativeCore;
+    if (core is! NativeCoreClient || _accountTransferRunning) return;
+    final password = await _requestTransferPassword(confirm: true);
+    if (password == null || !mounted) return;
+    setState(() {
+      _accountTransferRunning = true;
+      _accountTransferResult = null;
+    });
+    try {
+      final path = await AccountTransferService(
+        nativeCore: core,
+      ).exportToFile(profile: widget.profile, transferPassword: password);
+      if (mounted) {
+        setState(() {
+          _accountTransferResult = path == null
+              ? 'Esportazione annullata.'
+              : 'File account cifrato creato. Trasferiscilo sull’altro dispositivo.';
+        });
+      }
+    } on Object catch (error) {
+      AppLog.instance.recordError(
+        category: 'account',
+        action: 'export_failed',
+        error: error,
+      );
+      if (mounted) {
+        setState(() => _accountTransferResult = 'Esportazione non riuscita.');
+      }
+    } finally {
+      if (mounted) setState(() => _accountTransferRunning = false);
+    }
+  }
+
+  Future<void> _importAccount() async {
+    final core = widget.nativeCore;
+    if (core is! NativeCoreClient || _accountTransferRunning) return;
+    final password = await _requestTransferPassword(confirm: false);
+    if (password == null || !mounted) return;
+    setState(() {
+      _accountTransferRunning = true;
+      _accountTransferResult = null;
+    });
+    try {
+      await widget.veilidService.stop();
+      final profile = await AccountTransferService(
+        nativeCore: core,
+      ).importFromFile(transferPassword: password);
+      if (profile != null) {
+        widget.onAccountImported(profile);
+        await widget.veilidService.start();
+      }
+      if (mounted) {
+        setState(() {
+          _accountTransferResult = profile == null
+              ? 'Importazione annullata.'
+              : 'Account collegato: profilo, chat e messaggi sono stati ripristinati.';
+        });
+      }
+    } on Object catch (error) {
+      AppLog.instance.recordError(
+        category: 'account',
+        action: 'import_failed',
+        error: error,
+      );
+      await widget.veilidService.start();
+      if (mounted) {
+        setState(
+          () => _accountTransferResult =
+              'Importazione non riuscita. Controlla file e password.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _accountTransferRunning = false);
+    }
+  }
 
   Future<void> _runDiagnostics() async {
     if (_diagnosticRunning) {
@@ -117,6 +270,60 @@ class _SettingsPageState extends State<SettingsPage> {
                     onPressed: widget.veilidService.retry,
                     icon: const Icon(Icons.refresh_rounded),
                   ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              const _SectionTitle('ACCOUNT E DISPOSITIVI'),
+              const SizedBox(height: 8),
+              _SettingsCard(
+                child: Column(
+                  children: [
+                    ListTile(
+                      key: const ValueKey('export-account'),
+                      leading: const Icon(Icons.laptop_chromebook_rounded),
+                      title: const Text('Collega un altro dispositivo'),
+                      subtitle: const Text(
+                        'Crea un file cifrato con identità, contatti, chat, messaggi e sessioni sicure.',
+                      ),
+                      trailing: _accountTransferRunning
+                          ? const SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.chevron_right_rounded),
+                      onTap:
+                          widget.nativeCore is NativeCoreClient &&
+                              !_accountTransferRunning
+                          ? _exportAccount
+                          : null,
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      key: const ValueKey('import-account'),
+                      leading: const Icon(Icons.phonelink_ring_rounded),
+                      title: const Text('Usa un account esistente'),
+                      subtitle: const Text(
+                        'Importa il file creato sull’altro telefono o computer.',
+                      ),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap:
+                          widget.nativeCore is NativeCoreClient &&
+                              !_accountTransferRunning
+                          ? _importAccount
+                          : null,
+                    ),
+                    if (_accountTransferResult != null) ...[
+                      const Divider(height: 1),
+                      Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(_accountTransferResult!),
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
               ),
               const SizedBox(height: 16),

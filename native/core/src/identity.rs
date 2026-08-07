@@ -147,6 +147,28 @@ pub(crate) fn active_identity() -> CoreResult<IdentityRecord> {
         .ok_or(CoreError::FeatureUnavailable)
 }
 
+pub(crate) fn export_account_record() -> CoreResult<serde_json::Value> {
+    serde_json::to_value(active_identity()?).map_err(|_| CoreError::Internal)
+}
+
+pub(crate) fn import_account_record(
+    storage_directory: &str,
+    vault_password: &str,
+    value: serde_json::Value,
+) -> CoreResult<()> {
+    validate_inputs(storage_directory, vault_password)?;
+    let record: IdentityRecord =
+        serde_json::from_value(value).map_err(|_| CoreError::VerificationFailed)?;
+    record.validate()?;
+    let directory = PathBuf::from(storage_directory).join("identity");
+    fs::create_dir_all(&directory).map_err(|_| CoreError::Internal)?;
+    persist_record(&directory.join(IDENTITY_FILE_NAME), vault_password, &record)?;
+    *active_identity_store()
+        .lock()
+        .map_err(|_| CoreError::Internal)? = Some(record);
+    ratchet_adapter::configure_storage(storage_directory)
+}
+
 impl IdentityRecord {
     pub(crate) fn signing_key(&self) -> CoreResult<SigningKey> {
         let bytes: [u8; ED25519_LENGTH] = self

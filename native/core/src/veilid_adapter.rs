@@ -401,7 +401,11 @@ pub fn store_mailbox_payload(address: &MailboxAddress, payload: &[u8]) -> CoreRe
             break;
         }
     }
-    let selected = selected.ok_or(CoreError::LimitExceeded)?;
+    // A linked account keeps device-sync records as a rolling journal instead
+    // of acknowledging them immediately. Once all 31 slots are occupied, a
+    // new payload replaces its deterministic slot so recent activity remains
+    // available to a device that reconnects later.
+    let selected = selected.unwrap_or(start + 1);
     let _ = state
         .runtime
         .block_on(routing.set_dht_value(
