@@ -11,7 +11,7 @@ Il core implementa e testa:
 - envelope XChaCha20-Poly1305 con metadata legati come AAD;
 - lifecycle Veilid opzionale, compilabile con `--features veilid`, con startup, stato aggregato, private route, callback `AppMessage` limitato e shutdown deterministico.
 
-La feature `signal-ratchet` usa l'implementazione ufficiale `signalapp/libsignal` fissata al commit del tag `v0.99.3`. `SignalRatchetAccount` mantiene identity, prekey, signed prekey, Kyber prekey e session store entro il boundary nativo; `RatchetWireMessage` accetta solo ciphertext Signal/PreKey opaco e impone il limite di 32 KiB del trasporto. La persistenza cifrata di questi store è ancora un requisito prima di collegare il composer UI al trasporto reale.
+La feature `signal-ratchet` usa l'implementazione ufficiale `signalapp/libsignal` fissata al commit del tag `v0.99.3`. Il percorso di produzione mantiene identity, signed prekey, Kyber prekey e session store persistenti entro il boundary nativo; in rete accetta soltanto ciphertext Signal/PreKey opaco entro il limite di 32 KiB. Account e singole sessioni sono cifrati con la chiave device-bound e sostituiti atomicamente.
 
 ## Build locale
 
@@ -29,4 +29,4 @@ Per Windows eseguire `./native/build-windows.ps1`. Il file `sylphy_core.dll` vie
 
 Per Linux eseguire `./native/build-linux.sh release`. Il file `libsylphy_core.so` viene prodotto in `native/core/target/release` e installato in `bundle/lib` dal runner CMake.
 
-L'ABI v4 espone i comandi `ensure_identity`, `start_veilid`, `veilid_status`, `stop_veilid`, `list_conversations`, `list_messages`, `add_contact` e `ratchet_self_test`. `ensure_identity` conserva chiavi e seed in un record nativo cifrato e restituisce soltanto ID e invito pubblico. `add_contact` decodifica e valida nel core quel bundle firmato, rifiuta inviti scaduti o duplicati e registra il contatto come pending senza creare una sessione. Gli errori distinguono feature assente, bootstrap Android, protected/local store, configurazione, startup e attach senza restituire messaggi interni potenzialmente sensibili. Plaintext non validato, chiavi, NodeId, route private e configurazione sensibile restano nel core.
+L'ABI v7 espone i comandi `ensure_identity`, `start_veilid`, `veilid_status`, `stop_veilid`, `list_conversations`, `list_messages`, `sync_inbound`, `add_contact` e `ratchet_self_test`. `ensure_identity` conserva chiavi e seed in un record nativo cifrato e restituisce soltanto ID e invito pubblico. `add_contact` decodifica e valida nel core quel bundle firmato, rifiuta inviti scaduti o duplicati e registra il contatto come pending. Gli errori distinguono feature assente, bootstrap Android, protected/local store, configurazione, startup e attach senza restituire messaggi interni potenzialmente sensibili. Plaintext non validato, chiavi, NodeId, route private e configurazione sensibile restano nel core.

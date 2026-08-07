@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:file_selector/file_selector.dart';
+import 'package:emojis/emoji.dart';
 
 import '../../core/diagnostics/app_log.dart';
 import '../../core/messaging/models.dart';
@@ -48,6 +49,8 @@ class _MessengerHomeState extends State<MessengerHome> {
   String _conversationSignature = '';
   Map<String, int> _unreadCounts = const {};
   bool _isRefreshingInbox = false;
+  bool _forceRefreshAfterCurrent = false;
+  int _lastInboxRevision = 0;
 
   @override
   void initState() {
@@ -61,6 +64,10 @@ class _MessengerHomeState extends State<MessengerHome> {
     _activeConversationId = _conversations.isEmpty
         ? null
         : _conversations.first.id;
+    final bridge = widget.bridge;
+    if (bridge is InboxRefreshingBridge) {
+      _lastInboxRevision = (bridge as InboxRefreshingBridge).inboxRevision;
+    }
     _inboxTimer = Timer.periodic(
       const Duration(seconds: 3),
       (_) => _refreshInbox(),
@@ -76,12 +83,19 @@ class _MessengerHomeState extends State<MessengerHome> {
   }
 
   Future<void> _refreshInbox({bool force = false}) async {
-    if (!mounted || _isRefreshingInbox) return;
+    if (!mounted) return;
+    if (_isRefreshingInbox) {
+      _forceRefreshAfterCurrent |= force;
+      return;
+    }
     _isRefreshingInbox = true;
+    var revisionChanged = false;
     try {
       final bridge = widget.bridge;
       if (bridge is InboxRefreshingBridge) {
-        await (bridge as InboxRefreshingBridge).refreshInbox();
+        final revision = await (bridge as InboxRefreshingBridge).refreshInbox();
+        revisionChanged = revision != _lastInboxRevision;
+        _lastInboxRevision = revision;
       }
     } on Object catch (error) {
       AppLog.instance.recordError(
@@ -91,8 +105,13 @@ class _MessengerHomeState extends State<MessengerHome> {
       );
     } finally {
       _isRefreshingInbox = false;
+      if (_forceRefreshAfterCurrent) {
+        _forceRefreshAfterCurrent = false;
+        scheduleMicrotask(() => _refreshInbox(force: true));
+      }
     }
     if (!mounted) return;
+    if (!force && !revisionChanged) return;
     final conversations = _readConversations();
     final signature = _signatureForConversations(conversations);
     if (!force && signature == _conversationSignature) return;
@@ -146,6 +165,7 @@ class _MessengerHomeState extends State<MessengerHome> {
       return;
     }
     setState(() => _activeConversationId = conversationId);
+    unawaited(_refreshInbox(force: true));
   }
 
   Future<void> _addContact() async {
@@ -163,12 +183,16 @@ class _MessengerHomeState extends State<MessengerHome> {
     }
     try {
       final contactId = await widget.bridge.addContact(
-        displayName: draft.displayName,
+        // The signed public profile is authoritative. The empty legacy field
+        // keeps the Dart/native ABI compatible with older cores.
+        displayName: '',
         invitationCode: draft.invitationCode,
       );
       if (!mounted) {
         return;
       }
+      await _refreshInbox(force: true);
+      if (!mounted) return;
       setState(() => _activeConversationId = contactId);
       AppLog.instance.record(
         category: 'contacts',
@@ -178,7 +202,7 @@ class _MessengerHomeState extends State<MessengerHome> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            '${draft.displayName} è stato aggiunto. Puoi scrivere subito; la verifica del fingerprint è facoltativa.',
+            'Persona aggiunta con il nome del suo profilo Sylphy. Puoi scrivere subito; la verifica del fingerprint è facoltativa.',
           ),
         ),
       );
@@ -195,7 +219,7 @@ class _MessengerHomeState extends State<MessengerHome> {
       }
       final message = switch (error.code) {
         'native_core_unavailable' =>
-          'Il core nativo non è disponibile: ricompila l’app con ABI 6.',
+          'Il core nativo non è disponibile: ricompila l’app con ABI 7.',
         'feature_unavailable' =>
           'Lo storage nativo non è ancora pronto. Attendi l’avvio del nodo e riprova.',
         'verification_failed' =>
@@ -962,18 +986,26 @@ class _ChatPaneState extends State<_ChatPane> {
   Timer? _messageTimer;
   List<ChatMessage> _messages = const [];
   String _messageSignature = '';
-  bool _isSending = false;
   bool _isSendingAttachment = false;
+  final List<ChatMessage> _optimisticMessages = [];
   String? _lastAcknowledgedIncomingId;
+  int _lastInboxRevision = 0;
+  bool _isRefreshingMessages = false;
 
   @override
   void initState() {
     super.initState();
     _reloadMessages(force: true);
-    _messageTimer = Timer.periodic(
-      const Duration(milliseconds: 700),
-      (_) => _reloadMessages(),
-    );
+    final bridge = widget.bridge;
+    if (bridge is InboxRefreshingBridge) {
+      _lastInboxRevision = (bridge as InboxRefreshingBridge).inboxRevision;
+      if (!widget.showHeader) {
+        _messageTimer = Timer.periodic(
+          const Duration(seconds: 3),
+          (_) => _refreshMessagesFromNetwork(),
+        );
+      }
+    }
   }
 
   @override
@@ -982,9 +1014,37 @@ class _ChatPaneState extends State<_ChatPane> {
     if (oldWidget.conversation.id != widget.conversation.id) {
       _composerController.clear();
       _messages = const [];
+      _optimisticMessages.clear();
       _messageSignature = '';
       _lastAcknowledgedIncomingId = null;
       _reloadMessages(force: true);
+    } else if (oldWidget.conversation.lastActivity !=
+            widget.conversation.lastActivity ||
+        oldWidget.conversation.unreadCount != widget.conversation.unreadCount ||
+        oldWidget.conversation.lastMessage != widget.conversation.lastMessage) {
+      _reloadMessages(force: true);
+    }
+  }
+
+  Future<void> _refreshMessagesFromNetwork() async {
+    if (!mounted || _isRefreshingMessages) return;
+    final bridge = widget.bridge;
+    if (bridge is! InboxRefreshingBridge) return;
+    _isRefreshingMessages = true;
+    try {
+      final revision = await (bridge as InboxRefreshingBridge).refreshInbox();
+      if (!mounted || revision == _lastInboxRevision) return;
+      _lastInboxRevision = revision;
+      _reloadMessages(force: true);
+      widget.onChanged();
+    } on Object catch (error) {
+      AppLog.instance.recordError(
+        category: 'messenger',
+        action: 'message_refresh_failed',
+        error: error,
+      );
+    } finally {
+      _isRefreshingMessages = false;
     }
   }
 
@@ -1037,11 +1097,20 @@ class _ChatPaneState extends State<_ChatPane> {
 
   Future<void> _sendMessage() async {
     final text = _composerController.text.trim();
-    if (text.isEmpty || _isSending) {
+    if (text.isEmpty) {
       return;
     }
+    final conversationId = widget.conversation.id;
     _composerController.clear();
-    setState(() => _isSending = true);
+    final optimistic = ChatMessage(
+      id: 'pending-${DateTime.now().microsecondsSinceEpoch}',
+      authorId: 'me',
+      body: text,
+      sentAt: DateTime.now(),
+      isOutgoing: true,
+      deliveryState: DeliveryState.sent,
+    );
+    setState(() => _optimisticMessages.add(optimistic));
     AppLog.instance.record(
       category: 'messenger',
       action: 'send_requested',
@@ -1049,7 +1118,7 @@ class _ChatPaneState extends State<_ChatPane> {
     );
     try {
       await widget.bridge.sendText(
-        conversationId: widget.conversation.id,
+        conversationId: conversationId,
         plaintext: text,
       );
     } on Object catch (error) {
@@ -1064,10 +1133,13 @@ class _ChatPaneState extends State<_ChatPane> {
         force: true,
       );
       if (mounted) {
-        _composerController.text = text;
-        _composerController.selection = TextSelection.collapsed(
-          offset: _composerController.text.length,
-        );
+        setState(() => _optimisticMessages.remove(optimistic));
+        if (widget.conversation.id == conversationId) {
+          _composerController.text = text;
+          _composerController.selection = TextSelection.collapsed(
+            offset: _composerController.text.length,
+          );
+        }
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(switch (code) {
@@ -1082,14 +1154,15 @@ class _ChatPaneState extends State<_ChatPane> {
           ),
         );
       }
-      if (mounted) setState(() => _isSending = false);
       return;
     }
     if (!mounted) {
       return;
     }
-    setState(() => _isSending = false);
-    _reloadMessages(force: true);
+    setState(() => _optimisticMessages.remove(optimistic));
+    if (widget.conversation.id == conversationId) {
+      _reloadMessages(force: true);
+    }
     widget.onChanged();
     AppLog.instance.record(
       category: 'messenger',
@@ -1099,10 +1172,22 @@ class _ChatPaneState extends State<_ChatPane> {
   }
 
   Future<void> _pickAndSendAttachment() async {
-    if (_isSending || _isSendingAttachment) return;
+    if (_isSendingAttachment) return;
+    final conversationId = widget.conversation.id;
     final file = await openFile();
     if (file == null || !mounted) return;
     final size = await file.length();
+    if (!mounted) return;
+    if (widget.conversation.id != conversationId) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'La conversazione è cambiata: seleziona nuovamente l’allegato.',
+          ),
+        ),
+      );
+      return;
+    }
     if (size <= 0 || size > 700 * 1024) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1117,10 +1202,12 @@ class _ChatPaneState extends State<_ChatPane> {
     }
     setState(() => _isSendingAttachment = true);
     try {
+      final bytes = await file.readAsBytes();
+      if (!mounted) return;
       await widget.bridge.sendAttachment(
-        conversationId: widget.conversation.id,
+        conversationId: conversationId,
         fileName: file.name,
-        bytes: await file.readAsBytes(),
+        bytes: bytes,
       );
       if (!mounted) return;
       _reloadMessages(force: true);
@@ -1147,6 +1234,8 @@ class _ChatPaneState extends State<_ChatPane> {
 
   @override
   Widget build(BuildContext context) {
+    final visibleMessages = [..._messages, ..._optimisticMessages]
+      ..sort((left, right) => left.sentAt.compareTo(right.sentAt));
     return DecoratedBox(
       decoration: const BoxDecoration(
         gradient: LinearGradient(
@@ -1166,12 +1255,12 @@ class _ChatPaneState extends State<_ChatPane> {
           Expanded(
             child: ListView.builder(
               padding: const EdgeInsets.fromLTRB(22, 20, 22, 12),
-              itemCount: _messages.length + 1,
+              itemCount: visibleMessages.length + 1,
               itemBuilder: (context, index) {
                 if (index == 0) {
                   return const _DaySeparator();
                 }
-                final message = _messages[index - 1];
+                final message = visibleMessages[index - 1];
                 return _MessageBubble(
                   message: message,
                   showReceipt: widget.privacySettings.value.showReadReceipts,
@@ -1182,7 +1271,6 @@ class _ChatPaneState extends State<_ChatPane> {
           _Composer(
             controller: _composerController,
             onSend: _sendMessage,
-            isSending: _isSending,
             isSendingAttachment: _isSendingAttachment,
             onAttachmentPressed: _pickAndSendAttachment,
           ),
@@ -1289,25 +1377,273 @@ class _ChatHeader extends StatelessWidget {
   }
 }
 
-class _Composer extends StatelessWidget {
+enum _EmojiCategory {
+  recent('Recenti', Icons.access_time_rounded),
+  smileys(
+    'Faccine ed emozioni',
+    Icons.emoji_emotions_outlined,
+    EmojiGroup.smileysEmotion,
+  ),
+  people('Persone', Icons.people_alt_outlined, EmojiGroup.peopleBody),
+  animals('Animali e natura', Icons.pets_outlined, EmojiGroup.animalsNature),
+  food('Cibo e bevande', Icons.restaurant_outlined, EmojiGroup.foodDrink),
+  travel(
+    'Viaggi e luoghi',
+    Icons.directions_car_outlined,
+    EmojiGroup.travelPlaces,
+  ),
+  activities('Attività', Icons.sports_soccer_outlined, EmojiGroup.activities),
+  objects('Oggetti', Icons.lightbulb_outline_rounded, EmojiGroup.objects),
+  symbols('Simboli', Icons.tag_rounded, EmojiGroup.symbols),
+  flags('Bandiere', Icons.flag_outlined, EmojiGroup.flags);
+
+  const _EmojiCategory(this.label, this.icon, [this.group]);
+
+  final String label;
+  final IconData icon;
+  final EmojiGroup? group;
+}
+
+class _EmojiCategoryPicker extends StatefulWidget {
+  const _EmojiCategoryPicker({
+    required this.recentEmoji,
+    required this.onSelected,
+  });
+
+  final List<Emoji> recentEmoji;
+  final ValueChanged<Emoji> onSelected;
+
+  @override
+  State<_EmojiCategoryPicker> createState() => _EmojiCategoryPickerState();
+}
+
+class _EmojiCategoryPickerState extends State<_EmojiCategoryPicker> {
+  static final Map<EmojiGroup, List<Emoji>> _emojiByGroup = {};
+
+  late _EmojiCategory _selected = widget.recentEmoji.isEmpty
+      ? _EmojiCategory.smileys
+      : _EmojiCategory.recent;
+
+  List<Emoji> get _visibleEmoji {
+    final group = _selected.group;
+    return group == null
+        ? widget.recentEmoji
+        : _emojiByGroup.putIfAbsent(
+            group,
+            () => Emoji.byGroup(group).toList(growable: false),
+          );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final emoji = _visibleEmoji;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SizedBox(
+          height: 48,
+          child: ListView(
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            scrollDirection: Axis.horizontal,
+            children: [
+              for (final category in _EmojiCategory.values)
+                Container(
+                  decoration: BoxDecoration(
+                    border: Border(
+                      bottom: BorderSide(
+                        color: category == _selected
+                            ? colorScheme.primary
+                            : Colors.transparent,
+                        width: 3,
+                      ),
+                    ),
+                  ),
+                  child: Tooltip(
+                    message: category.label,
+                    child: IconButton(
+                      key: ValueKey('emoji-category-${category.name}'),
+                      isSelected: category == _selected,
+                      color: colorScheme.onSurfaceVariant,
+                      selectedIcon: Icon(
+                        category.icon,
+                        color: colorScheme.primary,
+                      ),
+                      icon: Icon(category.icon),
+                      onPressed: () => setState(() => _selected = category),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 2),
+          child: Text(
+            _selected.label,
+            key: const ValueKey('emoji-category-title'),
+            style: Theme.of(context).textTheme.labelLarge,
+          ),
+        ),
+        Expanded(
+          child: emoji.isEmpty
+              ? const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Text(
+                      'Le emoji usate di recente appariranno qui.',
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                )
+              : GridView.builder(
+                  padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
+                  gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                    maxCrossAxisExtent: 54,
+                  ),
+                  itemCount: emoji.length,
+                  itemBuilder: (context, index) {
+                    final item = emoji[index];
+                    return Tooltip(
+                      message: item.name,
+                      child: TextButton(
+                        key: ValueKey('emoji-${item.char}'),
+                        onPressed: () => widget.onSelected(item),
+                        child: Text(
+                          item.char,
+                          style: const TextStyle(fontSize: 24),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+class _Composer extends StatefulWidget {
   const _Composer({
     required this.controller,
     required this.onSend,
     required this.onAttachmentPressed,
-    required this.isSending,
     required this.isSendingAttachment,
   });
 
   final TextEditingController controller;
   final VoidCallback onSend;
   final VoidCallback onAttachmentPressed;
-  final bool isSending;
   final bool isSendingAttachment;
 
   @override
+  State<_Composer> createState() => _ComposerState();
+}
+
+class _ComposerState extends State<_Composer> {
+  final List<Emoji> _recentEmoji = [];
+
+  static const _kaomoji = <String>[
+    '(＾▽＾)',
+    '(づ｡◕‿‿◕｡)づ',
+    '¯\\_(ツ)_/¯',
+    '(ง •̀_•́)ง',
+    '(｡♥‿♥｡)',
+    '(≧▽≦)',
+    '(￣▽￣)ノ',
+    '(；一_一)',
+    '(╥﹏╥)',
+    '(ノಠ益ಠ)ノ彡┻━┻',
+    '┬─┬ノ( º _ ºノ)',
+    '(☞ﾟヮﾟ)☞',
+    'ฅ^•ﻌ•^ฅ',
+    'ʕ•ᴥ•ʔ',
+    '(•̀ᴗ•́)و ̑̑',
+    '٩(◕‿◕｡)۶',
+    '(っ˘ω˘ς )',
+    'ヽ(・∀・)ﾉ',
+  ];
+
+  void _insert(String value) {
+    final controller = widget.controller;
+    final selection = controller.selection;
+    final start = selection.isValid ? selection.start : controller.text.length;
+    final end = selection.isValid ? selection.end : controller.text.length;
+    controller.value = controller.value.copyWith(
+      text: controller.text.replaceRange(start, end, value),
+      selection: TextSelection.collapsed(offset: start + value.length),
+      composing: TextRange.empty,
+    );
+  }
+
+  void _selectEmoji(BuildContext sheetContext, Emoji emoji) {
+    setState(() {
+      _recentEmoji.removeWhere((item) => item.char == emoji.char);
+      _recentEmoji.insert(0, emoji);
+      if (_recentEmoji.length > 32) {
+        _recentEmoji.removeLast();
+      }
+    });
+    _insert(emoji.char);
+    Navigator.pop(sheetContext);
+  }
+
+  Future<void> _showExpressions() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) => DefaultTabController(
+        length: 2,
+        child: SafeArea(
+          top: false,
+          child: SizedBox(
+            height: 390,
+            child: Column(
+              children: [
+                const TabBar(
+                  tabs: [
+                    Tab(text: 'Emoji'),
+                    Tab(text: 'Kaomoji'),
+                  ],
+                ),
+                Expanded(
+                  child: TabBarView(
+                    children: [
+                      _EmojiCategoryPicker(
+                        recentEmoji: List.unmodifiable(_recentEmoji),
+                        onSelected: (emoji) =>
+                            _selectEmoji(sheetContext, emoji),
+                      ),
+                      ListView.builder(
+                        padding: const EdgeInsets.all(12),
+                        itemCount: _kaomoji.length,
+                        itemBuilder: (context, index) => ListTile(
+                          dense: true,
+                          title: Text(_kaomoji[index]),
+                          onTap: () {
+                            _insert(_kaomoji[index]);
+                            Navigator.pop(sheetContext);
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 600;
     return Container(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 18),
+      padding: compact
+          ? const EdgeInsets.fromLTRB(6, 6, 6, 8)
+          : const EdgeInsets.fromLTRB(16, 12, 16, 18),
       decoration: BoxDecoration(
         color: const Color(0xFF15181E),
         border: Border(top: BorderSide(color: Theme.of(context).dividerColor)),
@@ -1318,8 +1654,11 @@ class _Composer extends StatelessWidget {
           children: [
             IconButton(
               tooltip: 'Allega file',
-              onPressed: isSendingAttachment ? null : onAttachmentPressed,
-              icon: isSendingAttachment
+              visualDensity: compact ? VisualDensity.compact : null,
+              onPressed: widget.isSendingAttachment
+                  ? null
+                  : widget.onAttachmentPressed,
+              icon: widget.isSendingAttachment
                   ? const SizedBox(
                       width: 18,
                       height: 18,
@@ -1328,43 +1667,49 @@ class _Composer extends StatelessWidget {
                   : const Icon(Icons.add_circle_outline_rounded),
               color: const Color(0xFFB5BDC9),
             ),
-            const SizedBox(width: 4),
+            IconButton(
+              key: const ValueKey('open-expression-picker'),
+              tooltip: 'Emoji e kaomoji',
+              visualDensity: compact ? VisualDensity.compact : null,
+              onPressed: _showExpressions,
+              icon: const Icon(Icons.emoji_emotions_outlined),
+              color: const Color(0xFFB5BDC9),
+            ),
+            SizedBox(width: compact ? 1 : 4),
             Expanded(
               child: TextField(
                 key: const ValueKey('message-composer'),
-                controller: controller,
+                controller: widget.controller,
                 minLines: 1,
                 maxLines: 4,
                 textInputAction: _usesDesktopKeyboard
                     ? TextInputAction.send
                     : TextInputAction.newline,
                 textCapitalization: TextCapitalization.sentences,
-                onSubmitted: _usesDesktopKeyboard ? (_) => onSend() : null,
-                decoration: const InputDecoration(
+                onSubmitted: _usesDesktopKeyboard
+                    ? (_) => widget.onSend()
+                    : null,
+                decoration: InputDecoration(
                   hintText: 'Scrivi un messaggio privato…',
+                  isDense: compact,
                   contentPadding: EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 12,
+                    horizontal: compact ? 12 : 16,
+                    vertical: compact ? 9 : 12,
                   ),
                 ),
               ),
             ),
-            const SizedBox(width: 8),
+            SizedBox(width: compact ? 4 : 8),
             IconButton.filled(
               key: const ValueKey('send-message'),
               tooltip: 'Invia messaggio',
-              onPressed: isSending ? null : onSend,
+              visualDensity: compact ? VisualDensity.compact : null,
+              onPressed: widget.onSend,
               style: IconButton.styleFrom(
                 backgroundColor: Theme.of(context).colorScheme.primary,
                 foregroundColor: Theme.of(context).colorScheme.onPrimary,
               ),
-              icon: isSending
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.arrow_upward_rounded),
+              icon: const Icon(Icons.arrow_upward_rounded),
             ),
           ],
         ),
@@ -1973,12 +2318,8 @@ class _ProfileAvatar extends StatelessWidget {
 }
 
 class _ContactDraft {
-  const _ContactDraft({
-    required this.displayName,
-    required this.invitationCode,
-  });
+  const _ContactDraft({required this.invitationCode});
 
-  final String displayName;
   final String invitationCode;
 }
 
@@ -1991,12 +2332,10 @@ class _AddContactDialog extends StatefulWidget {
 
 class _AddContactDialogState extends State<_AddContactDialog> {
   final _formKey = GlobalKey<FormState>();
-  final _nameController = TextEditingController();
   final _invitationController = TextEditingController();
 
   @override
   void dispose() {
-    _nameController.dispose();
     _invitationController.dispose();
     super.dispose();
   }
@@ -2009,12 +2348,7 @@ class _AddContactDialogState extends State<_AddContactDialog> {
     if (invitationCode.toLowerCase().startsWith('sylphy:')) {
       invitationCode = invitationCode.substring('sylphy:'.length).trim();
     }
-    Navigator.of(context).pop(
-      _ContactDraft(
-        displayName: _nameController.text.trim(),
-        invitationCode: invitationCode,
-      ),
-    );
+    Navigator.of(context).pop(_ContactDraft(invitationCode: invitationCode));
   }
 
   @override
@@ -2042,23 +2376,9 @@ class _AddContactDialogState extends State<_AddContactDialog> {
                 ),
                 const SizedBox(height: 20),
                 TextFormField(
-                  key: const ValueKey('contact-name'),
-                  controller: _nameController,
-                  autofocus: true,
-                  maxLength: 64,
-                  textCapitalization: TextCapitalization.words,
-                  decoration: const InputDecoration(
-                    labelText: 'Nome contatto',
-                    prefixIcon: Icon(Icons.person_outline_rounded),
-                  ),
-                  validator: (value) => value == null || value.trim().isEmpty
-                      ? 'Inserisci un nome.'
-                      : null,
-                ),
-                const SizedBox(height: 10),
-                TextFormField(
                   key: const ValueKey('contact-invitation-code'),
                   controller: _invitationController,
+                  autofocus: true,
                   minLines: 3,
                   maxLines: 6,
                   autocorrect: false,

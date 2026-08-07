@@ -32,8 +32,10 @@ abstract class SecureMessagingBridge {
 }
 
 abstract interface class InboxRefreshingBridge {
+  int get inboxRevision;
+
   /// Pulls and persists pending network envelopes without blocking rendering.
-  Future<void> refreshInbox();
+  Future<int> refreshInbox();
 }
 
 class UnavailableMessagingBridge implements SecureMessagingBridge {

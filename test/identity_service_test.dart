@@ -9,6 +9,20 @@ import 'package:sylphy/core/native/native_core.dart';
 import 'package:sylphy/core/profile/user_profile.dart';
 
 void main() {
+  test('recognizes only compact Veilid invitations as short IDs', () {
+    const short = IdentitySnapshot(
+      phase: IdentityPhase.ready,
+      invitationCode: 'sylphy:VLD0:example',
+    );
+    final inline = IdentitySnapshot(
+      phase: IdentityPhase.ready,
+      invitationCode: 'sylphy:${'a' * 512}',
+    );
+
+    expect(short.hasShortInvitation, isTrue);
+    expect(inline.hasShortInvitation, isFalse);
+  });
+
   test(
     'loads the public identity through the native encrypted vault',
     () async {

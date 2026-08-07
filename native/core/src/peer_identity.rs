@@ -53,13 +53,12 @@ impl PublicProfile {
                 return Err(CoreError::InvalidInput);
             }
         }
-        if let Some(avatar) = &self.avatar_base64 {
-            if avatar.is_empty()
+        if let Some(avatar) = &self.avatar_base64
+            && (avatar.is_empty()
                 || avatar.len() > MAX_AVATAR_BASE64_BYTES
-                || STANDARD.decode(avatar).is_err()
-            {
-                return Err(CoreError::InvalidInput);
-            }
+                || STANDARD.decode(avatar).is_err())
+        {
+            return Err(CoreError::InvalidInput);
         }
         Ok(())
     }

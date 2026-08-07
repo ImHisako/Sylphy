@@ -14,6 +14,7 @@ const NONCE_LENGTH: usize = 24;
 const KEY_LENGTH: usize = 32;
 const MIN_CIPHERTEXT_LENGTH: usize = 16;
 const MAX_VAULT_PAYLOAD_LENGTH: usize = 32 * 1024 * 1024;
+const KEY_RECORD_VERSION: u8 = 2;
 
 pub fn seal(password: &str, plaintext: &[u8]) -> CoreResult<Vec<u8>> {
     if password.is_empty() || plaintext.len() > MAX_VAULT_PAYLOAD_LENGTH {
@@ -62,6 +63,41 @@ pub fn open(password: &str, record: &[u8]) -> CoreResult<Zeroizing<Vec<u8>>> {
         .decrypt(
             XNonce::from_slice(&record[nonce_start..ciphertext_start]),
             &record[ciphertext_start..],
+        )
+        .map_err(|_| CoreError::AuthenticationFailed)?;
+    Ok(Zeroizing::new(plaintext))
+}
+
+/// Encrypts data with an already-random device key. The key itself lives in
+/// the Argon2-protected identity vault, so repeating the expensive password
+/// derivation for every message would only add latency and battery usage.
+pub fn seal_with_key(key: &[u8; KEY_LENGTH], plaintext: &[u8]) -> CoreResult<Vec<u8>> {
+    if plaintext.len() > MAX_VAULT_PAYLOAD_LENGTH {
+        return Err(CoreError::LimitExceeded);
+    }
+    let mut nonce = [0_u8; NONCE_LENGTH];
+    OsRng.fill_bytes(&mut nonce);
+    let ciphertext = XChaCha20Poly1305::new(key.into())
+        .encrypt(XNonce::from_slice(&nonce), plaintext)
+        .map_err(|_| CoreError::Internal)?;
+    let mut record = Vec::with_capacity(1 + NONCE_LENGTH + ciphertext.len());
+    record.push(KEY_RECORD_VERSION);
+    record.extend_from_slice(&nonce);
+    record.extend_from_slice(&ciphertext);
+    Ok(record)
+}
+
+pub fn open_with_key(key: &[u8; KEY_LENGTH], record: &[u8]) -> CoreResult<Zeroizing<Vec<u8>>> {
+    if record.len() < 1 + NONCE_LENGTH + MIN_CIPHERTEXT_LENGTH
+        || record.len() > MAX_VAULT_PAYLOAD_LENGTH + 1 + NONCE_LENGTH + MIN_CIPHERTEXT_LENGTH
+        || record[0] != KEY_RECORD_VERSION
+    {
+        return Err(CoreError::InvalidInput);
+    }
+    let plaintext = XChaCha20Poly1305::new(key.into())
+        .decrypt(
+            XNonce::from_slice(&record[1..1 + NONCE_LENGTH]),
+            &record[1 + NONCE_LENGTH..],
         )
         .map_err(|_| CoreError::AuthenticationFailed)?;
     Ok(Zeroizing::new(plaintext))

@@ -182,7 +182,7 @@ class _IdentityContent extends StatelessWidget {
           const SizedBox(height: 6),
           Text(
             snapshot.phase == IdentityPhase.unavailable
-                ? 'Il core nativo ABI 6 non è incluso in questa build.'
+                ? 'Il core nativo ABI 7 non è incluso in questa build.'
                 : 'Non è stato possibile aprire il vault dell’identità (${snapshot.errorCode ?? 'errore sconosciuto'}).',
             style: const TextStyle(color: Color(0xFFAEB7C3), height: 1.4),
           ),
@@ -200,6 +200,7 @@ class _IdentityContent extends StatelessWidget {
 
     final id = snapshot.identityId!;
     final invitation = snapshot.invitationCode!;
+    final hasShortInvitation = snapshot.hasShortInvitation;
     final expiration = snapshot.expiresAt;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -230,9 +231,11 @@ class _IdentityContent extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 14),
-        const Text(
-          'Il pulsante copia il nuovo ID breve pubblicato su Veilid. La persona può incollarlo in “Aggiungi contatto”; Sylphy recupererà e verificherà automaticamente il bundle crittografico completo.',
-          style: TextStyle(color: Color(0xFFAEB7C3), height: 1.4),
+        Text(
+          hasShortInvitation
+              ? 'Il pulsante copia il nuovo ID breve pubblicato su Veilid. La persona può incollarlo in “Aggiungi contatto”; Sylphy recupererà e verificherà automaticamente il bundle crittografico completo.'
+              : 'Pubblicazione dell’ID breve su Veilid in corso. Sylphy riproverà automaticamente appena la rete è disponibile.',
+          style: const TextStyle(color: Color(0xFFAEB7C3), height: 1.4),
         ),
         if (expiration != null) ...[
           const SizedBox(height: 8),
@@ -244,9 +247,13 @@ class _IdentityContent extends StatelessWidget {
         const SizedBox(height: 16),
         FilledButton.icon(
           key: const ValueKey('copy-profile-invitation'),
-          onPressed: () => onCopy(invitation),
-          icon: const Icon(Icons.copy_rounded),
-          label: const Text('Copia ID Sylphy'),
+          onPressed: hasShortInvitation ? () => onCopy(invitation) : null,
+          icon: Icon(
+            hasShortInvitation ? Icons.copy_rounded : Icons.sync_rounded,
+          ),
+          label: Text(
+            hasShortInvitation ? 'Copia ID Sylphy' : 'Pubblicazione ID breve…',
+          ),
         ),
       ],
     );

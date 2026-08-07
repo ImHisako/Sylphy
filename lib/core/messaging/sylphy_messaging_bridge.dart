@@ -12,19 +12,35 @@ class SylphyMessagingBridge
 
   final NativeCoreApi _core;
   final Map<String, ChatMessage> _messageCache = {};
+  Future<int>? _inboxRefresh;
+  int _inboxRevision = 0;
+
+  @override
+  int get inboxRevision => _inboxRevision;
 
   Future<void> _waitUntilCoreIsAvailable() {
-    final core = _core;
-    return core is NativeCoreClient
-        ? core.waitUntilAvailable()
-        : Future.value();
+    // Mutations are queued by NativeCoreClient's persistent priority worker.
+    return Future.value();
   }
 
   @override
-  Future<void> refreshInbox() async {
+  Future<int> refreshInbox() {
+    return _inboxRefresh ??= _performInboxRefresh().whenComplete(
+      () => _inboxRefresh = null,
+    );
+  }
+
+  Future<int> _performInboxRefresh() async {
     final core = _core;
-    if (core is! NativeCoreClient) return;
-    _requireSuccess(await core.syncInboundInBackground());
+    if (core is! NativeCoreClient) return _inboxRevision;
+    final response = await core.syncInboundInBackground();
+    _requireSuccess(response);
+    final revision = response.data['revision'];
+    if (revision is! int || revision < 0) {
+      throw const SecureMessagingException('invalid_native_response');
+    }
+    _inboxRevision = revision;
+    return revision;
   }
 
   @override

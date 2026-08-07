@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -17,6 +18,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    atomic_file,
     bundle::PublicBundle,
     error::{CoreError, CoreResult},
     identity,
@@ -36,6 +38,9 @@ const MAX_ATTACHMENT_NAME_CHARS: usize = 128;
 const ATTACHMENT_PREFIX: &str = "sylphy-attachment-v1:";
 const CONTACT_STORE_FILE: &str = "contacts-v1.json";
 const MESSAGE_STORE_FILE: &str = "messages-v1.vault";
+const MESSAGE_LOG_FILE: &str = "messages-v2.log";
+const MESSAGE_LOG_MAGIC: &[u8; 4] = b"SLM2";
+const MESSAGE_LOG_COMPACT_BYTES: u64 = 48 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct StoredContact {
@@ -69,6 +74,14 @@ struct StoredMessage {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+enum MessageEvent {
+    Upsert { message: StoredMessage },
+    MarkRead { conversation_id: String },
+    DeleteConversation { conversation_id: String },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct AttachmentPointer {
     version: u8,
     file_name: String,
@@ -83,9 +96,12 @@ struct AttachmentPointer {
 struct ContactStore {
     path: Option<PathBuf>,
     message_path: Option<PathBuf>,
+    legacy_message_path: Option<PathBuf>,
     contacts: Vec<StoredContact>,
     messages: Vec<StoredMessage>,
     messages_loaded: bool,
+    message_event_count: usize,
+    revision: u64,
 }
 
 static CONTACT_STORE: OnceLock<Mutex<ContactStore>> = OnceLock::new();
@@ -104,17 +120,34 @@ pub fn configure_storage(storage_directory: &str) -> CoreResult<()> {
     let contacts = load_contacts(&path)?;
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     store.path = Some(path);
-    store.message_path = Some(directory.join(MESSAGE_STORE_FILE));
+    store.message_path = Some(directory.join(MESSAGE_LOG_FILE));
+    store.legacy_message_path = Some(directory.join(MESSAGE_STORE_FILE));
     store.contacts = contacts;
     store.messages.clear();
     store.messages_loaded = false;
+    store.message_event_count = 0;
+    store.revision = 0;
     Ok(())
 }
 
 pub fn list_conversations() -> CoreResult<Value> {
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     ensure_messages_loaded(&mut store)?;
-    let messages = &store.messages;
+    let mut summaries: HashMap<&str, (Option<&StoredMessage>, usize)> = HashMap::new();
+    for message in &store.messages {
+        let summary = summaries
+            .entry(message.conversation_id.as_str())
+            .or_insert((None, 0));
+        if summary
+            .0
+            .is_none_or(|current| current.sent_at_ms <= message.sent_at_ms)
+        {
+            summary.0 = Some(message);
+        }
+        if !message.is_outgoing && !message.is_read {
+            summary.1 += 1;
+        }
+    }
     let conversations = store
         .contacts
         .iter()
@@ -126,16 +159,10 @@ pub fn list_conversations() -> CoreResult<Value> {
             let visible_name = public_profile
                 .and_then(|profile| profile.display_name.as_deref())
                 .unwrap_or(&contact.display_name);
-            let mut contact_messages = messages
-                .iter()
-                .filter(|message| message.conversation_id == contact.id)
-                .collect::<Vec<_>>();
-            contact_messages.sort_by_key(|message| message.sent_at_ms);
-            let last = contact_messages.last();
-            let unread = contact_messages
-                .iter()
-                .filter(|message| !message.is_outgoing && !message.is_read)
-                .count();
+            let (last, unread) = summaries
+                .get(contact.id.as_str())
+                .copied()
+                .unwrap_or((None, 0));
             let can_message = contact.published_identity.is_some();
             json!({
                 "id": contact.id,
@@ -159,6 +186,7 @@ pub fn list_conversations() -> CoreResult<Value> {
         "state": if store.path.is_some() { "ready" } else { "storage_unconfigured" },
         "can_send": store.contacts.iter().any(|contact| contact.published_identity.is_some()),
         "conversations": conversations,
+        "revision": store.revision,
     }))
 }
 
@@ -169,25 +197,40 @@ pub fn list_messages(conversation_id: &str) -> CoreResult<Value> {
     let mut messages = store
         .messages
         .iter()
-        .cloned()
         .filter(|message| message.conversation_id == conversation_id)
+        .cloned()
         .collect::<Vec<_>>();
     messages.sort_by_key(|message| message.sent_at_ms);
     Ok(json!({
         "conversation_id": conversation_id,
         "messages": messages.into_iter().map(message_json).collect::<Vec<_>>(),
+        "revision": store.revision,
     }))
 }
 
-pub fn add_contact(display_name: &str, invitation_code: &str) -> CoreResult<Value> {
-    let normalized_name = validate_display_name(display_name)?;
+pub fn add_contact(_legacy_display_name: &str, invitation_code: &str) -> CoreResult<Value> {
     let (bundle, published_identity) = decode_invitation(invitation_code)?;
+    // A contact name is identity data, not local input. It is covered by the
+    // Ed25519 signature of PublishedIdentity and therefore cannot be replaced
+    // by the person importing the invitation.
+    let published_identity = published_identity.ok_or(CoreError::VerificationFailed)?;
+    let profile_name = published_identity
+        .profile
+        .display_name
+        .as_deref()
+        .map(validate_display_name)
+        .transpose()?;
     let now_ms = current_time_ms()?;
     if bundle.expires_at_ms <= now_ms {
         return Err(CoreError::VerificationFailed);
     }
     let id = contact_id(&bundle.identity_ed25519);
     let fingerprint = fingerprint(&bundle.identity_ed25519);
+    let normalized_name = profile_name.unwrap_or_else(|| {
+        let suffix = fingerprint.replace(' ', "");
+        let suffix = &suffix[suffix.len().saturating_sub(8)..];
+        format!("Contatto Sylphy {suffix}")
+    });
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     if store.path.is_none() {
         return Err(CoreError::FeatureUnavailable);
@@ -204,7 +247,7 @@ pub fn add_contact(display_name: &str, invitation_code: &str) -> CoreResult<Valu
         fingerprint: fingerprint.clone(),
         added_at_ms: now_ms,
         bundle,
-        published_identity,
+        published_identity: Some(published_identity),
         verified: false,
     };
     let mut updated = store.contacts.clone();
@@ -214,6 +257,7 @@ pub fn add_contact(display_name: &str, invitation_code: &str) -> CoreResult<Valu
         &updated,
     )?;
     store.contacts = updated;
+    store.revision = store.revision.wrapping_add(1);
     Ok(json!({"contact_id": id, "fingerprint": fingerprint, "safety": "pending"}))
 }
 
@@ -238,21 +282,11 @@ pub fn send_text(conversation_id: &str, plaintext: &str) -> CoreResult<Value> {
         )
     };
     let (payload, message_id) = secure_packet::seal_for(&recipient, plaintext)?;
-    let mailbox_result = recipient
-        .mailbox
-        .as_ref()
-        .ok_or(CoreError::FeatureUnavailable)
-        .and_then(|mailbox| veilid_adapter::store_mailbox_payload(mailbox, &payload));
-    let direct_result = veilid_adapter::send_payload(&recipient.route_blob, payload);
-    if mailbox_result.is_err() && direct_result.is_err() {
-        return Err(direct_result
-            .err()
-            .unwrap_or(CoreError::NetworkAttachFailed));
-    }
+    veilid_adapter::deliver_payload(&recipient.route_blob, recipient.mailbox.as_ref(), payload)?;
     let now_ms = current_time_ms()?;
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     ensure_messages_loaded(&mut store)?;
-    store.messages.push(StoredMessage {
+    let message = StoredMessage {
         id: message_id.clone(),
         conversation_id: conversation_id.to_owned(),
         author_id: "me".to_owned(),
@@ -263,8 +297,17 @@ pub fn send_text(conversation_id: &str, plaintext: &str) -> CoreResult<Value> {
         delivery_state: "sent".to_owned(),
         attachment_name: None,
         attachment_base64: None,
-    });
-    persist_messages(&message_path, &store.messages)?;
+    };
+    append_message_event(
+        &message_path,
+        &MessageEvent::Upsert {
+            message: message.clone(),
+        },
+    )?;
+    store.message_event_count += 1;
+    store.messages.push(message);
+    store.revision = store.revision.wrapping_add(1);
+    let _ = compact_message_log_if_needed(&mut store);
     Ok(json!({"message_id": message_id, "delivery_state": "sent"}))
 }
 
@@ -322,21 +365,11 @@ pub fn send_attachment(
         )
     };
     let (payload, message_id) = secure_packet::seal_for(&recipient, &control)?;
-    let mailbox_result = recipient
-        .mailbox
-        .as_ref()
-        .ok_or(CoreError::FeatureUnavailable)
-        .and_then(|mailbox| veilid_adapter::store_mailbox_payload(mailbox, &payload));
-    let direct_result = veilid_adapter::send_payload(&recipient.route_blob, payload);
-    if mailbox_result.is_err() && direct_result.is_err() {
-        return Err(direct_result
-            .err()
-            .unwrap_or(CoreError::NetworkAttachFailed));
-    }
+    veilid_adapter::deliver_payload(&recipient.route_blob, recipient.mailbox.as_ref(), payload)?;
     let now_ms = current_time_ms()?;
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     ensure_messages_loaded(&mut store)?;
-    store.messages.push(StoredMessage {
+    let message = StoredMessage {
         id: message_id.clone(),
         conversation_id: conversation_id.to_owned(),
         author_id: "me".to_owned(),
@@ -347,8 +380,17 @@ pub fn send_attachment(
         delivery_state: "sent".to_owned(),
         attachment_name: Some(file_name),
         attachment_base64: Some(STANDARD.encode(bytes)),
-    });
-    persist_messages(&message_path, &store.messages)?;
+    };
+    append_message_event(
+        &message_path,
+        &MessageEvent::Upsert {
+            message: message.clone(),
+        },
+    )?;
+    store.message_event_count += 1;
+    store.messages.push(message);
+    store.revision = store.revision.wrapping_add(1);
+    let _ = compact_message_log_if_needed(&mut store);
     Ok(json!({"message_id": message_id, "delivery_state": "sent"}))
 }
 
@@ -360,15 +402,24 @@ pub fn mark_conversation_read(conversation_id: &str) -> CoreResult<Value> {
         .message_path
         .clone()
         .ok_or(CoreError::FeatureUnavailable)?;
-    let mut changed = false;
-    for message in &mut store.messages {
-        if message.conversation_id == conversation_id && !message.is_outgoing && !message.is_read {
-            message.is_read = true;
-            changed = true;
-        }
-    }
+    let changed = store.messages.iter().any(|message| {
+        message.conversation_id == conversation_id && !message.is_outgoing && !message.is_read
+    });
     if changed {
-        persist_messages(&path, &store.messages)?;
+        append_message_event(
+            &path,
+            &MessageEvent::MarkRead {
+                conversation_id: conversation_id.to_owned(),
+            },
+        )?;
+        for message in &mut store.messages {
+            if message.conversation_id == conversation_id && !message.is_outgoing {
+                message.is_read = true;
+            }
+        }
+        store.message_event_count += 1;
+        store.revision = store.revision.wrapping_add(1);
+        let _ = compact_message_log_if_needed(&mut store);
     }
     Ok(json!({"conversation_id": conversation_id, "read": true}))
 }
@@ -395,13 +446,21 @@ pub fn delete_conversation(conversation_id: &str) -> CoreResult<Value> {
     let messages = store
         .messages
         .iter()
-        .cloned()
         .filter(|message| message.conversation_id != conversation_id)
+        .cloned()
         .collect::<Vec<_>>();
     persist_contacts(&contact_path, &updated)?;
-    persist_messages(&message_path, &messages)?;
+    append_message_event(
+        &message_path,
+        &MessageEvent::DeleteConversation {
+            conversation_id: conversation_id.to_owned(),
+        },
+    )?;
     store.contacts = updated;
     store.messages = messages;
+    store.message_event_count += 1;
+    store.revision = store.revision.wrapping_add(1);
+    let _ = compact_message_log_if_needed(&mut store);
     Ok(json!({"conversation_id": conversation_id, "deleted": true}))
 }
 
@@ -419,6 +478,7 @@ pub fn set_contact_verified(conversation_id: &str, verified: bool) -> CoreResult
         &updated,
     )?;
     store.contacts = updated;
+    store.revision = store.revision.wrapping_add(1);
     Ok(json!({
         "conversation_id": conversation_id,
         "safety": if verified { "verified" } else { "pending" },
@@ -452,7 +512,11 @@ pub fn sync_inbound_messages() -> CoreResult<Value> {
             Err(_) => {}
         }
     }
-    Ok(json!({"persisted": persisted, "discarded": discarded}))
+    let revision = contact_store()
+        .lock()
+        .map_err(|_| CoreError::Internal)?
+        .revision;
+    Ok(json!({"persisted": persisted, "discarded": discarded, "revision": revision}))
 }
 
 fn should_discard_inbound(error: &CoreError) -> bool {
@@ -504,8 +568,7 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<()> {
     }
     let (body, attachment_name, attachment_base64) = decode_incoming_content(&opened.plaintext)?;
     persist_contacts(&contact_path, &store.contacts)?;
-    let mut updated_messages = store.messages.clone();
-    updated_messages.push(StoredMessage {
+    let message = StoredMessage {
         id: opened.message_id,
         conversation_id: id.clone(),
         author_id: id,
@@ -516,9 +579,17 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<()> {
         delivery_state: "delivered".to_owned(),
         attachment_name,
         attachment_base64,
-    });
-    persist_messages(&message_path, &updated_messages)?;
-    store.messages = updated_messages;
+    };
+    append_message_event(
+        &message_path,
+        &MessageEvent::Upsert {
+            message: message.clone(),
+        },
+    )?;
+    store.message_event_count += 1;
+    store.messages.push(message);
+    store.revision = store.revision.wrapping_add(1);
+    let _ = compact_message_log_if_needed(&mut store);
     Ok(())
 }
 
@@ -580,18 +651,32 @@ fn ensure_messages_loaded(store: &mut ContactStore) -> CoreResult<()> {
     if store.messages_loaded {
         return Ok(());
     }
-    store.messages = match store.message_path.as_deref() {
-        Some(path) => load_messages(path)?,
-        None => Vec::new(),
+    let Some(path) = store.message_path.as_deref() else {
+        store.messages = Vec::new();
+        store.messages_loaded = true;
+        return Ok(());
     };
+    let (messages, event_count) = if path.exists() {
+        load_message_log(path)?
+    } else if let Some(legacy) = store
+        .legacy_message_path
+        .as_deref()
+        .filter(|path| path.exists())
+    {
+        let messages = load_legacy_messages(legacy)?;
+        write_message_snapshot(path, &messages)?;
+        let count = messages.len();
+        (messages, count)
+    } else {
+        (Vec::new(), 0)
+    };
+    store.messages = messages;
+    store.message_event_count = event_count;
     store.messages_loaded = true;
     Ok(())
 }
 
-fn load_messages(path: &Path) -> CoreResult<Vec<StoredMessage>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
+fn load_legacy_messages(path: &Path) -> CoreResult<Vec<StoredMessage>> {
     if fs::metadata(path).map_err(|_| CoreError::Internal)?.len() > MAX_MESSAGE_STORE_BYTES {
         return Err(CoreError::LimitExceeded);
     }
@@ -606,30 +691,139 @@ fn load_messages(path: &Path) -> CoreResult<Vec<StoredMessage>> {
     Ok(messages)
 }
 
-fn persist_messages(path: &Path, messages: &[StoredMessage]) -> CoreResult<()> {
-    if messages.len() > MAX_MESSAGES {
-        return Err(CoreError::LimitExceeded);
+fn load_message_log(path: &Path) -> CoreResult<(Vec<StoredMessage>, usize)> {
+    let bytes = fs::read(path).map_err(|_| CoreError::Internal)?;
+    if bytes.len() as u64 > MAX_MESSAGE_STORE_BYTES || !bytes.starts_with(MESSAGE_LOG_MAGIC) {
+        return Err(CoreError::VerificationFailed);
     }
-    let encoded = serde_json::to_vec(messages).map_err(|_| CoreError::Internal)?;
-    let password = identity::active_identity()?.storage_password()?;
-    let encrypted = vault::seal(&password, &encoded)?;
-    if encrypted.len() as u64 > MAX_MESSAGE_STORE_BYTES {
-        return Err(CoreError::LimitExceeded);
+    let key = identity::active_identity()?.storage_key()?;
+    let mut messages = Vec::new();
+    let mut cursor = MESSAGE_LOG_MAGIC.len();
+    let mut event_count = 0_usize;
+    while cursor < bytes.len() {
+        if bytes.len() - cursor < 4 {
+            break;
+        }
+        let length = u32::from_be_bytes(
+            bytes[cursor..cursor + 4]
+                .try_into()
+                .map_err(|_| CoreError::VerificationFailed)?,
+        ) as usize;
+        if length == 0 || length > MAX_ATTACHMENT_BYTES * 2 {
+            return Err(CoreError::VerificationFailed);
+        }
+        if bytes.len() - cursor - 4 < length {
+            break;
+        }
+        let frame_end = cursor + 4 + length;
+        let plaintext = vault::open_with_key(&key, &bytes[cursor + 4..frame_end])?;
+        let event: MessageEvent =
+            serde_json::from_slice(&plaintext).map_err(|_| CoreError::VerificationFailed)?;
+        apply_message_event(&mut messages, event)?;
+        event_count += 1;
+        cursor = frame_end;
     }
-    persist_bytes(path, &encrypted)
+    if cursor != bytes.len() {
+        OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|file| file.set_len(cursor as u64))
+            .map_err(|_| CoreError::Internal)?;
+    }
+    Ok((messages, event_count))
 }
 
-fn persist_bytes(path: &Path, bytes: &[u8]) -> CoreResult<()> {
+fn apply_message_event(messages: &mut Vec<StoredMessage>, event: MessageEvent) -> CoreResult<()> {
+    match event {
+        MessageEvent::Upsert { message } => {
+            validate_conversation_id(&message.conversation_id)?;
+            if messages.len() >= MAX_MESSAGES {
+                return Err(CoreError::LimitExceeded);
+            }
+            if !messages.iter().any(|item| item.id == message.id) {
+                messages.push(message);
+            }
+        }
+        MessageEvent::MarkRead { conversation_id } => {
+            validate_conversation_id(&conversation_id)?;
+            for message in messages {
+                if message.conversation_id == conversation_id && !message.is_outgoing {
+                    message.is_read = true;
+                }
+            }
+        }
+        MessageEvent::DeleteConversation { conversation_id } => {
+            validate_conversation_id(&conversation_id)?;
+            messages.retain(|message| message.conversation_id != conversation_id);
+        }
+    }
+    Ok(())
+}
+
+fn append_message_event(path: &Path, event: &MessageEvent) -> CoreResult<()> {
+    if !path.exists() {
+        atomic_file::replace(path, MESSAGE_LOG_MAGIC)?;
+    }
+    let encoded = serde_json::to_vec(event).map_err(|_| CoreError::Internal)?;
+    let encrypted = vault::seal_with_key(&identity::active_identity()?.storage_key()?, &encoded)?;
+    let length = u32::try_from(encrypted.len()).map_err(|_| CoreError::LimitExceeded)?;
+    let current = fs::metadata(path).map_err(|_| CoreError::Internal)?.len();
+    if current + 4 + u64::from(length) > MAX_MESSAGE_STORE_BYTES {
+        return Err(CoreError::LimitExceeded);
+    }
     let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
+    options.append(true).write(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
     let mut file = options.open(path).map_err(|_| CoreError::Internal)?;
-    file.write_all(bytes).map_err(|_| CoreError::Internal)?;
-    file.sync_all().map_err(|_| CoreError::Internal)
+    file.write_all(&length.to_be_bytes())
+        .and_then(|_| file.write_all(&encrypted))
+        .map_err(|_| CoreError::Internal)?;
+    file.sync_data().map_err(|_| CoreError::Internal)
+}
+
+fn compact_message_log_if_needed(store: &mut ContactStore) -> CoreResult<()> {
+    let Some(path) = store.message_path.as_deref() else {
+        return Ok(());
+    };
+    let size = fs::metadata(path).map(|value| value.len()).unwrap_or(0);
+    if size < MESSAGE_LOG_COMPACT_BYTES
+        && store.message_event_count <= store.messages.len().saturating_mul(2).saturating_add(256)
+    {
+        return Ok(());
+    }
+    write_message_snapshot(path, &store.messages)?;
+    store.message_event_count = store.messages.len();
+    Ok(())
+}
+
+fn write_message_snapshot(path: &Path, messages: &[StoredMessage]) -> CoreResult<()> {
+    if messages.len() > MAX_MESSAGES {
+        return Err(CoreError::LimitExceeded);
+    }
+    let key = identity::active_identity()?.storage_key()?;
+    let mut output = Vec::from(MESSAGE_LOG_MAGIC.as_slice());
+    for message in messages {
+        let event = MessageEvent::Upsert {
+            message: message.clone(),
+        };
+        let encoded = serde_json::to_vec(&event).map_err(|_| CoreError::Internal)?;
+        let encrypted = vault::seal_with_key(&key, &encoded)?;
+        let length = u32::try_from(encrypted.len()).map_err(|_| CoreError::LimitExceeded)?;
+        output.extend_from_slice(&length.to_be_bytes());
+        output.extend_from_slice(&encrypted);
+        if output.len() as u64 > MAX_MESSAGE_STORE_BYTES {
+            return Err(CoreError::LimitExceeded);
+        }
+    }
+    atomic_file::replace(path, &output)
+}
+
+fn persist_bytes(path: &Path, bytes: &[u8]) -> CoreResult<()> {
+    atomic_file::replace(path, bytes)
 }
 
 fn message_json(message: StoredMessage) -> Value {

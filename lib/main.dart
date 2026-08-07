@@ -84,6 +84,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   bool _profileLoaded = false;
   bool _isEditingProfile = false;
   bool _nativeServicesReady = false;
+  Timer? _identityRepublishTimer;
 
   @override
   void initState() {
@@ -135,11 +136,38 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _publishProfile() => _identityService.initialize(
-    profile: _profile,
-    shareDisplayName: _privacySettings.value.shareDisplayName,
-    shareProfilePhoto: _privacySettings.value.shareProfilePhoto,
-  );
+  Future<void> _publishProfile() async {
+    await _identityService.initialize(
+      profile: _profile,
+      shareDisplayName: _privacySettings.value.shareDisplayName,
+      shareProfilePhoto: _privacySettings.value.shareProfilePhoto,
+    );
+    _scheduleShortInvitationRefresh();
+  }
+
+  void _scheduleShortInvitationRefresh() {
+    if (_identityService.snapshot.hasShortInvitation) {
+      _identityRepublishTimer?.cancel();
+      _identityRepublishTimer = null;
+      return;
+    }
+    _identityRepublishTimer ??= Timer.periodic(const Duration(seconds: 6), (
+      timer,
+    ) {
+      if (!mounted || _identityService.snapshot.hasShortInvitation) {
+        timer.cancel();
+        _identityRepublishTimer = null;
+        return;
+      }
+      if (_veilidService.snapshot.isAttached) {
+        _runGuarded(
+          _publishProfile(),
+          category: 'identity',
+          action: 'short_invitation_refresh_failed',
+        );
+      }
+    });
+  }
 
   void _onPrivacyChanged() {
     if (!_nativeServicesReady) {
@@ -232,6 +260,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _privacySettings.removeListener(_onPrivacyChanged);
+    _identityRepublishTimer?.cancel();
     if (_ownsVeilidService) {
       unawaited(_veilidService.stop());
       _veilidService.dispose();

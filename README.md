@@ -1,5 +1,14 @@
 # Sylphy
 
+## Aggiornamenti Android senza disinstallazione
+
+Sylphy mantiene stabile l'`applicationId` e usa un `versionCode` crescente.
+Per le build distribuite, copia `android/key.properties.example` in
+`android/key.properties`, indica il keystore di release e conserva sempre la
+stessa chiave di firma. Un APK con build number più alto potrà così essere
+installato direttamente sopra la versione precedente, mantenendo profilo,
+vault e messaggi locali.
+
 Sylphy è un messenger peer-to-peer privato per Android, Windows e Linux. Integra
 [Veilid](https://veilid.com/) direttamente nell'applicazione e mantiene identità,
 crittografia e cronologia sensibile nel core nativo Rust: la rete riceve soltanto
@@ -87,18 +96,18 @@ flowchart TB
     subgraph Client["Client Sylphy"]
         UI["Flutter UI\nchat, contatti, profilo, allegati"]
         DS["Servizi Dart\nIdentity · Messaging · Veilid"]
-        BG["Executor seriale in isolate\noperazioni native non bloccanti"]
+        BG["Worker nativo persistente\ncoda con priorità agli invii"]
         UI --> DS --> BG
     end
 
-    BG -->|"JSON FFI · ABI 6"| FFI["Boundary C/Rust"]
+    BG -->|"JSON FFI · ABI 7"| FFI["Boundary C/Rust"]
 
     subgraph Core["Core nativo Rust"]
         FFI --> ID["Identità e vault"]
         FFI --> MSG["Messaging adapter"]
-        MSG --> CRYPTO["Secure packet\nEd25519 · X25519 · ML-KEM-768 · XChaCha20"]
+        MSG --> CRYPTO["Secure packet\nlibsignal · X25519 · ML-KEM-768 · XChaCha20"]
         MSG --> VA["Veilid adapter"]
-        ID --> LOCAL["Vault locale cifrato\nidentità, contatti, cronologia"]
+        ID --> LOCAL["Storage locale cifrato\nidentità · sessioni · log messaggi"]
     end
 
     subgraph Network["Rete Veilid"]
@@ -115,14 +124,14 @@ flowchart TB
 
 ### Invio di un messaggio
 
-1. Flutter valida l'input e accoda la richiesta sull'executor seriale in
-   background, mantenendo reattiva l'interfaccia.
+1. Flutter valida l'input e lo accoda al worker nativo persistente; gli invii
+   hanno priorità rispetto alla manutenzione periodica dell'inbox.
 2. Il core Rust carica contatto e chiavi dal vault cifrato.
-3. Crea un pacchetto autenticato con Ed25519 e un accordo ibrido one-shot
-   X25519 + ML-KEM-768, quindi cifra il contenuto con XChaCha20-Poly1305.
-4. Il pacchetto opaco viene scritto nella mailbox DHT del destinatario; se è
-   disponibile una route attiva viene tentato anche l'invio diretto.
-5. La copia locale viene persistita nel vault e la UI aggiorna lo stato.
+3. `libsignal` aggiorna la sessione Double Ratchet e produce un ciphertext
+   Signal/PreKey; l'envelope esterno applica anche il bootstrap ibrido X25519 +
+   ML-KEM-768 e l'autenticazione Sylphy.
+4. Viene tentata prima la private route; la mailbox DHT è il fallback durevole.
+5. Sessione e copia locale vengono persistite prima della conferma alla UI.
 
 ### Ricezione e consegna offline
 
@@ -142,17 +151,16 @@ flowchart TB
 | --- | --- |
 | Identità e autenticità | Ed25519, bundle pubblico firmato e fingerprint verificabile |
 | Accordo delle chiavi | schema ibrido one-shot X25519 + ML-KEM-768 |
-| Cifratura messaggi | XChaCha20-Poly1305 con pacchetti autenticati fino a 32 KiB |
-| Dati locali | vault derivato con Argon2id e cifrato con XChaCha20-Poly1305 |
+| Cifratura messaggi | Signal Double Ratchet ufficiale dentro envelope XChaCha20-Poly1305 autenticati |
+| Dati locali | identità Argon2id; sessioni per contatto e log incrementale cifrati XChaCha20-Poly1305 |
 | Allegati | chiave casuale per file, XChaCha20-Poly1305 e chunk DHT cifrati; limite applicativo 700 KiB |
 | Metadati pubblici | identità, prekey, route e profilo firmati; mai la cronologia in chiaro |
 | Trasporto | private routing Veilid, mailbox DHT e consegna diretta best-effort |
 
-La dipendenza `signalapp/libsignal` e il self-test della Double Ratchet sono
-presenti dietro la feature `signal-ratchet`, ma il percorso di messaggistica
-attivo usa attualmente gli envelope ibridi one-shot descritti sopra. Il README
-non attribuisce quindi al prodotto forward secrecy post-compromise non ancora
-integrata nel flusso reale.
+I nuovi bundle pubblicano prekey EC e Kyber di `signalapp/libsignal`, legate
+all'identità Sylphy tramite firma Ed25519. Due client aggiornati usano sempre il
+ciphertext Signal; un contatto precedente senza il nuovo bundle resta sul
+formato ibrido di compatibilità finché non ripubblica il proprio ID.
 
 To-Do >>
 

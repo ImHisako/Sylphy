@@ -17,6 +17,7 @@ use crate::{
     error::{CoreError, CoreResult},
     hybrid, identity,
     peer_identity::{PublicProfile, PublishedIdentity},
+    ratchet_adapter,
 };
 
 const MAX_PACKET_BYTES: usize = 32 * 1024;
@@ -49,7 +50,7 @@ pub fn seal_for(recipient: &PublishedIdentity, plaintext: &str) -> CoreResult<(V
     }
     let local = identity::active_identity()?;
     let signing_key = local.signing_key()?;
-    let local_bundle = local.public_bundle()?;
+    let local_bundle = local.public_bundle(ratchet_adapter::public_pre_key_bundle()?)?;
     let route_blob = crate::veilid_adapter::local_route_blob()?;
     let mailbox = crate::peer_identity::current_public_mailbox();
     let sender = PublishedIdentity::new(
@@ -91,6 +92,25 @@ pub fn seal_for(recipient: &PublishedIdentity, plaintext: &str) -> CoreResult<(V
         pq_shared.as_slice(),
         transcript.as_slice(),
     )?;
+    let signal_pre_key = recipient.bundle.signal_pre_key.as_ref();
+    let (protected_plaintext, ratchet_header) = if let Some(signal_pre_key) = signal_pre_key {
+        (
+            ratchet_adapter::encrypt_message(
+                &recipient.bundle.identity_ed25519,
+                signal_pre_key,
+                plaintext.as_bytes(),
+            )?,
+            b"signal-libsignal-v1".to_vec(),
+        )
+    } else {
+        // Migration path for contacts that have not updated their signed
+        // capability bundle yet. Receiving remains forward-compatible while
+        // updated peers always negotiate the ratchet.
+        (
+            plaintext.as_bytes().to_vec(),
+            b"hybrid-one-shot-v1".to_vec(),
+        )
+    };
     let sent_at_ms = current_time_ms()?;
     let conversation_id = conversation_bytes(
         &sender.bundle.identity_ed25519,
@@ -106,10 +126,10 @@ pub fn seal_for(recipient: &PublishedIdentity, plaintext: &str) -> CoreResult<(V
             recipient_identity_key_id: identity_prefix(&recipient.bundle.identity_ed25519),
             session_id: transcript[..16].to_vec(),
             timestamp_logical: sent_at_ms,
-            ratchet_header: b"hybrid-one-shot-v1".to_vec(),
+            ratchet_header,
             attachment_refs: Vec::new(),
         },
-        plaintext.as_bytes(),
+        &protected_plaintext,
     )?;
     let mut packet = SecurePacket {
         version: PROTOCOL_VERSION,
@@ -166,8 +186,7 @@ pub fn open(payload: &[u8]) -> CoreResult<OpenedPacket> {
         serde_json::from_slice(payload).map_err(|_| CoreError::InvalidInput)?;
     packet.validate()?;
     let local = identity::active_identity()?;
-    let local_bundle = local.public_bundle()?;
-    if packet.recipient_identity != local_bundle.identity_ed25519 {
+    if packet.recipient_identity != local.identity_public_key()? {
         return Err(CoreError::AuthenticationFailed);
     }
     let ephemeral: [u8; 32] = packet
@@ -194,7 +213,15 @@ pub fn open(payload: &[u8]) -> CoreResult<OpenedPacket> {
         pq_shared.as_slice(),
         transcript.as_slice(),
     )?;
-    let plaintext = envelope::open(&root_key, &packet.envelope)?;
+    let protected_plaintext = envelope::open(&root_key, &packet.envelope)?;
+    let plaintext = match packet.envelope.metadata.ratchet_header.as_slice() {
+        b"signal-libsignal-v1" => ratchet_adapter::decrypt_message(
+            &packet.sender.bundle.identity_ed25519,
+            &protected_plaintext,
+        )?,
+        b"hybrid-one-shot-v1" => protected_plaintext.to_vec(),
+        _ => return Err(CoreError::UnsupportedVersion),
+    };
     let text = String::from_utf8(plaintext.to_vec()).map_err(|_| CoreError::InvalidInput)?;
     if text.is_empty() || text.len() > MAX_MESSAGE_BYTES {
         return Err(CoreError::InvalidInput);

@@ -1,0 +1,7 @@
+# Copy this file to android/key.properties and keep both the referenced
+# keystore and its credentials private and backed up. Reuse the same key for
+# every release or Android will refuse in-place upgrades.
+storeFile=../private/sylphy-release.jks
+storePassword=change-me
+keyAlias=sylphy
+keyPassword=change-me

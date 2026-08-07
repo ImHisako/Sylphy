@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
@@ -8,7 +9,7 @@ import 'package:ffi/ffi.dart';
 
 import '../diagnostics/app_log.dart';
 
-const _expectedAbiVersion = 6;
+const _expectedAbiVersion = 7;
 
 typedef _NativeAbiVersion = Uint32 Function();
 typedef _DartAbiVersion = int Function();
@@ -74,11 +75,20 @@ class NativeCoreClient implements NativeCoreApi {
   final _DartFreeString _freeString;
   final int abiVersion;
   int _pendingBackgroundCalls = 0;
-  Future<void> _backgroundTail = Future.value();
+  final Queue<_PendingNativeCall> _urgentCalls = Queue();
+  final Queue<_PendingNativeCall> _normalCalls = Queue();
+  final List<Completer<void>> _idleWaiters = [];
+  Future<SendPort>? _workerPort;
+  bool _workerBusy = false;
 
   bool get backgroundCallInProgress => _pendingBackgroundCalls > 0;
 
-  Future<void> waitUntilAvailable() => _backgroundTail;
+  Future<void> waitUntilAvailable() {
+    if (!backgroundCallInProgress) return Future.value();
+    final completer = Completer<void>();
+    _idleWaiters.add(completer);
+    return completer.future;
+  }
 
   static NativeCoreClient? tryLoad() {
     if (!Platform.isWindows && !Platform.isLinux && !Platform.isAndroid) {
@@ -305,19 +315,34 @@ class NativeCoreClient implements NativeCoreApi {
   });
 
   Future<NativeCoreResponse> _callInBackground(Map<String, Object> request) {
-    final previous = _backgroundTail;
-    final completer = Completer<void>();
+    final pending = _PendingNativeCall(request);
     _pendingBackgroundCalls += 1;
-    _backgroundTail = completer.future;
-    return _executeBackgroundCall(previous, completer, request);
+    if (_isUrgentCommand(request['command'])) {
+      _urgentCalls.addLast(pending);
+    } else {
+      _normalCalls.addLast(pending);
+    }
+    _drainBackgroundCalls();
+    return pending.completer.future;
   }
 
-  Future<NativeCoreResponse> _executeBackgroundCall(
-    Future<void> previous,
-    Completer<void> completer,
-    Map<String, Object> request,
-  ) async {
-    await previous;
+  bool _isUrgentCommand(Object? command) =>
+      command == 'send_text' || command == 'send_attachment';
+
+  void _drainBackgroundCalls() {
+    if (_workerBusy) return;
+    final pending = _urgentCalls.isNotEmpty
+        ? _urgentCalls.removeFirst()
+        : _normalCalls.isNotEmpty
+        ? _normalCalls.removeFirst()
+        : null;
+    if (pending == null) return;
+    _workerBusy = true;
+    unawaited(_executeBackgroundCall(pending));
+  }
+
+  Future<void> _executeBackgroundCall(_PendingNativeCall pending) async {
+    final request = pending.request;
     final command = request['command'] as String? ?? 'unknown';
     final stopwatch = Stopwatch()..start();
     AppLog.instance.record(
@@ -326,17 +351,7 @@ class NativeCoreClient implements NativeCoreApi {
       verbose: true,
     );
     try {
-      final response = await Isolate.run(() {
-        final client = NativeCoreClient.tryLoad();
-        if (client == null) {
-          return const NativeCoreResponse(
-            ok: false,
-            code: 'feature_unavailable',
-            data: {},
-          );
-        }
-        return client.call(request);
-      });
+      final response = await _workerCall(request);
       AppLog.instance.record(
         category: 'native_core',
         action: 'background_call_completed:$command',
@@ -345,18 +360,51 @@ class NativeCoreClient implements NativeCoreApi {
         verbose: response.ok,
         force: !response.ok,
       );
-      return response;
+      pending.completer.complete(response);
     } on Object catch (error) {
       AppLog.instance.recordError(
         category: 'native_core',
         action: 'background_call_failed:$command',
         error: error,
       );
-      rethrow;
+      pending.completer.completeError(error);
     } finally {
       _pendingBackgroundCalls -= 1;
-      completer.complete();
+      _workerBusy = false;
+      if (_pendingBackgroundCalls == 0) {
+        for (final waiter in _idleWaiters) {
+          waiter.complete();
+        }
+        _idleWaiters.clear();
+      }
+      _drainBackgroundCalls();
     }
+  }
+
+  Future<NativeCoreResponse> _workerCall(Map<String, Object> request) async {
+    final worker = await (_workerPort ??= _spawnWorker());
+    final responsePort = ReceivePort();
+    try {
+      worker.send((responsePort.sendPort, request));
+      final response = await responsePort.first;
+      if (response is Map) {
+        return NativeCoreResponse.fromJson(response.cast<String, dynamic>());
+      }
+      throw const NativeCoreException('Risposta non valida dal worker nativo.');
+    } finally {
+      responsePort.close();
+    }
+  }
+
+  static Future<SendPort> _spawnWorker() async {
+    final ready = ReceivePort();
+    await Isolate.spawn(_nativeWorkerMain, ready.sendPort);
+    final port = await ready.first;
+    ready.close();
+    if (port is! SendPort) {
+      throw const NativeCoreException('Worker nativo non disponibile.');
+    }
+    return port;
   }
 
   @override
@@ -430,6 +478,38 @@ class NativeCoreClient implements NativeCoreApi {
       }
     }
   }
+}
+
+class _PendingNativeCall {
+  _PendingNativeCall(this.request);
+
+  final Map<String, Object> request;
+  final Completer<NativeCoreResponse> completer = Completer();
+}
+
+@pragma('vm:entry-point')
+void _nativeWorkerMain(SendPort readyPort) {
+  final requests = ReceivePort();
+  final client = NativeCoreClient.tryLoad();
+  readyPort.send(requests.sendPort);
+  requests.listen((message) {
+    if (message is! (SendPort, Map<String, Object>)) return;
+    final (replyPort, request) = message;
+    try {
+      final response = client?.call(request);
+      replyPort.send({
+        'ok': response?.ok ?? false,
+        'code': response?.code ?? 'feature_unavailable',
+        'data': response?.data ?? const <String, dynamic>{},
+      });
+    } on Object {
+      replyPort.send(const {
+        'ok': false,
+        'code': 'native_call_failed',
+        'data': <String, dynamic>{},
+      });
+    }
+  });
 }
 
 class NativeCoreResponse {

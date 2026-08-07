@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -105,6 +106,75 @@ void main() {
     expect(find.text('Inviato con Invio'), findsAtLeastNWidgets(1));
   });
 
+  testWidgets('shows outgoing text immediately while transport is pending', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final sendGate = Completer<void>();
+    final bridge = _TestMessagingBridge(sendGate: sendGate);
+    await tester.pumpWidget(
+      SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const ValueKey('message-composer')),
+      'Invio immediato',
+    );
+    await tester.tap(find.byKey(const ValueKey('send-message')));
+    await tester.pump();
+
+    expect(find.text('Invio immediato'), findsOneWidget);
+    final sendButton = tester.widget<IconButton>(
+      find.byKey(const ValueKey('send-message')),
+    );
+    expect(sendButton.onPressed, isNotNull);
+
+    sendGate.complete();
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('inserts emoji and kaomoji from the cross-platform picker', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final bridge = _TestMessagingBridge();
+    await tester.pumpWidget(
+      SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Contatto di test'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('open-expression-picker')));
+    await tester.pumpAndSettle();
+    expect(find.text('Faccine ed emozioni'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('emoji-category-food')));
+    await tester.pumpAndSettle();
+    expect(find.text('Cibo e bevande'), findsOneWidget);
+    expect(find.byKey(const ValueKey('emoji-🍇')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('emoji-category-smileys')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('emoji-😀')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('open-expression-picker')));
+    await tester.pumpAndSettle();
+    expect(find.text('Recenti'), findsOneWidget);
+    expect(find.byKey(const ValueKey('emoji-😀')), findsOneWidget);
+    await tester.tap(find.text('Kaomoji'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('(＾▽＾)'));
+    await tester.pumpAndSettle();
+
+    final composer = tester.widget<TextField>(
+      find.byKey(const ValueKey('message-composer')),
+    );
+    expect(composer.controller?.text, '😀(＾▽＾)');
+  });
+
   testWidgets('shows a new mobile message without leaving the chat', (
     tester,
   ) async {
@@ -119,7 +189,7 @@ void main() {
     await tester.tap(find.text('Contatto di test'));
     await tester.pumpAndSettle();
     bridge.injectIncoming('Messaggio arrivato ora');
-    await tester.pump(const Duration(milliseconds: 750));
+    await tester.pump(const Duration(seconds: 3));
 
     expect(find.text('Messaggio arrivato ora'), findsOneWidget);
   });
@@ -226,7 +296,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Aggiungi una persona'), findsOneWidget);
-    expect(find.byKey(const ValueKey('contact-name')), findsOneWidget);
+    expect(find.byKey(const ValueKey('contact-name')), findsNothing);
     expect(
       find.byKey(const ValueKey('contact-invitation-code')),
       findsOneWidget,
@@ -287,8 +357,9 @@ class _MemoryProfileStore implements UserProfileStore {
   }
 }
 
-class _TestMessagingBridge implements SecureMessagingBridge {
-  _TestMessagingBridge({bool initiallyVerified = true})
+class _TestMessagingBridge
+    implements SecureMessagingBridge, InboxRefreshingBridge {
+  _TestMessagingBridge({bool initiallyVerified = true, this.sendGate})
     : _conversation = Conversation(
         id: 'test-contact',
         name: 'Contatto di test',
@@ -305,6 +376,14 @@ class _TestMessagingBridge implements SecureMessagingBridge {
   Conversation _conversation;
   bool deleted = false;
   final List<ChatMessage> _messages = [];
+  final Completer<void>? sendGate;
+  int _inboxRevision = 0;
+
+  @override
+  int get inboxRevision => _inboxRevision;
+
+  @override
+  Future<int> refreshInbox() async => _inboxRevision;
 
   Conversation get conversation => _conversation;
 
@@ -345,6 +424,7 @@ class _TestMessagingBridge implements SecureMessagingBridge {
       lastActivity: now,
       unreadCount: 1,
     );
+    _inboxRevision += 1;
   }
 
   @override
@@ -383,6 +463,7 @@ class _TestMessagingBridge implements SecureMessagingBridge {
     required String conversationId,
     required String plaintext,
   }) async {
+    await sendGate?.future;
     final now = DateTime(2026, 1, 1, 12);
     _messages.add(
       ChatMessage(

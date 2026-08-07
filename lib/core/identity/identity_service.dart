@@ -35,6 +35,11 @@ class IdentitySnapshot {
   final String? invitationCode;
   final DateTime? expiresAt;
   final String? errorCode;
+
+  /// Short invitations are Veilid DHT record keys, never inline key bundles.
+  bool get hasShortInvitation =>
+      invitationCode?.startsWith('sylphy:VLD') == true &&
+      invitationCode!.length <= 128;
 }
 
 abstract interface class DeviceSecretStore {

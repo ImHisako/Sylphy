@@ -239,11 +239,11 @@ pub fn publish_identity(
             .map_err(|_| CoreError::NetworkStartupFailed)?
     };
     let key = descriptor.key();
-    let _ = state
+    state
         .runtime
         .block_on(routing.set_dht_value(key.clone(), 0, bytes, None))
         .map_err(|_| CoreError::NetworkStartupFailed)?;
-    let _ = state
+    state
         .runtime
         .block_on(routing.close_dht_record(key.clone()))
         .map_err(|_| CoreError::NetworkStartupFailed)?;
@@ -343,7 +343,7 @@ pub fn ensure_mailbox(descriptor_json: Option<&str>) -> CoreResult<(MailboxAddre
     };
     address.validate()?;
     let persisted = serde_json::to_string(&mailbox).map_err(|_| CoreError::Internal)?;
-    let _ = runtime
+    runtime
         .block_on(routing.close_dht_record(mailbox.descriptor.key()))
         .map_err(|_| CoreError::NetworkStartupFailed)?;
     if let Some(task) = node.mailbox_task.take() {
@@ -624,6 +624,23 @@ pub fn send_payload(route_blob: &[u8], payload: Vec<u8>) -> CoreResult<()> {
 #[cfg(not(feature = "veilid"))]
 pub fn send_payload(_route_blob: &[u8], _payload: Vec<u8>) -> CoreResult<()> {
     Err(CoreError::FeatureUnavailable)
+}
+
+/// Uses the low-latency private route first and falls back to the durable DHT
+/// mailbox only when the peer cannot be reached directly. Older code wrote all
+/// 31 mailbox slots before attempting the route, adding seconds to every send.
+pub fn deliver_payload(
+    route_blob: &[u8],
+    mailbox: Option<&MailboxAddress>,
+    payload: Vec<u8>,
+) -> CoreResult<()> {
+    match send_payload(route_blob, payload.clone()) {
+        Ok(()) => Ok(()),
+        Err(direct_error) => match mailbox {
+            Some(address) => store_mailbox_payload(address, &payload).map_err(|_| direct_error),
+            None => Err(direct_error),
+        },
+    }
 }
 
 #[cfg(feature = "veilid")]

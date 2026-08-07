@@ -2,7 +2,7 @@
 
 ## ABI
 
-Il confine Flutter/Rust è una singola ABI C JSON, attualmente alla versione 4. Le richieste sono UTF-8; le risposte di stato non riportano password, chiavi, plaintext o diagnostica crittografica. I comandi messaging possono restituire soltanto read model già autenticati e decrittati dal core. Ogni stringa restituita viene liberata esclusivamente tramite `sylphy_core_free_string`.
+Il confine Flutter/Rust è una singola ABI C JSON, attualmente alla versione 7. Le richieste sono UTF-8; le risposte di stato non riportano password, chiavi, plaintext o diagnostica crittografica. I comandi messaging possono restituire soltanto read model già autenticati e decrittati dal core. Ogni stringa restituita viene liberata esclusivamente tramite `sylphy_core_free_string`.
 
 `ensure_identity` crea o riapre un record Argon2id/XChaCha20-Poly1305 contenente la chiave Ed25519 stabile, la prekey privata X25519 e il seed ML-KEM-768. Le prekey pubbliche sono firmate e ruotate alla scadenza, mentre il fingerprint Ed25519 rimane stabile. Il boundary restituisce esclusivamente fingerprint, scadenza e invito pubblico `sylphy:`; il segreto del vault è device-bound e proviene dal secure storage della piattaforma.
 
@@ -12,14 +12,14 @@ Il confine Flutter/Rust è una singola ABI C JSON, attualmente alla versione 4. 
 
 I comandi ABI `start_veilid`, `veilid_status` e `stop_veilid` sono sincroni rispetto al boundary C ma usano un runtime Tokio dedicato. Lo stato restituito a Flutter è ridotto a attachment, readiness pubblica, numero aggregato di peer e quantità di envelope in attesa. NodeId, route blob, payload e dettagli della routing table non attraversano il boundary. `list_conversations` e `list_messages` partono vuoti e non generano dati campione.
 
-`add_contact` accetta un alias locale e un codice Base64 senza padding contenente un `PublicBundle` JSON. Il core impone limiti di dimensione, versione e cardinalità, verifica entrambe le firme Ed25519, richiede la capability ibrida e rifiuta bundle scaduti o duplicati. Il bundle pubblico e l'alias vengono conservati soltanto nella directory applicativa nativa e non sono pubblicati su Veilid. Il contatto esposto alla UI è sempre `pending`: l'import non crea una sessione, non marca il contatto come verificato e non abilita l'invio.
+`add_contact` usa il codice breve Veilid per recuperare una `PublishedIdentity` firmata. Il nome mostrato è sempre il display name autenticato contenuto nel profilo remoto (oppure un identificatore Sylphy deterministico se il proprietario ha scelto di non pubblicarlo): il client che importa non può più assegnare un alias arbitrario. Il core impone limiti di dimensione, versione e cardinalità, verifica firme, capability e scadenza e rifiuta record duplicati.
 
 Il layer di trasporto riceve esclusivamente `MessageEnvelope` già autenticati e cifrati. Bundle pubblici firmati, mailbox cifrate e riferimenti ad allegati cifrati sono gli unici record pubblicabili.
 
 ## Ratchet
 
-La feature `signal-ratchet` integra `signalapp/libsignal` v0.99.3 tramite commit immutabile. `SignalRatchetAccount` crea il dispositivo locale e gli store Signal, genera e firma il bundle di prekey EC/Kyber, stabilisce la sessione autenticata e delega cifratura, decrittazione, DH ratchet, ratchet post-quantum e skipped-message keys al provider ufficiale. Non esiste una ratchet crittografica sviluppata nel progetto.
+La feature `signal-ratchet` integra `signalapp/libsignal` v0.99.3 tramite commit immutabile. Il percorso di produzione invoca direttamente `process_prekey_bundle`, `message_encrypt` e `message_decrypt`; il bundle pubblico contiene identity key, signed prekey EC e Kyber prekey Signal, tutte legate al fingerprint Sylphy dalla firma Ed25519. Root key, chain key, contatori e skipped-message keys non attraversano mai FFI.
 
-`RatchetWireMessage` converte esclusivamente `SignalMessage` e `PreKeySignalMessage` in un ciphertext Base64 opaco, rifiuta tipi non ammessi e payload oltre 32 KiB. Il self-test ABI esegue bootstrap Alice/Bob, risposta di acknowledgement, rotazione della ratchet e consegna dei messaggi nell'ordine 3-1-2.
+Il ciphertext opaco Signal/PreKey viene inserito in un envelope Sylphy ibrido e autenticato. Il self-test ABI usa lo stesso provider ufficiale e verifica un round trip PreKey completo.
 
-Lo store usato dall'adapter è attualmente in memoria. La UI di invio deve restare scollegata finché identity, prekey, signed prekey, Kyber prekey e session record non vengono caricati e salvati atomicamente nel vault cifrato. Questa condizione evita sessioni perse al riavvio e impedisce un fallback non dichiarato.
+L'account Signal globale e ogni sessione per contatto sono file cifrati distinti e sostituiti atomicamente. La cronologia usa `messages-v2.log`: ogni mutazione è un frame autenticato append-only, con compattazione occasionale e migrazione automatica da `messages-v1.vault`. Il segreto casuale di cifratura è conservato nell'identity vault Argon2id, evitando di rieseguire Argon2 per ogni messaggio. Le capability firmate negoziano `signal-libsignal-v1`; i bundle precedenti restano sul formato ibrido v1.

@@ -1,6 +1,5 @@
 use std::{
-    fs::{self, OpenOptions},
-    io::Write,
+    fs,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -20,9 +19,10 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
-    bundle::{ED25519_LENGTH, ML_KEM_768_PUBLIC_KEY_LENGTH, PublicBundle},
+    atomic_file,
+    bundle::{ED25519_LENGTH, ML_KEM_768_PUBLIC_KEY_LENGTH, PublicBundle, SignalPreKeyBundle},
     error::{CoreError, CoreResult},
-    vault,
+    ratchet_adapter, vault,
 };
 
 const IDENTITY_FILE_NAME: &str = "identity-v1.vault";
@@ -99,7 +99,10 @@ impl IdentityRecord {
         Ok(())
     }
 
-    pub(crate) fn public_bundle(&self) -> CoreResult<PublicBundle> {
+    pub(crate) fn public_bundle(
+        &self,
+        signal_pre_key: Option<SignalPreKeyBundle>,
+    ) -> CoreResult<PublicBundle> {
         self.validate()?;
         let signing_secret: [u8; ED25519_LENGTH] = self
             .signing_secret
@@ -125,6 +128,7 @@ impl IdentityRecord {
             x25519_public.as_bytes(),
             mlkem_public.as_slice(),
             self.expires_at_ms,
+            signal_pre_key,
         )
     }
 }
@@ -172,6 +176,17 @@ impl IdentityRecord {
         }
         Ok(STANDARD_NO_PAD.encode(&self.message_storage_secret))
     }
+
+    pub(crate) fn storage_key(&self) -> CoreResult<[u8; 32]> {
+        self.message_storage_secret
+            .as_slice()
+            .try_into()
+            .map_err(|_| CoreError::VerificationFailed)
+    }
+
+    pub(crate) fn identity_public_key(&self) -> CoreResult<Vec<u8>> {
+        Ok(self.signing_key()?.verifying_key().to_bytes().to_vec())
+    }
 }
 
 pub fn ensure_identity(
@@ -204,7 +219,12 @@ pub fn ensure_identity(
         record.rotate_prekeys(next_expiration);
     }
     record.validate()?;
-    let bundle = record.public_bundle()?;
+    *active_identity_store()
+        .lock()
+        .map_err(|_| CoreError::Internal)? = Some(record.clone());
+    ratchet_adapter::configure_storage(storage_directory)?;
+    let signal_pre_key = ratchet_adapter::public_pre_key_bundle()?;
+    let bundle = record.public_bundle(signal_pre_key)?;
     bundle.validate()?;
     let identity_hash = Sha256::digest(&bundle.identity_ed25519);
     let identity_id = grouped_hex(&identity_hash[..8]);
@@ -280,17 +300,7 @@ fn load_record(path: &Path, vault_password: &str) -> CoreResult<IdentityRecord> 
 fn persist_record(path: &Path, vault_password: &str, record: &IdentityRecord) -> CoreResult<()> {
     let serialized = Zeroizing::new(serde_json::to_vec(record).map_err(|_| CoreError::Internal)?);
     let encrypted = vault::seal(vault_password, &serialized)?;
-    let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).map_err(|_| CoreError::Internal)?;
-    file.write_all(&encrypted)
-        .map_err(|_| CoreError::Internal)?;
-    file.sync_all().map_err(|_| CoreError::Internal)
+    atomic_file::replace(path, &encrypted)
 }
 
 fn current_time_ms() -> CoreResult<u64> {

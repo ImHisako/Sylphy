@@ -11,14 +11,16 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [features]
 default = []
 veilid = ["dep:tokio", "dep:veilid-core"]
-signal-ratchet = ["dep:futures-executor", "dep:libsignal-protocol", "dep:rand"]
+signal-ratchet = ["dep:async-trait", "dep:futures-executor", "dep:libsignal-protocol", "dep:rand"]
 
 [dependencies]
 argon2 = "0.5.3"
+async-trait = { version = "0.1.89", optional = true }
 base64 = "0.22.1"
 chacha20poly1305 = { version = "0.10.1", features = ["std"] }
 ed25519-dalek = { version = "2.1.1", features = ["rand_core", "zeroize"] }
 hkdf = "0.12.4"
+hmac = "0.12.1"
 futures-executor = { version = "0.3.31", optional = true }
 libsignal-protocol = { git = "https://github.com/signalapp/libsignal.git", rev = "622d0d52471f3cc9215fe4e9abaac1970018f79c", optional = true }
 ml-kem = { version = "0.3.2", features = ["getrandom", "zeroize"] }
@@ -36,3 +38,6 @@ zeroize = "1.8.1"
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.22.4"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }

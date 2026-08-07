@@ -58,7 +58,7 @@ enum CoreRequest {
         avatar_base64: Option<String>,
     },
     ValidatePublicBundle {
-        bundle: PublicBundle,
+        bundle: Box<PublicBundle>,
     },
     VaultRoundTrip {
         password: String,
@@ -76,11 +76,20 @@ struct CoreResponse {
 }
 
 #[unsafe(no_mangle)]
+/// # Safety
+///
+/// This function has no pointer arguments and is safe to call from a C ABI
+/// consumer that uses the declared signature.
 pub unsafe extern "C" fn sylphy_core_abi_version() -> u32 {
     CORE_ABI_VERSION
 }
 
 #[unsafe(no_mangle)]
+/// # Safety
+///
+/// `request` must be null or point to a valid NUL-terminated UTF-8 string for
+/// the duration of the call. The returned pointer must be released exactly
+/// once with [`sylphy_core_free_string`].
 pub unsafe extern "C" fn sylphy_core_call(request: *const c_char) -> *mut c_char {
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let request_text = if request.is_null() {
@@ -103,6 +112,10 @@ pub unsafe extern "C" fn sylphy_core_call(request: *const c_char) -> *mut c_char
 }
 
 #[unsafe(no_mangle)]
+/// # Safety
+///
+/// `value` must be null or a pointer previously returned by
+/// [`sylphy_core_call`] that has not already been freed.
 pub unsafe extern "C" fn sylphy_core_free_string(value: *mut c_char) {
     if !value.is_null() {
         unsafe {
