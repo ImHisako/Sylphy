@@ -1,14 +1,5 @@
 # Sylphy
 
-## Aggiornamenti Android senza disinstallazione
-
-Sylphy mantiene stabile l'`applicationId` e usa un `versionCode` crescente.
-Per le build distribuite, copia `android/key.properties.example` in
-`android/key.properties`, indica il keystore di release e conserva sempre la
-stessa chiave di firma. Un APK con build number più alto potrà così essere
-installato direttamente sopra la versione precedente, mantenendo profilo,
-vault e messaggi locali.
-
 Sylphy è un messenger peer-to-peer privato per Android, Windows e Linux. Integra
 [Veilid](https://veilid.com/) direttamente nell'applicazione e mantiene identità,
 crittografia e cronologia sensibile nel core nativo Rust: la rete riceve soltanto
