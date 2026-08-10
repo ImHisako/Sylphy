@@ -48,7 +48,14 @@ abstract interface class CachedMessagingBridge
 
   Future<List<Conversation>> refreshConversations();
 
-  Future<List<ChatMessage>> refreshMessages(String conversationId);
+  Future<List<ChatMessage>> refreshMessages(
+    String conversationId, {
+    bool priority = false,
+  });
+
+  bool hasOlderMessages(String conversationId);
+
+  Future<List<ChatMessage>> loadOlderMessages(String conversationId);
 }
 
 class UnavailableMessagingBridge implements SecureMessagingBridge {

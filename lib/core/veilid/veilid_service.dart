@@ -43,7 +43,7 @@ class VeilidSnapshot {
   String get detail => switch (phase) {
     VeilidPhase.unavailable =>
       diagnosticCode == 'feature_unavailable'
-          ? 'Questa build non include Veilid. Installa la build Android ABI 8 più recente.'
+          ? 'Questa build non include Veilid. Installa la build Android ABI 10 più recente.'
           : 'Installa la libreria nativa per connetterti.',
     VeilidPhase.offline => 'Nodo arrestato · nuovo tentativo automatico',
     VeilidPhase.connecting => 'Avvio del nodo privato in corso.',
@@ -134,19 +134,25 @@ class VeilidService extends ChangeNotifier {
   final Future<AndroidBootstrapResult> Function() _ensureAndroidBootstrap;
   VeilidSnapshot _snapshot;
   Timer? _refreshTimer;
-  bool _isStarting = false;
+  Future<void>? _startInProgress;
+  Future<void>? _refreshInProgress;
   bool _disposed = false;
   bool _platformReady = false;
 
   VeilidSnapshot get snapshot => _snapshot;
   bool get hasNativeCore => _nativeCore != null;
 
-  Future<void> start() async {
+  Future<void> start() {
     final core = _nativeCore;
-    if (core == null || _disposed || _isStarting) {
-      return;
+    if (core == null || _disposed) {
+      return Future<void>.value();
     }
-    _isStarting = true;
+    return _startInProgress ??= _start(core).whenComplete(() {
+      _startInProgress = null;
+    });
+  }
+
+  Future<void> _start(NativeCoreApi core) async {
     AppLog.instance.record(
       category: 'veilid',
       action: 'start_requested',
@@ -189,12 +195,16 @@ class VeilidService extends ChangeNotifier {
           diagnosticCode: 'startup_failed',
         ),
       );
-    } finally {
-      _isStarting = false;
     }
   }
 
-  void refresh() {
+  Future<void> refresh() {
+    return _refreshInProgress ??= _refresh().whenComplete(() {
+      _refreshInProgress = null;
+    });
+  }
+
+  Future<void> _refresh() async {
     final core = _nativeCore;
     if (core == null || _disposed) {
       return;
@@ -203,7 +213,10 @@ class VeilidService extends ChangeNotifier {
       return;
     }
     try {
-      _setSnapshot(VeilidSnapshot.fromResponse(core.veilidStatus()));
+      final response = core is NativeCoreClient
+          ? await core.veilidStatusInBackground()
+          : core.veilidStatus();
+      _setSnapshot(VeilidSnapshot.fromResponse(response));
     } on NativeCoreException catch (error) {
       AppLog.instance.recordError(
         category: 'veilid',
@@ -260,7 +273,7 @@ class VeilidService extends ChangeNotifier {
               _snapshot.diagnosticCode != 'feature_unavailable')) {
         unawaited(start());
       } else {
-        refresh();
+        unawaited(refresh());
       }
     });
   }
@@ -272,7 +285,9 @@ class VeilidService extends ChangeNotifier {
     final changed =
         _snapshot.phase != value.phase ||
         _snapshot.diagnosticCode != value.diagnosticCode ||
-        _snapshot.attachmentState != value.attachmentState;
+        _snapshot.attachmentState != value.attachmentState ||
+        _snapshot.livePeerCount != value.livePeerCount ||
+        _snapshot.publicInternetReady != value.publicInternetReady;
     _snapshot = value;
     if (changed) {
       AppLog.instance.record(
@@ -286,7 +301,7 @@ class VeilidService extends ChangeNotifier {
         force: value.phase == VeilidPhase.error,
       );
     }
-    notifyListeners();
+    if (changed) notifyListeners();
   }
 
   @override

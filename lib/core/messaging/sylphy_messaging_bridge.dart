@@ -17,10 +17,24 @@ class SylphyMessagingBridge
   final Map<String, ChatMessage> _messageCache = {};
   final Map<String, List<ChatMessage>> _messageListCache = {};
   final Map<String, Future<List<ChatMessage>>> _messageRefreshes = {};
+  final Map<String, bool> _hasOlderMessages = {};
   List<Conversation>? _conversationCache;
   Future<List<Conversation>>? _conversationRefresh;
   Future<int>? _inboxRefresh;
   int _inboxRevision = 0;
+  int _cacheGeneration = 0;
+
+  void clearCachesAfterAccountImport() {
+    _cacheGeneration++;
+    _conversationCache = null;
+    _messageCache.clear();
+    _messageListCache.clear();
+    _messageRefreshes.clear();
+    _hasOlderMessages.clear();
+    _conversationRefresh = null;
+    _inboxRefresh = null;
+    _inboxRevision = 0;
+  }
 
   @override
   int get inboxRevision => _inboxRevision;
@@ -73,10 +87,12 @@ class SylphyMessagingBridge
   }
 
   Future<List<Conversation>> _performConversationRefresh() async {
+    final generation = _cacheGeneration;
     final core = _core;
     final response = core is NativeCoreClient
         ? await core.listConversationsInBackground()
         : core.listConversations();
+    if (generation != _cacheGeneration) return const [];
     return _parseConversations(response);
   }
 
@@ -100,9 +116,19 @@ class SylphyMessagingBridge
   }
 
   @override
-  Future<List<ChatMessage>> refreshMessages(String conversationId) {
-    return _messageRefreshes[conversationId] ??=
-        _performMessageRefresh(conversationId).whenComplete(() {
+  Future<List<ChatMessage>> refreshMessages(
+    String conversationId, {
+    bool priority = false,
+  }) {
+    final existing = _messageRefreshes[conversationId];
+    if (existing != null) {
+      return existing;
+    }
+    return _messageRefreshes[conversationId] =
+        _performMessageRefresh(
+          conversationId,
+          priority: priority,
+        ).whenComplete(() {
           // Do not return the removed Future from this callback: whenComplete
           // would wait on that same Future and create a self-referential deadlock.
           _messageRefreshes.remove(conversationId);
@@ -110,13 +136,55 @@ class SylphyMessagingBridge
   }
 
   Future<List<ChatMessage>> _performMessageRefresh(
-    String conversationId,
-  ) async {
+    String conversationId, {
+    required bool priority,
+  }) async {
+    final generation = _cacheGeneration;
     final core = _core;
     final response = core is NativeCoreClient
-        ? await core.listMessagesInBackground(conversationId)
+        ? await core.listMessagesInBackground(
+            conversationId,
+            priority: priority,
+          )
         : core.listMessages(conversationId);
+    if (generation != _cacheGeneration) return const [];
+    _hasOlderMessages[conversationId] = response.data['has_more'] == true;
     return _parseMessages(conversationId, response);
+  }
+
+  @override
+  bool hasOlderMessages(String conversationId) =>
+      _hasOlderMessages[conversationId] ?? false;
+
+  @override
+  Future<List<ChatMessage>> loadOlderMessages(String conversationId) async {
+    final generation = _cacheGeneration;
+    final current = cachedMessages(conversationId) ?? const <ChatMessage>[];
+    if (current.isEmpty || !hasOlderMessages(conversationId)) return current;
+    final core = _core;
+    if (core is! NativeCoreClient) return current;
+    final response = await core.listMessagesInBackground(
+      conversationId,
+      priority: true,
+      beforeMs: current.first.sentAt.toUtc().millisecondsSinceEpoch,
+      beforeId: current.first.id,
+    );
+    _requireSuccess(response);
+    if (generation != _cacheGeneration) {
+      return cachedMessages(conversationId) ?? const <ChatMessage>[];
+    }
+    final records = response.data['messages'];
+    if (records is! List) {
+      throw const SecureMessagingException('invalid_native_response');
+    }
+    _hasOlderMessages[conversationId] = response.data['has_more'] == true;
+    final older = records.map(_parseMessage).toList(growable: false);
+    final merged = List<ChatMessage>.unmodifiable([...older, ...current]);
+    _messageListCache[conversationId] = merged;
+    for (final message in older) {
+      _messageCache['$conversationId:${message.id}'] = message;
+    }
+    return merged;
   }
 
   List<ChatMessage> _parseMessages(
@@ -327,6 +395,7 @@ ChatMessage _parseMessage(Object? value, {ChatMessage? cached}) {
   final isOutgoing = value['is_outgoing'] == true;
   final attachmentName = value['attachment_name'] as String?;
   final deliveryState = switch (_requiredString(value, 'delivery_state')) {
+    'queued' => DeliveryState.queued,
     'sent' => DeliveryState.sent,
     'delivered' => DeliveryState.delivered,
     'read' => DeliveryState.read,

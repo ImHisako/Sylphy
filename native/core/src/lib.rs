@@ -18,5 +18,5 @@ pub mod veilid_adapter;
 #[cfg(all(feature = "veilid", target_os = "android"))]
 mod android;
 
-pub const CORE_ABI_VERSION: u32 = 8;
+pub const CORE_ABI_VERSION: u32 = 10;
 pub const PROTOCOL_VERSION: u16 = 1;

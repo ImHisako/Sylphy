@@ -1,4 +1,7 @@
-use serde::{Deserialize, Serialize};
+#[cfg(feature = "veilid")]
+use serde::Deserialize;
+use serde::Serialize;
+#[cfg(feature = "veilid")]
 use sha2::{Digest, Sha256};
 
 use crate::error::{CoreError, CoreResult};
@@ -7,7 +10,7 @@ use crate::peer_identity::{MailboxAddress, PublishedIdentity};
 
 #[cfg(feature = "veilid")]
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex, OnceLock},
 };
@@ -17,6 +20,7 @@ use crate::envelope::MessageEnvelope;
 
 pub(crate) struct InboundPayload {
     pub(crate) payload: Vec<u8>,
+    #[cfg_attr(not(feature = "veilid"), allow(dead_code))]
     mailbox_subkey: Option<u32>,
 }
 
@@ -73,7 +77,7 @@ pub fn capability_status() -> VeilidCapabilityStatus {
 pub struct VeilidNode {
     api: veilid_core::VeilidAPI,
     inbound_envelopes: Arc<Mutex<VecDeque<InboundPayload>>>,
-    pending_mailbox_acks: Arc<Mutex<VecDeque<u32>>>,
+    seen_mailbox_slots: Arc<Mutex<HashMap<u32, Vec<u8>>>>,
     private_route: Option<veilid_core::RouteBlob>,
     mailbox_task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -83,7 +87,7 @@ impl VeilidNode {
     pub async fn start(storage_directory: &str) -> CoreResult<Self> {
         let config = mobile_config(storage_directory);
         let inbound_envelopes = Arc::new(Mutex::new(VecDeque::new()));
-        let pending_mailbox_acks = Arc::new(Mutex::new(VecDeque::new()));
+        let seen_mailbox_slots = Arc::new(Mutex::new(HashMap::new()));
         let callback_inbox = Arc::clone(&inbound_envelopes);
         let api = veilid_core::api_startup(
             Arc::new(move |update| {
@@ -102,7 +106,7 @@ impl VeilidNode {
         Ok(Self {
             api,
             inbound_envelopes,
-            pending_mailbox_acks,
+            seen_mailbox_slots,
             private_route: None,
             mailbox_task: None,
         })
@@ -112,7 +116,7 @@ impl VeilidNode {
         Self {
             api,
             inbound_envelopes: Arc::new(Mutex::new(VecDeque::new())),
-            pending_mailbox_acks: Arc::new(Mutex::new(VecDeque::new())),
+            seen_mailbox_slots: Arc::new(Mutex::new(HashMap::new())),
             private_route: None,
             mailbox_task: None,
         }
@@ -215,22 +219,19 @@ pub fn publish_identity(
 
     identity.validate()?;
     let bytes = serde_json::to_vec(identity).map_err(|_| CoreError::Internal)?;
-    let state = lock_runtime()?;
-    let node = state.node.as_ref().ok_or(CoreError::NetworkStartupFailed)?;
-    let routing = node
+    let (runtime, api) = network_executor()?;
+    let routing = api
         .routing_context()
         .map_err(|_| CoreError::NetworkStartupFailed)?;
     let descriptor = if let Some(encoded) = descriptor_json {
         let stored: DHTRecordDescriptor =
             serde_json::from_str(encoded).map_err(|_| CoreError::VerificationFailed)?;
-        let _ = state
-            .runtime
+        let _ = runtime
             .block_on(routing.open_dht_record(stored.key(), stored.owner_keypair()))
             .map_err(|_| CoreError::NetworkStartupFailed)?;
         stored
     } else {
-        state
-            .runtime
+        runtime
             .block_on(routing.create_dht_record(
                 CRYPTO_KIND_VLD0,
                 DHTSchema::dflt(1).map_err(|_| CoreError::Internal)?,
@@ -239,14 +240,13 @@ pub fn publish_identity(
             .map_err(|_| CoreError::NetworkStartupFailed)?
     };
     let key = descriptor.key();
-    state
-        .runtime
+    let written = runtime
         .block_on(routing.set_dht_value(key.clone(), 0, bytes, None))
-        .map_err(|_| CoreError::NetworkStartupFailed)?;
-    state
-        .runtime
+        .map_err(|_| CoreError::NetworkStartupFailed);
+    let closed = runtime
         .block_on(routing.close_dht_record(key.clone()))
-        .map_err(|_| CoreError::NetworkStartupFailed)?;
+        .map_err(|_| CoreError::NetworkStartupFailed);
+    written.and(closed)?;
     let persisted = serde_json::to_string(&descriptor).map_err(|_| CoreError::Internal)?;
     Ok((format!("sylphy:{key}"), persisted))
 }
@@ -267,25 +267,39 @@ pub fn resolve_identity(code: &str) -> CoreResult<PublishedIdentity> {
 
     let normalized = code.trim().strip_prefix("sylphy:").unwrap_or(code.trim());
     let key = RecordKey::from_str(normalized).map_err(|_| CoreError::InvalidInput)?;
-    let state = lock_runtime()?;
-    let node = state.node.as_ref().ok_or(CoreError::NetworkStartupFailed)?;
-    let routing = node
+    let (runtime, api) = network_executor()?;
+    let routing = api
         .routing_context()
         .map_err(|_| CoreError::NetworkStartupFailed)?;
-    let _ = state
-        .runtime
+    let _ = runtime
         .block_on(routing.open_dht_record(key.clone(), None))
         .map_err(|_| CoreError::NetworkStartupFailed)?;
-    let value = state
-        .runtime
+    let value = runtime
         .block_on(routing.get_dht_value(key.clone(), 0, true))
-        .map_err(|_| CoreError::NetworkStartupFailed)?
-        .ok_or(CoreError::VerificationFailed)?;
-    let _ = state.runtime.block_on(routing.close_dht_record(key));
+        .map_err(|_| CoreError::NetworkStartupFailed)
+        .and_then(|value| value.ok_or(CoreError::VerificationFailed));
+    let closed = runtime
+        .block_on(routing.close_dht_record(key))
+        .map_err(|_| CoreError::NetworkStartupFailed);
+    let value = value.and_then(|value| closed.map(|()| value))?;
     let identity: PublishedIdentity =
         serde_json::from_slice(value.data()).map_err(|_| CoreError::VerificationFailed)?;
     identity.validate()?;
     Ok(identity)
+}
+
+#[cfg(feature = "veilid")]
+pub fn resolve_owned_identity(descriptor_json: &str) -> CoreResult<PublishedIdentity> {
+    use veilid_core::DHTRecordDescriptor;
+
+    let descriptor: DHTRecordDescriptor =
+        serde_json::from_str(descriptor_json).map_err(|_| CoreError::VerificationFailed)?;
+    resolve_identity(&descriptor.key().to_string())
+}
+
+#[cfg(not(feature = "veilid"))]
+pub fn resolve_owned_identity(_descriptor_json: &str) -> CoreResult<PublishedIdentity> {
+    Err(CoreError::FeatureUnavailable)
 }
 
 #[cfg(not(feature = "veilid"))]
@@ -352,7 +366,7 @@ pub fn ensure_mailbox(descriptor_json: Option<&str>) -> CoreResult<(MailboxAddre
     node.mailbox_task = Some(runtime.spawn(poll_mailbox(
         node.api.clone(),
         Arc::clone(&node.inbound_envelopes),
-        Arc::clone(&node.pending_mailbox_acks),
+        Arc::clone(&node.seen_mailbox_slots),
         mailbox,
     )));
     Ok((address, persisted))
@@ -369,57 +383,69 @@ pub fn store_mailbox_payload(address: &MailboxAddress, payload: &[u8]) -> CoreRe
     use veilid_core::{AllowOffline, KeyPair, RecordKey, SetDHTValueOptions};
 
     address.validate()?;
-    if payload.is_empty() || payload.len() > MAX_INBOUND_ENVELOPE_BYTES {
+    if payload.is_empty() || payload.len() > MAX_INBOUND_ENVELOPE_BYTES / 2 {
+        return Err(CoreError::LimitExceeded);
+    }
+    let frame = serde_json::to_vec(&MailboxFrame {
+        version: 1,
+        created_at_ms: unix_time_ms()?,
+        payload: payload.to_vec(),
+    })
+    .map_err(|_| CoreError::Internal)?;
+    if frame.len() > MAX_INBOUND_ENVELOPE_BYTES {
         return Err(CoreError::LimitExceeded);
     }
     let key = RecordKey::from_str(&address.record_key).map_err(|_| CoreError::InvalidInput)?;
     let writer: KeyPair =
         serde_json::from_str(&address.writer_keypair_json).map_err(|_| CoreError::InvalidInput)?;
-    let state = lock_runtime()?;
-    let node = state.node.as_ref().ok_or(CoreError::NetworkStartupFailed)?;
-    let routing = node
+    let (runtime, api) = network_executor()?;
+    let routing = api
         .routing_context()
         .map_err(|_| CoreError::NetworkStartupFailed)?;
-    let _ = state
-        .runtime
+    let _ = runtime
         .block_on(routing.open_dht_record(key.clone(), Some(writer.clone())))
         .map_err(|_| CoreError::NetworkStartupFailed)?;
-    let digest = Sha256::digest(payload);
-    let start = u32::from(digest[0]) % MAILBOX_SLOT_COUNT;
-    let mut selected = None;
-    for offset in 0..MAILBOX_SLOT_COUNT {
-        let subkey = ((start + offset) % MAILBOX_SLOT_COUNT) + 1;
-        let current = state
-            .runtime
-            .block_on(routing.get_dht_value(key.clone(), subkey, true))
-            .map_err(|_| CoreError::NetworkStartupFailed)?;
-        if current
-            .as_ref()
-            .is_none_or(|value| value.data() == EMPTY_MAILBOX_SLOT)
-        {
-            selected = Some(subkey);
-            break;
+    let result = (|| {
+        let digest = Sha256::digest(&frame);
+        let start = u32::from(digest[0]) % MAILBOX_SLOT_COUNT;
+        for offset in 0..MAILBOX_SLOT_COUNT {
+            let subkey = ((start + offset) % MAILBOX_SLOT_COUNT) + 1;
+            let current = runtime
+                .block_on(routing.get_dht_value(key.clone(), subkey, true))
+                .map_err(|_| CoreError::NetworkStartupFailed)?;
+            let available = current.as_ref().is_none_or(|value| {
+                value.data() == EMPTY_MAILBOX_SLOT || mailbox_frame_expired(value.data())
+            });
+            if !available {
+                continue;
+            }
+            runtime
+                .block_on(routing.set_dht_value(
+                    key.clone(),
+                    subkey,
+                    frame.clone(),
+                    Some(SetDHTValueOptions {
+                        writer: Some(writer.clone()),
+                        allow_offline: Some(AllowOffline(true)),
+                    }),
+                ))
+                .map_err(|_| CoreError::NetworkAttachFailed)?;
+            let confirmed = runtime
+                .block_on(routing.get_dht_value(key.clone(), subkey, true))
+                .map_err(|_| CoreError::NetworkStartupFailed)?;
+            if confirmed
+                .as_ref()
+                .is_some_and(|value| value.data() == frame)
+            {
+                return Ok(());
+            }
         }
-    }
-    // A linked account keeps device-sync records as a rolling journal instead
-    // of acknowledging them immediately. Once all 31 slots are occupied, a
-    // new payload replaces its deterministic slot so recent activity remains
-    // available to a device that reconnects later.
-    let selected = selected.unwrap_or(start + 1);
-    let _ = state
-        .runtime
-        .block_on(routing.set_dht_value(
-            key.clone(),
-            selected,
-            payload.to_vec(),
-            Some(SetDHTValueOptions {
-                writer: Some(writer),
-                allow_offline: Some(AllowOffline(true)),
-            }),
-        ))
-        .map_err(|_| CoreError::NetworkAttachFailed)?;
-    let _ = state.runtime.block_on(routing.close_dht_record(key));
-    Ok(())
+        Err(CoreError::LimitExceeded)
+    })();
+    let closed = runtime
+        .block_on(routing.close_dht_record(key))
+        .map_err(|_| CoreError::NetworkStartupFailed);
+    result.and(closed)
 }
 
 #[cfg(not(feature = "veilid"))]
@@ -431,11 +457,11 @@ pub fn store_mailbox_payload(_address: &MailboxAddress, _payload: &[u8]) -> Core
 async fn poll_mailbox(
     api: veilid_core::VeilidAPI,
     inbox: Arc<Mutex<VecDeque<InboundPayload>>>,
-    pending_acks: Arc<Mutex<VecDeque<u32>>>,
+    seen_slots: Arc<Mutex<HashMap<u32, Vec<u8>>>>,
     mailbox: PersistedMailbox,
 ) {
     loop {
-        let _ = poll_mailbox_once(&api, &inbox, &pending_acks, &mailbox).await;
+        let _ = poll_mailbox_once(&api, &inbox, &seen_slots, &mailbox).await;
         tokio::time::sleep(std::time::Duration::from_secs(
             MAILBOX_POLL_INTERVAL_SECONDS,
         ))
@@ -447,7 +473,7 @@ async fn poll_mailbox(
 async fn poll_mailbox_once(
     api: &veilid_core::VeilidAPI,
     inbox: &Mutex<VecDeque<InboundPayload>>,
-    pending_acks: &Mutex<VecDeque<u32>>,
+    seen_slots: &Mutex<HashMap<u32, Vec<u8>>>,
     mailbox: &PersistedMailbox,
 ) -> CoreResult<()> {
     use veilid_core::{AllowOffline, SetDHTValueOptions};
@@ -461,32 +487,6 @@ async fn poll_mailbox_once(
         .await
         .map_err(|_| CoreError::NetworkStartupFailed)?;
     let result = async {
-        let acknowledgements = pending_acks
-            .lock()
-            .map_err(|_| CoreError::Internal)?
-            .drain(..)
-            .collect::<Vec<_>>();
-        for (index, subkey) in acknowledgements.iter().copied().enumerate() {
-            if routing
-                .set_dht_value(
-                    key.clone(),
-                    subkey,
-                    EMPTY_MAILBOX_SLOT.to_vec(),
-                    Some(SetDHTValueOptions {
-                        writer: Some(mailbox.writer.clone()),
-                        allow_offline: Some(AllowOffline(true)),
-                    }),
-                )
-                .await
-                .is_err()
-            {
-                pending_acks
-                    .lock()
-                    .map_err(|_| CoreError::Internal)?
-                    .extend(acknowledgements[index..].iter().copied());
-                return Err(CoreError::NetworkAttachFailed);
-            }
-        }
         for subkey in 1..=MAILBOX_SLOT_COUNT {
             let value = routing
                 .get_dht_value(key.clone(), subkey, true)
@@ -494,15 +494,40 @@ async fn poll_mailbox_once(
                 .map_err(|_| CoreError::NetworkStartupFailed)?;
             let Some(value) = value else { continue };
             if value.data() == EMPTY_MAILBOX_SLOT || value.data().is_empty() {
+                seen_slots
+                    .lock()
+                    .map_err(|_| CoreError::Internal)?
+                    .remove(&subkey);
                 continue;
             }
-            let is_valid_size = value.data().len() <= MAX_INBOUND_ENVELOPE_BYTES;
-            if is_valid_size && !enqueue_inbound_envelope(inbox, value.data(), Some(subkey)) {
+            let digest = Sha256::digest(value.data()).to_vec();
+            if seen_slots
+                .lock()
+                .map_err(|_| CoreError::Internal)?
+                .get(&subkey)
+                .is_some_and(|known| known == &digest)
+            {
+                continue;
+            }
+            let frame = serde_json::from_slice::<MailboxFrame>(value.data()).ok();
+            let is_valid = frame.as_ref().is_some_and(|frame| {
+                frame.version == 1
+                    && !frame.payload.is_empty()
+                    && frame.payload.len() <= MAX_INBOUND_ENVELOPE_BYTES / 2
+                    && !mailbox_frame_expired(value.data())
+            });
+            if is_valid
+                && !enqueue_inbound_envelope(
+                    inbox,
+                    &frame.as_ref().expect("validated frame").payload,
+                    Some(subkey),
+                )
+            {
                 // Preserve the slot when the bounded in-memory queue is full so it
                 // can be retried on the next pass instead of dropping a message.
                 continue;
             }
-            if !is_valid_size {
+            if !is_valid {
                 routing
                     .set_dht_value(
                         key.clone(),
@@ -515,6 +540,15 @@ async fn poll_mailbox_once(
                     )
                     .await
                     .map_err(|_| CoreError::NetworkAttachFailed)?;
+                seen_slots
+                    .lock()
+                    .map_err(|_| CoreError::Internal)?
+                    .remove(&subkey);
+            } else {
+                seen_slots
+                    .lock()
+                    .map_err(|_| CoreError::Internal)?
+                    .insert(subkey, digest);
             }
         }
         Ok(())
@@ -533,13 +567,11 @@ pub fn publish_attachment_blob(data: &[u8]) -> CoreResult<(String, u16)> {
     }
     let chunk_count = data.len().div_ceil(ATTACHMENT_CHUNK_BYTES);
     let chunk_count = u16::try_from(chunk_count).map_err(|_| CoreError::LimitExceeded)?;
-    let state = lock_runtime()?;
-    let node = state.node.as_ref().ok_or(CoreError::NetworkStartupFailed)?;
-    let routing = node
+    let (runtime, api) = network_executor()?;
+    let routing = api
         .routing_context()
         .map_err(|_| CoreError::NetworkStartupFailed)?;
-    let descriptor = state
-        .runtime
+    let descriptor = runtime
         .block_on(routing.create_dht_record(
             CRYPTO_KIND_VLD0,
             DHTSchema::dflt(chunk_count).map_err(|_| CoreError::LimitExceeded)?,
@@ -547,21 +579,49 @@ pub fn publish_attachment_blob(data: &[u8]) -> CoreResult<(String, u16)> {
         ))
         .map_err(|_| CoreError::NetworkStartupFailed)?;
     let key = descriptor.key();
-    for (index, chunk) in data.chunks(ATTACHMENT_CHUNK_BYTES).enumerate() {
-        state
-            .runtime
-            .block_on(routing.set_dht_value(key.clone(), index as u32, chunk.to_vec(), None))
-            .map_err(|_| CoreError::NetworkAttachFailed)?;
-    }
-    state
-        .runtime
+    let published = (|| {
+        for (index, chunk) in data.chunks(ATTACHMENT_CHUNK_BYTES).enumerate() {
+            runtime
+                .block_on(routing.set_dht_value(key.clone(), index as u32, chunk.to_vec(), None))
+                .map_err(|_| CoreError::NetworkAttachFailed)?;
+        }
+        Ok(())
+    })();
+    let closed = runtime
         .block_on(routing.close_dht_record(key.clone()))
-        .map_err(|_| CoreError::NetworkStartupFailed)?;
+        .map_err(|_| CoreError::NetworkStartupFailed);
+    if let Err(error) = published.and(closed) {
+        let _ = runtime.block_on(routing.delete_dht_record(key.clone()));
+        return Err(error);
+    }
     Ok((key.to_string(), chunk_count))
 }
 
 #[cfg(not(feature = "veilid"))]
 pub fn publish_attachment_blob(_data: &[u8]) -> CoreResult<(String, u16)> {
+    Err(CoreError::FeatureUnavailable)
+}
+
+#[cfg(feature = "veilid")]
+pub fn delete_attachment_blob(record_key: &str, chunk_count: u16) -> CoreResult<()> {
+    use std::str::FromStr as _;
+    use veilid_core::RecordKey;
+
+    if chunk_count == 0 || chunk_count > MAX_ATTACHMENT_CHUNKS {
+        return Err(CoreError::InvalidInput);
+    }
+    let key = RecordKey::from_str(record_key).map_err(|_| CoreError::InvalidInput)?;
+    let (runtime, api) = network_executor()?;
+    let routing = api
+        .routing_context()
+        .map_err(|_| CoreError::NetworkStartupFailed)?;
+    runtime
+        .block_on(routing.delete_dht_record(key))
+        .map_err(|_| CoreError::NetworkAttachFailed)
+}
+
+#[cfg(not(feature = "veilid"))]
+pub fn delete_attachment_blob(_record_key: &str, _chunk_count: u16) -> CoreResult<()> {
     Err(CoreError::FeatureUnavailable)
 }
 
@@ -574,29 +634,31 @@ pub fn fetch_attachment_blob(record_key: &str, chunk_count: u16) -> CoreResult<V
         return Err(CoreError::InvalidInput);
     }
     let key = RecordKey::from_str(record_key).map_err(|_| CoreError::InvalidInput)?;
-    let state = lock_runtime()?;
-    let node = state.node.as_ref().ok_or(CoreError::NetworkStartupFailed)?;
-    let routing = node
+    let (runtime, api) = network_executor()?;
+    let routing = api
         .routing_context()
         .map_err(|_| CoreError::NetworkStartupFailed)?;
-    let _ = state
-        .runtime
+    let _ = runtime
         .block_on(routing.open_dht_record(key.clone(), None))
         .map_err(|_| CoreError::NetworkStartupFailed)?;
-    let mut data = Vec::new();
-    for subkey in 0..u32::from(chunk_count) {
-        let value = state
-            .runtime
-            .block_on(routing.get_dht_value(key.clone(), subkey, true))
-            .map_err(|_| CoreError::NetworkStartupFailed)?
-            .ok_or(CoreError::VerificationFailed)?;
-        data.extend_from_slice(value.data());
-        if data.len() > MAX_ATTACHMENT_BLOB_BYTES {
-            return Err(CoreError::LimitExceeded);
+    let result = (|| {
+        let mut data = Vec::new();
+        for subkey in 0..u32::from(chunk_count) {
+            let value = runtime
+                .block_on(routing.get_dht_value(key.clone(), subkey, true))
+                .map_err(|_| CoreError::NetworkStartupFailed)?
+                .ok_or(CoreError::VerificationFailed)?;
+            data.extend_from_slice(value.data());
+            if data.len() > MAX_ATTACHMENT_BLOB_BYTES {
+                return Err(CoreError::LimitExceeded);
+            }
         }
-    }
-    let _ = state.runtime.block_on(routing.close_dht_record(key));
-    Ok(data)
+        Ok(data)
+    })();
+    let closed = runtime
+        .block_on(routing.close_dht_record(key))
+        .map_err(|_| CoreError::NetworkStartupFailed);
+    result.and_then(|data| closed.map(|()| data))
 }
 
 #[cfg(not(feature = "veilid"))]
@@ -609,19 +671,17 @@ pub fn send_payload(route_blob: &[u8], payload: Vec<u8>) -> CoreResult<()> {
     if route_blob.is_empty() || payload.is_empty() || payload.len() > MAX_INBOUND_ENVELOPE_BYTES {
         return Err(CoreError::InvalidInput);
     }
-    let state = lock_runtime()?;
-    let node = state.node.as_ref().ok_or(CoreError::NetworkStartupFailed)?;
-    let route_id = node
-        .api
+    let (runtime, api) = network_executor()?;
+    let route_id = api
         .import_remote_private_route(route_blob.to_vec())
         .map_err(|_| CoreError::NetworkAttachFailed)?;
-    let result = state.runtime.block_on(async {
-        let routing = node.routing_context()?.with_default_safety()?;
+    let result = runtime.block_on(async {
+        let routing = api.routing_context()?.with_default_safety()?;
         routing
             .app_message(veilid_core::Target::RouteId(route_id.clone()), payload)
             .await
     });
-    let _ = node.api.release_private_route(route_id);
+    let _ = api.release_private_route(route_id);
     result.map_err(|_| CoreError::NetworkAttachFailed)
 }
 
@@ -630,21 +690,16 @@ pub fn send_payload(_route_blob: &[u8], _payload: Vec<u8>) -> CoreResult<()> {
     Err(CoreError::FeatureUnavailable)
 }
 
-/// Uses the low-latency private route first and falls back to the durable DHT
-/// mailbox only when the peer cannot be reached directly. Older code wrote all
-/// 31 mailbox slots before attempting the route, adding seconds to every send.
+/// Remote mailbox write capabilities are deliberately not accepted here: a
+/// capability embedded in a public profile lets any contact overwrite every
+/// recipient slot. Offline delivery will be re-enabled only with peer-specific
+/// capabilities; the current path fails closed when the private route is down.
 pub fn deliver_payload(
     route_blob: &[u8],
-    mailbox: Option<&MailboxAddress>,
+    _mailbox: Option<&MailboxAddress>,
     payload: Vec<u8>,
 ) -> CoreResult<()> {
-    match send_payload(route_blob, payload.clone()) {
-        Ok(()) => Ok(()),
-        Err(direct_error) => match mailbox {
-            Some(address) => store_mailbox_payload(address, &payload).map_err(|_| direct_error),
-            None => Err(direct_error),
-        },
-    }
+    send_payload(route_blob, payload)
 }
 
 #[cfg(feature = "veilid")]
@@ -665,18 +720,9 @@ pub(crate) fn take_inbound_payloads() -> CoreResult<Vec<InboundPayload>> {
 
 #[cfg(feature = "veilid")]
 pub(crate) fn acknowledge_inbound_payload(payload: InboundPayload) -> CoreResult<()> {
-    let Some(subkey) = payload.mailbox_subkey else {
-        return Ok(());
-    };
-    let state = lock_runtime()?;
-    let node = state.node.as_ref().ok_or(CoreError::NetworkStartupFailed)?;
-    let mut pending = node
-        .pending_mailbox_acks
-        .lock()
-        .map_err(|_| CoreError::Internal)?;
-    if !pending.contains(&subkey) {
-        pending.push_back(subkey);
-    }
+    // Mailbox slots form a short-lived journal shared by every linked device.
+    // A consumer must not erase an entry before the other devices have seen it.
+    let _ = payload.mailbox_subkey;
     Ok(())
 }
 
@@ -762,10 +808,16 @@ const MAILBOX_SLOT_COUNT: u32 = 31;
 const MAILBOX_POLL_INTERVAL_SECONDS: u64 = 10;
 
 #[cfg(feature = "veilid")]
+const MAILBOX_RETENTION_MS: u64 = 24 * 60 * 60 * 1000;
+
+#[cfg(feature = "veilid")]
 const EMPTY_MAILBOX_SLOT: &[u8] = b"[]";
 
+#[cfg(feature = "veilid")]
 const ATTACHMENT_CHUNK_BYTES: usize = 24 * 1024;
+#[cfg(feature = "veilid")]
 const MAX_ATTACHMENT_CHUNKS: u16 = 32;
+#[cfg(feature = "veilid")]
 const MAX_ATTACHMENT_BLOB_BYTES: usize = ATTACHMENT_CHUNK_BYTES * MAX_ATTACHMENT_CHUNKS as usize;
 
 #[cfg(feature = "veilid")]
@@ -773,6 +825,33 @@ const MAX_ATTACHMENT_BLOB_BYTES: usize = ATTACHMENT_CHUNK_BYTES * MAX_ATTACHMENT
 struct PersistedMailbox {
     descriptor: veilid_core::DHTRecordDescriptor,
     writer: veilid_core::KeyPair,
+}
+
+#[cfg(feature = "veilid")]
+#[derive(Debug, Deserialize, Serialize)]
+struct MailboxFrame {
+    version: u8,
+    created_at_ms: u64,
+    payload: Vec<u8>,
+}
+
+#[cfg(feature = "veilid")]
+fn unix_time_ms() -> CoreResult<u64> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| CoreError::Internal)?;
+    u64::try_from(elapsed.as_millis()).map_err(|_| CoreError::Internal)
+}
+
+#[cfg(feature = "veilid")]
+fn mailbox_frame_expired(value: &[u8]) -> bool {
+    let Ok(frame) = serde_json::from_slice::<MailboxFrame>(value) else {
+        return true;
+    };
+    frame.version != 1
+        || frame.created_at_ms.saturating_add(MAILBOX_RETENTION_MS)
+            <= unix_time_ms().unwrap_or(u64::MAX)
 }
 
 #[cfg(feature = "veilid")]
@@ -833,6 +912,19 @@ fn runtime() -> CoreResult<&'static Mutex<VeilidRuntime>> {
 #[cfg(feature = "veilid")]
 fn lock_runtime() -> CoreResult<std::sync::MutexGuard<'static, VeilidRuntime>> {
     runtime()?.lock().map_err(|_| CoreError::Internal)
+}
+
+#[cfg(feature = "veilid")]
+fn network_executor() -> CoreResult<(tokio::runtime::Handle, veilid_core::VeilidAPI)> {
+    let state = lock_runtime()?;
+    let handle = state.runtime.handle().clone();
+    let api = state
+        .node
+        .as_ref()
+        .ok_or(CoreError::NetworkStartupFailed)?
+        .api
+        .clone();
+    Ok((handle, api))
 }
 
 #[cfg(feature = "veilid")]
@@ -935,7 +1027,7 @@ mod feature_tests {
         );
         assert!(config.table_store.directory.ends_with("table_store"));
         assert!(config.block_store.directory.ends_with("block_store"));
-        assert!(config.network.protocol.wss.url.is_none());
+        assert!(config.network.protocol.ws.url.is_none());
     }
 
     #[test]

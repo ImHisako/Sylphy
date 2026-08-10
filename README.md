@@ -17,18 +17,19 @@ server centrale che custodisca account, contatti e conversazioni.
 
 - identità Sylphy firmata, condivisibile tramite ID o invito `sylphy:`;
 - contatti peer-to-peer con nome, foto profilo e fingerprint verificabile;
-- messaggi end-to-end encrypted, consegna diretta quando il destinatario è
-  raggiungibile e mailbox DHT cifrata per la consegna differita;
-- ricezione persistente: un elemento della mailbox viene confermato solo dopo il
-  salvataggio nel vault locale;
+- messaggi end-to-end encrypted e consegna diretta quando il destinatario è
+  raggiungibile, senza distribuire ai contatti capability di scrittura condivise;
+- mailbox DHT cifrata riservata alla sincronizzazione tra dispositivi dello
+  stesso account; ogni elemento viene confermato solo dopo il salvataggio locale;
 - servizio foreground Android e notifiche senza anteprima del testo quando
   l'interfaccia dell'app è chiusa;
 - allegati cifrati, pulsante di download e anteprima delle immagini direttamente
   nella conversazione;
 - collegamento cifrato tra computer e telefono tramite file account protetto da
-  password, con identità, contatti, cronologia e sessioni Double Ratchet;
-- sincronizzazione multi-dispositivo dei nuovi contatti e messaggi attraverso
-  un journal cifrato conservato nella mailbox Veilid condivisa;
+  password, con identità, contatti e cronologia; ogni dispositivo genera una
+  propria identità e proprie sessioni Signal per evitare la clonazione del ratchet;
+- sincronizzazione multi-dispositivo dei nuovi contatti e messaggi tramite
+  consegna diretta e journal cifrato Veilid come fallback;
 - UI Flutter adattiva per telefono e desktop;
 - core Rust fail-closed: in assenza dell'ABI nativa l'app non simula contatti,
   messaggi o stato di rete.
@@ -47,11 +48,12 @@ Per Sylphy fornisce tre primitive principali:
    conosce soltanto quello successivo. La documentazione ufficiale descrive il
    meccanismo come simile all'onion routing.
 2. **DHT.** Record distribuiti, subkey indirizzabili e scrittori autorizzati
-   consentono di pubblicare identità firmate, mailbox e chunk cifrati senza un
-   database centrale. I record sono eventualmente consistenti.
+   consentono di pubblicare identità firmate, journal multi-dispositivo e chunk
+   cifrati senza un database centrale. I record sono eventualmente consistenti.
 3. **Messaggi applicativi.** Quando un peer è raggiungibile, Sylphy tenta anche
-   una consegna diretta tramite `AppMessage`; la mailbox resta il percorso
-   durevole per i destinatari offline.
+   una consegna diretta tramite `AppMessage`. La consegna offline tra account
+   distinti resta disabilitata finché non esisteranno mailbox con capability
+   specifiche per singolo peer.
 
 Approfondimenti ufficiali:
 [private routing](https://veilid.com/how-it-works/private-routing/),
@@ -68,7 +70,7 @@ vantaggi architetturali concreti:
 | --- | --- | --- |
 | Integrazione | `veilid-core` è una libreria incorporata nel processo dell'app | normalmente occorre gestire un client/daemon Tor e il ciclo di vita di un Onion Service |
 | Primitive applicative | private routing, RPC, DHT e messaggi peer-to-peer fanno parte dello stesso framework | Tor fornisce il trasporto anonimo e l'endpoint onion; discovery, mailbox offline e modello dati restano a carico dell'app |
-| Consegna offline | mailbox cifrata implementata su record e subkey DHT Veilid | richiede un servizio sempre raggiungibile o uno storage/protocollo aggiuntivo |
+| Consegna offline | primitive DHT disponibili; Sylphy le usa oggi soltanto tra dispositivi dello stesso account | richiede un servizio sempre raggiungibile o uno storage/protocollo aggiuntivo |
 | Operatività | ogni app è anche un nodo; non serve amministrare un backend onion dedicato | un Onion Service deve pubblicare descrittori e mantenere circuiti verso gli introduction point |
 | Percorso predefinito | la route compilata Veilid usa attualmente tre hop; l'app può richiederne di più | una connessione Onion Service completa usa normalmente sei relay, tre per lato |
 | Uso mobile | integrazione nativa e percorso più corto possono ridurre overhead e latenza; Sylphy sposta le operazioni native fuori dall'isolate UI | circuiti più lunghi e un componente Tor separato possono avere un costo maggiore di avvio, memoria e rete |
@@ -95,7 +97,7 @@ flowchart TB
         UI --> DS --> BG
     end
 
-    BG -->|"JSON FFI · ABI 8"| FFI["Boundary C/Rust"]
+    BG -->|"JSON FFI · ABI 10"| FFI["Boundary C/Rust"]
 
     subgraph Core["Core nativo Rust"]
         FFI --> ID["Identità e vault"]
@@ -108,7 +110,7 @@ flowchart TB
     subgraph Network["Rete Veilid"]
         VA --> ROUTE["Private route e AppMessage"]
         VA --> DHTID["DHT: identità e profilo firmati"]
-        VA --> MAIL["DHT: mailbox\npacchetti cifrati opachi"]
+        VA --> MAIL["DHT: journal account\nsync multi-dispositivo cifrato"]
         VA --> FILES["DHT: chunk allegati cifrati"]
     end
 
@@ -125,12 +127,14 @@ flowchart TB
 3. `libsignal` aggiorna la sessione Double Ratchet e produce un ciphertext
    Signal/PreKey; l'envelope esterno applica anche il bootstrap ibrido X25519 +
    ML-KEM-768 e l'autenticazione Sylphy.
-4. Viene tentata prima la private route; la mailbox DHT è il fallback durevole.
+4. Viene tentata la private route; se il peer non è raggiungibile l'invio fallisce
+   in modo esplicito e può essere ritentato senza usare capability condivise.
 5. Sessione e copia locale vengono persistite prima della conferma alla UI.
 
 ### Ricezione e consegna offline
 
-1. Il nodo controlla periodicamente gli `AppMessage` e i 31 slot della mailbox.
+1. Il nodo controlla periodicamente gli `AppMessage` e il journal cifrato dei
+   dispositivi appartenenti allo stesso account.
 2. Il core verifica firma, destinatario, limiti e chiavi prima della decifratura.
 3. Il messaggio viene salvato nel vault locale.
 4. Solo dopo la persistenza lo slot DHT viene svuotato; un arresto intermedio non
@@ -150,12 +154,12 @@ flowchart TB
 | Dati locali | identità Argon2id; sessioni per contatto e log incrementale cifrati XChaCha20-Poly1305 |
 | Allegati | chiave casuale per file, XChaCha20-Poly1305 e chunk DHT cifrati; limite applicativo 700 KiB |
 | Metadati pubblici | identità, prekey, route e profilo firmati; mai la cronologia in chiaro |
-| Trasporto | private routing Veilid, mailbox DHT e consegna diretta best-effort |
+| Trasporto | private routing Veilid diretto; journal DHT per i soli dispositivi dello stesso account |
 
 I nuovi bundle pubblicano prekey EC e Kyber di `signalapp/libsignal`, legate
 all'identità Sylphy tramite firma Ed25519. Due client aggiornati usano sempre il
-ciphertext Signal; un contatto precedente senza il nuovo bundle resta sul
-formato ibrido di compatibilità finché non ripubblica il proprio ID.
+ciphertext Signal; un contatto precedente senza il nuovo bundle viene rifiutato
+esplicitamente e deve ripubblicare il proprio ID.
 
 To-Do >>
 
@@ -232,10 +236,11 @@ cargo test --manifest-path native/core/Cargo.toml --features veilid,signal-ratch
 ## Limiti noti
 
 - nessun audit indipendente del protocollo o dell'implementazione;
-- il percorso Double Ratchet non è ancora usato dai messaggi reali;
 - gli allegati sono limitati a 700 KiB;
-- la mailbox ha capacità finita e consistenza eventuale, quindi non equivale a
-  una coda centralizzata con disponibilità garantita;
+- la consegna offline tra account distinti è disabilitata: pubblicare la stessa
+  chiave di scrittura mailbox a tutti i contatti permetterebbe a un contatto di
+  saturare o alterare la coda; serve una capability distinta per peer;
+- il journal multi-dispositivo ha capacità finita e consistenza eventuale;
 - le notifiche persistenti in background sono implementate specificamente per
   Android; le politiche energetiche del produttore possono comunque sospendere
   il processo;

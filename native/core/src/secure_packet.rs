@@ -16,7 +16,7 @@ use crate::{
     envelope::{self, EnvelopeMetadata, EnvelopeType, MessageEnvelope},
     error::{CoreError, CoreResult},
     hybrid, identity,
-    peer_identity::{PublicProfile, PublishedIdentity},
+    peer_identity::{PublicProfile, PublishedDevice, PublishedIdentity},
     ratchet_adapter,
 };
 
@@ -40,10 +40,63 @@ pub struct OpenedPacket {
     pub sender: PublishedIdentity,
     pub plaintext: String,
     pub sent_at_ms: u64,
+    pending_ratchet: Option<ratchet_adapter::PendingDecrypt>,
+}
+
+impl OpenedPacket {
+    pub fn commit_ratchet(&mut self) -> CoreResult<()> {
+        self.pending_ratchet
+            .take()
+            .ok_or(CoreError::Internal)?
+            .commit()
+    }
+}
+
+pub struct InspectedPacket {
+    pub message_id: String,
+    pub sender: PublishedIdentity,
+    pub sent_at_ms: u64,
+}
+
+pub struct SealedDelivery {
+    pub payload: Vec<u8>,
+    pub route_blob: Vec<u8>,
+}
+
+pub fn seal_for_all(
+    recipient: &PublishedIdentity,
+    plaintext: &str,
+) -> CoreResult<(Vec<SealedDelivery>, String)> {
+    recipient.validate()?;
+    let mut message_id = vec![0_u8; 16];
+    OsRng.fill_bytes(&mut message_id);
+    let id = compact_hex(&message_id);
+    let mut deliveries = Vec::new();
+    for device in recipient.delivery_devices()? {
+        let (payload, _) = seal_for_device(&device, plaintext, message_id.clone())?;
+        deliveries.push(SealedDelivery {
+            payload,
+            route_blob: device.route_blob,
+        });
+    }
+    Ok((deliveries, id))
 }
 
 pub fn seal_for(recipient: &PublishedIdentity, plaintext: &str) -> CoreResult<(Vec<u8>, String)> {
-    recipient.validate()?;
+    let (mut deliveries, id) = seal_for_all(recipient, plaintext)?;
+    let first = deliveries
+        .drain(..)
+        .next()
+        .ok_or(CoreError::VerificationFailed)?;
+    Ok((first.payload, id))
+}
+
+fn seal_for_device(
+    recipient: &PublishedDevice,
+    plaintext: &str,
+    message_id: Vec<u8>,
+) -> CoreResult<(Vec<u8>, String)> {
+    recipient.bundle.validate()?;
     let plaintext = plaintext.trim();
     if plaintext.is_empty() || plaintext.len() > MAX_MESSAGE_BYTES {
         return Err(CoreError::LimitExceeded);
@@ -52,7 +105,10 @@ pub fn seal_for(recipient: &PublishedIdentity, plaintext: &str) -> CoreResult<(V
     let signing_key = local.signing_key()?;
     let local_bundle = local.public_bundle(ratchet_adapter::public_pre_key_bundle()?)?;
     let route_blob = crate::veilid_adapter::local_route_blob()?;
-    let mailbox = crate::peer_identity::current_public_mailbox();
+    // Never disclose the owner/member write capability in a public identity.
+    // Until a peer-specific capability exchange exists, delivery is direct
+    // and fail-closed instead of sharing a mailbox key with every contact.
+    let mailbox = None;
     let sender = PublishedIdentity::new(
         &signing_key,
         local_bundle.clone(),
@@ -78,8 +134,6 @@ pub fn seal_for(recipient: &PublishedIdentity, plaintext: &str) -> CoreResult<(V
         EncapsulationKey::new(&encoded_key).map_err(|_| CoreError::VerificationFailed)?;
     let (pq_ciphertext, pq_shared) = remote_pq.encapsulate();
 
-    let mut message_id = vec![0_u8; 16];
-    OsRng.fill_bytes(&mut message_id);
     let transcript = transcript_hash(
         &sender.bundle.identity_ed25519,
         &recipient.bundle.identity_ed25519,
@@ -92,25 +146,17 @@ pub fn seal_for(recipient: &PublishedIdentity, plaintext: &str) -> CoreResult<(V
         pq_shared.as_slice(),
         transcript.as_slice(),
     )?;
-    let signal_pre_key = recipient.bundle.signal_pre_key.as_ref();
-    let (protected_plaintext, ratchet_header) = if let Some(signal_pre_key) = signal_pre_key {
-        (
-            ratchet_adapter::encrypt_message(
-                &recipient.bundle.identity_ed25519,
-                signal_pre_key,
-                plaintext.as_bytes(),
-            )?,
-            b"signal-libsignal-v1".to_vec(),
-        )
-    } else {
-        // Migration path for contacts that have not updated their signed
-        // capability bundle yet. Receiving remains forward-compatible while
-        // updated peers always negotiate the ratchet.
-        (
-            plaintext.as_bytes().to_vec(),
-            b"hybrid-one-shot-v1".to_vec(),
-        )
-    };
+    let signal_pre_key = recipient
+        .bundle
+        .signal_pre_key
+        .as_ref()
+        .ok_or(CoreError::UnsupportedVersion)?;
+    let protected_plaintext = ratchet_adapter::encrypt_message(
+        &recipient.bundle.identity_ed25519,
+        signal_pre_key,
+        plaintext.as_bytes(),
+    )?;
+    let ratchet_header = b"signal-libsignal-v1".to_vec();
     let sent_at_ms = current_time_ms()?;
     let conversation_id = conversation_bytes(
         &sender.bundle.identity_ed25519,
@@ -214,12 +260,18 @@ pub fn open(payload: &[u8]) -> CoreResult<OpenedPacket> {
         transcript.as_slice(),
     )?;
     let protected_plaintext = envelope::open(&root_key, &packet.envelope)?;
-    let plaintext = match packet.envelope.metadata.ratchet_header.as_slice() {
+    let (plaintext, pending_ratchet) = match packet.envelope.metadata.ratchet_header.as_slice() {
         b"signal-libsignal-v1" => ratchet_adapter::decrypt_message(
             &packet.sender.bundle.identity_ed25519,
+            packet
+                .sender
+                .bundle
+                .signal_pre_key
+                .as_ref()
+                .ok_or(CoreError::UnsupportedVersion)?
+                .device_id,
             &protected_plaintext,
         )?,
-        b"hybrid-one-shot-v1" => protected_plaintext.to_vec(),
         _ => return Err(CoreError::UnsupportedVersion),
     };
     let text = String::from_utf8(plaintext.to_vec()).map_err(|_| CoreError::InvalidInput)?;
@@ -230,6 +282,24 @@ pub fn open(payload: &[u8]) -> CoreResult<OpenedPacket> {
         message_id: compact_hex(&packet.message_id),
         sender: packet.sender,
         plaintext: text,
+        sent_at_ms: packet.envelope.metadata.timestamp_logical,
+        pending_ratchet: Some(pending_ratchet),
+    })
+}
+
+pub fn inspect(payload: &[u8]) -> CoreResult<InspectedPacket> {
+    if payload.is_empty() || payload.len() > MAX_PACKET_BYTES {
+        return Err(CoreError::LimitExceeded);
+    }
+    let packet: SecurePacket =
+        serde_json::from_slice(payload).map_err(|_| CoreError::InvalidInput)?;
+    packet.validate()?;
+    if packet.recipient_identity != identity::active_identity()?.identity_public_key()? {
+        return Err(CoreError::AuthenticationFailed);
+    }
+    Ok(InspectedPacket {
+        message_id: compact_hex(&packet.message_id),
+        sender: packet.sender,
         sent_at_ms: packet.envelope.metadata.timestamp_logical,
     })
 }

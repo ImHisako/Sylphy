@@ -107,12 +107,21 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     _ownsVeilidService = widget.veilidService == null;
     _veilidService =
         widget.veilidService ?? VeilidService(nativeCore: widget.nativeCore);
-    _profileStore = widget.profileStore ?? FileUserProfileStore();
+    final profileCipher = widget.nativeCore is NativeCoreClient
+        ? NativeLocalDataCipher(
+            core: widget.nativeCore! as NativeCoreClient,
+            password: PlatformDeviceSecretStore().getOrCreate,
+          )
+        : const UnavailableLocalDataCipher();
+    _profileStore =
+        widget.profileStore ?? FileUserProfileStore(cipher: profileCipher);
     _ownsIdentityService = widget.identityService == null;
     _identityService =
         widget.identityService ??
         IdentityService(nativeCore: widget.nativeCore);
-    _privacySettings = widget.privacySettings ?? PrivacySettingsController();
+    _privacySettings =
+        widget.privacySettings ??
+        PrivacySettingsController(cipher: profileCipher);
     _privacySettings.addListener(_onPrivacyChanged);
     _profileLoadFuture = _loadProfile();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -128,11 +137,23 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
 
   Future<void> _initializeNativeServices() async {
     try {
-      await const MessageNotifications().initialize();
-      if (!_privacySettings.loaded) await _privacySettings.load();
-      await _profileLoadFuture;
-      await _veilidService.start();
+      _runGuarded(
+        const MessageNotifications().initialize(),
+        category: 'notifications',
+        action: 'initialization_failed',
+      );
+      await Future.wait<void>([
+        if (!_privacySettings.loaded) _privacySettings.load(),
+        _profileLoadFuture,
+      ]);
+      await _configureNativePrivacy();
+      // Unlock the local identity before waiting for the P2P node to attach.
+      // On a cold desktop start this makes the profile usable immediately.
       if (_profile != null) {
+        await _publishProfile();
+      }
+      await _veilidService.start();
+      if (_profile != null && !_identityService.snapshot.hasShortInvitation) {
         await _publishProfile();
       }
     } finally {
@@ -177,14 +198,33 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   }
 
   void _onPrivacyChanged() {
+    if (mounted) setState(() {});
     if (!_nativeServicesReady) {
       return;
     }
     _runGuarded(
-      _publishProfile(),
+      _applyPrivacyChanges(),
       category: 'identity',
       action: 'privacy_publish_failed',
     );
+  }
+
+  Future<void> _applyPrivacyChanges() async {
+    await _configureNativePrivacy();
+    await _publishProfile();
+  }
+
+  Future<void> _configureNativePrivacy() async {
+    final core = widget.nativeCore;
+    if (core is! NativeCoreClient) return;
+    final response = await core.configurePrivacyInBackground(
+      allowUnknownContacts: _privacySettings.value.allowUnknownContacts,
+    );
+    if (!response.ok) {
+      throw NativeCoreException(
+        'Configurazione privacy nativa rifiutata: ${response.code}',
+      );
+    }
   }
 
   void _runGuarded(
@@ -264,6 +304,10 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   void _cancelProfileEdit() => setState(() => _isEditingProfile = false);
 
   void _accountImported(UserProfile profile) {
+    if (_bridge is SylphyMessagingBridge) {
+      _bridge.clearCachesAfterAccountImport();
+    }
+    _identityService.invalidateAfterAccountImport();
     setState(() {
       _profile = profile;
       _isEditingProfile = false;
@@ -338,6 +382,16 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       title: 'Sylphy',
       debugShowCheckedModeBanner: false,
       navigatorObservers: [_DiagnosticNavigatorObserver()],
+      builder: (context, child) {
+        final media = MediaQuery.of(context);
+        return MediaQuery(
+          data: media.copyWith(
+            disableAnimations:
+                media.disableAnimations || _privacySettings.value.reduceMotion,
+          ),
+          child: child ?? const SizedBox.shrink(),
+        );
+      },
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: colorScheme,

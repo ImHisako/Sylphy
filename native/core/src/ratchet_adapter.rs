@@ -17,7 +17,7 @@ pub fn capability_status() -> RatchetCapabilityStatus {
     RatchetCapabilityStatus {
         compiled: cfg!(feature = "signal-ratchet"),
         provider: if cfg!(feature = "signal-ratchet") {
-            "signalapp/libsignal@v0.99.3"
+            "signalapp/libsignal@v0.100.0"
         } else {
             "not-compiled"
         },
@@ -57,11 +57,17 @@ mod signal {
     const STORE_VERSION: u8 = 2;
     const STORE_FILE: &str = "signal-account-v2.vault";
     const SESSION_DIRECTORY: &str = "signal-sessions-v2";
-    const DEVICE_ID: u8 = 1;
+    const LEGACY_DEVICE_ID: u8 = 1;
+
+    const fn legacy_device_id() -> u8 {
+        LEGACY_DEVICE_ID
+    }
     const SIGNED_PRE_KEY_ID: u32 = 1;
     const KYBER_PRE_KEY_ID: u32 = 1;
     const MAX_WIRE_BYTES: usize = 32 * 1024;
     const MAX_SESSIONS: usize = 2_048;
+    const MAX_GLOBAL_STORE_BYTES: usize = 8 * 1024 * 1024;
+    const MAX_SESSION_STORE_BYTES: usize = 1024 * 1024;
 
     #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
     #[serde(rename_all = "snake_case")]
@@ -70,7 +76,7 @@ mod signal {
         PreKey,
     }
 
-    #[derive(Debug, Deserialize, Serialize)]
+    #[derive(Clone, Debug, Deserialize, Serialize)]
     struct WireMessage {
         version: u8,
         kind: WireKind,
@@ -115,7 +121,7 @@ mod signal {
         }
     }
 
-    #[derive(Default, Deserialize, Serialize)]
+    #[derive(Clone, Default, Deserialize, Serialize)]
     struct PersistentIdentityStore {
         key_pair: Vec<u8>,
         registration_id: u32,
@@ -169,7 +175,7 @@ mod signal {
         }
     }
 
-    #[derive(Default, Deserialize, Serialize)]
+    #[derive(Clone, Default, Deserialize, Serialize)]
     struct PersistentPreKeyStore {
         records: HashMap<u32, Vec<u8>>,
     }
@@ -199,7 +205,7 @@ mod signal {
         }
     }
 
-    #[derive(Default, Deserialize, Serialize)]
+    #[derive(Clone, Default, Deserialize, Serialize)]
     struct PersistentSignedPreKeyStore {
         records: HashMap<u32, Vec<u8>>,
     }
@@ -227,7 +233,7 @@ mod signal {
         }
     }
 
-    #[derive(Default, Deserialize, Serialize)]
+    #[derive(Clone, Default, Deserialize, Serialize)]
     struct PersistentKyberPreKeyStore {
         records: HashMap<u32, Vec<u8>>,
         used_base_keys: HashMap<String, Vec<Vec<u8>>>,
@@ -281,7 +287,7 @@ mod signal {
         }
     }
 
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct PersistentSessionStore {
         records: HashMap<String, Vec<u8>>,
     }
@@ -309,16 +315,18 @@ mod signal {
         }
     }
 
-    #[derive(Deserialize, Serialize)]
+    #[derive(Clone, Deserialize, Serialize)]
     struct GlobalStore {
         version: u8,
+        #[serde(default = "legacy_device_id")]
+        device_id: u8,
         identity: PersistentIdentityStore,
         pre_keys: PersistentPreKeyStore,
         signed_pre_keys: PersistentSignedPreKeyStore,
         kyber_pre_keys: PersistentKyberPreKeyStore,
     }
 
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct RuntimeStore {
         root: Option<PathBuf>,
         loaded: bool,
@@ -326,6 +334,40 @@ mod signal {
         sessions: PersistentSessionStore,
         loaded_sessions: HashSet<String>,
         session_file_count: usize,
+    }
+
+    pub struct PendingDecrypt {
+        before: Option<RuntimeStore>,
+        address: ProtocolAddress,
+        is_pre_key: bool,
+    }
+
+    impl PendingDecrypt {
+        pub fn commit(mut self) -> CoreResult<()> {
+            let mut runtime = store().lock().map_err(|_| CoreError::Internal)?;
+            let result = (|| {
+                persist_session(&mut runtime, &self.address)?;
+                if self.is_pre_key {
+                    persist_global(&runtime)?;
+                }
+                Ok(())
+            })();
+            if result.is_ok() {
+                self.before = None;
+            }
+            result
+        }
+    }
+
+    impl Drop for PendingDecrypt {
+        fn drop(&mut self) {
+            let Some(before) = self.before.take() else {
+                return;
+            };
+            if let Ok(mut runtime) = store().lock() {
+                *runtime = before;
+            }
+        }
     }
 
     static STORE: OnceLock<Mutex<RuntimeStore>> = OnceLock::new();
@@ -365,59 +407,18 @@ mod signal {
         Ok(())
     }
 
-    pub fn export_account_backup() -> CoreResult<serde_json::Value> {
-        let runtime = store().lock().map_err(|_| CoreError::Internal)?;
-        let root = runtime.root.as_ref().ok_or(CoreError::FeatureUnavailable)?;
-        let global_path = root.join(STORE_FILE);
-        let global = if global_path.exists() {
-            STANDARD_NO_PAD.encode(fs::read(global_path).map_err(|_| CoreError::Internal)?)
-        } else {
-            String::new()
-        };
-        let session_root = root.join(SESSION_DIRECTORY);
-        let mut sessions = serde_json::Map::new();
-        for entry in fs::read_dir(&session_root).map_err(|_| CoreError::Internal)? {
-            let entry = entry.map_err(|_| CoreError::Internal)?;
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            if name.len() != 70
-                || !name.ends_with(".vault")
-                || !name[..64].chars().all(|value| value.is_ascii_hexdigit())
-            {
-                continue;
-            }
-            sessions.insert(
-                name.to_owned(),
-                serde_json::Value::String(
-                    STANDARD_NO_PAD.encode(fs::read(path).map_err(|_| CoreError::Internal)?),
-                ),
-            );
-        }
-        Ok(serde_json::json!({
-            "version": 1,
-            "global": global,
-            "sessions": sessions,
-        }))
-    }
-
-    pub fn import_account_backup(value: serde_json::Value) -> CoreResult<()> {
+    pub fn validate_account_backup(value: &serde_json::Value) -> CoreResult<()> {
         let version = value.get("version").and_then(serde_json::Value::as_u64);
         let global = value.get("global").and_then(serde_json::Value::as_str);
         let sessions = value.get("sessions").and_then(serde_json::Value::as_object);
         if version != Some(1) || global.is_none() || sessions.is_none() {
             return Err(CoreError::VerificationFailed);
         }
-        let mut runtime = store().lock().map_err(|_| CoreError::Internal)?;
-        let root = runtime.root.clone().ok_or(CoreError::FeatureUnavailable)?;
-        let session_root = root.join(SESSION_DIRECTORY);
-        fs::create_dir_all(&session_root).map_err(|_| CoreError::Internal)?;
         let global_bytes = STANDARD_NO_PAD
             .decode(global.unwrap_or_default())
             .map_err(|_| CoreError::VerificationFailed)?;
-        if !global_bytes.is_empty() {
-            atomic_file::replace(&root.join(STORE_FILE), &global_bytes)?;
+        if global_bytes.len() > MAX_GLOBAL_STORE_BYTES {
+            return Err(CoreError::LimitExceeded);
         }
         let sessions = sessions.ok_or(CoreError::VerificationFailed)?;
         if sessions.len() > MAX_SESSIONS {
@@ -433,13 +434,10 @@ mod signal {
             let bytes = STANDARD_NO_PAD
                 .decode(encoded.as_str().ok_or(CoreError::VerificationFailed)?)
                 .map_err(|_| CoreError::VerificationFailed)?;
-            atomic_file::replace(&session_root.join(name), &bytes)?;
+            if bytes.is_empty() || bytes.len() > MAX_SESSION_STORE_BYTES {
+                return Err(CoreError::LimitExceeded);
+            }
         }
-        runtime.loaded = false;
-        runtime.global = None;
-        runtime.sessions = PersistentSessionStore::default();
-        runtime.loaded_sessions.clear();
-        runtime.session_file_count = sessions.len();
         Ok(())
     }
 
@@ -447,6 +445,36 @@ mod signal {
         let mut runtime = store().lock().map_err(|_| CoreError::Internal)?;
         ensure_loaded(&mut runtime)?;
         public_bundle(runtime.global.as_ref().ok_or(CoreError::Internal)?)
+    }
+
+    pub fn avoid_device_id_collisions(reserved: &[(u8, Vec<u8>)]) -> CoreResult<bool> {
+        let mut runtime = store().lock().map_err(|_| CoreError::Internal)?;
+        ensure_loaded(&mut runtime)?;
+        let global = runtime.global.as_ref().ok_or(CoreError::Internal)?;
+        let current = public_bundle(global)?;
+        let collision = reserved.iter().any(|(device_id, identity_key)| {
+            *device_id == current.device_id && *identity_key != current.identity_key
+        });
+        if !collision {
+            return Ok(false);
+        }
+        if runtime.session_file_count != 0 || !runtime.sessions.records.is_empty() {
+            return Err(CoreError::VerificationFailed);
+        }
+        let used = reserved
+            .iter()
+            .map(|(device_id, _)| *device_id)
+            .collect::<HashSet<_>>();
+        let replacement = (1..=u8::MAX)
+            .find(|candidate| !used.contains(candidate))
+            .ok_or(CoreError::LimitExceeded)?;
+        runtime
+            .global
+            .as_mut()
+            .ok_or(CoreError::Internal)?
+            .device_id = replacement;
+        persist_global(&runtime)?;
+        Ok(true)
     }
 
     pub fn encrypt(
@@ -500,7 +528,11 @@ mod signal {
         serde_json::to_vec(&wire).map_err(|_| CoreError::Internal)
     }
 
-    pub fn decrypt(peer_identity: &[u8], encoded: &[u8]) -> CoreResult<Vec<u8>> {
+    pub fn decrypt(
+        peer_identity: &[u8],
+        sender_device_id: u8,
+        encoded: &[u8],
+    ) -> CoreResult<(Vec<u8>, PendingDecrypt)> {
         if peer_identity.len() != 32 || encoded.is_empty() || encoded.len() > MAX_WIRE_BYTES * 2 {
             return Err(CoreError::LimitExceeded);
         }
@@ -508,11 +540,12 @@ mod signal {
             serde_json::from_slice(encoded).map_err(|_| CoreError::InvalidInput)?;
         let is_pre_key = matches!(wire.kind, WireKind::PreKey);
         let ciphertext = wire.into_ciphertext()?;
-        let address = peer_address(peer_identity, DEVICE_ID)?;
+        let address = peer_address(peer_identity, sender_device_id)?;
         let local_address = local_address()?;
         let mut runtime = store().lock().map_err(|_| CoreError::Internal)?;
         ensure_loaded(&mut runtime)?;
         ensure_session_loaded(&mut runtime, &address)?;
+        let before = runtime.clone();
         let RuntimeStore {
             global, sessions, ..
         } = &mut *runtime;
@@ -528,11 +561,14 @@ mod signal {
             &mut global.kyber_pre_keys,
             &mut OsRng.unwrap_err(),
         )))?;
-        persist_session(&mut runtime, &address)?;
-        if is_pre_key {
-            persist_global(&runtime)?;
-        }
-        Ok(plaintext)
+        Ok((
+            plaintext,
+            PendingDecrypt {
+                before: Some(before),
+                address,
+                is_pre_key,
+            },
+        ))
     }
 
     fn ensure_loaded(runtime: &mut RuntimeStore) -> CoreResult<()> {
@@ -590,6 +626,7 @@ mod signal {
         );
         Ok(GlobalStore {
             version: STORE_VERSION,
+            device_id: rng.random::<u8>().max(1),
             identity: PersistentIdentityStore {
                 key_pair: identity_pair.serialize().to_vec(),
                 registration_id,
@@ -626,7 +663,7 @@ mod signal {
         ))?;
         Ok(SignalPreKeyBundle {
             registration_id: global.identity.registration_id,
-            device_id: DEVICE_ID,
+            device_id: global.device_id,
             signed_pre_key_id: SIGNED_PRE_KEY_ID,
             signed_pre_key_public: protocol(signed.public_key())?.serialize().to_vec(),
             signed_pre_key_signature: protocol(signed.signature())?,
@@ -724,7 +761,7 @@ mod signal {
 
     fn local_address() -> CoreResult<ProtocolAddress> {
         let identity = identity::active_identity()?.identity_public_key()?;
-        peer_address(&identity, DEVICE_ID)
+        peer_address(&identity, LEGACY_DEVICE_ID)
     }
 
     fn peer_address(identity: &[u8], device: u8) -> CoreResult<ProtocolAddress> {
@@ -870,28 +907,32 @@ pub fn configure_storage(_storage_directory: &str) -> CoreResult<()> {
 }
 
 #[cfg(feature = "signal-ratchet")]
-pub(crate) fn export_account_backup() -> CoreResult<serde_json::Value> {
-    signal::export_account_backup()
+pub(crate) fn validate_account_backup(value: &serde_json::Value) -> CoreResult<()> {
+    signal::validate_account_backup(value)
 }
 
 #[cfg(not(feature = "signal-ratchet"))]
-pub(crate) fn export_account_backup() -> CoreResult<serde_json::Value> {
-    Ok(serde_json::json!({"version": 1, "global": "", "sessions": {}}))
-}
-
-#[cfg(feature = "signal-ratchet")]
-pub(crate) fn import_account_backup(value: serde_json::Value) -> CoreResult<()> {
-    signal::import_account_backup(value)
-}
-
-#[cfg(not(feature = "signal-ratchet"))]
-pub(crate) fn import_account_backup(_value: serde_json::Value) -> CoreResult<()> {
-    Ok(())
+pub(crate) fn validate_account_backup(value: &serde_json::Value) -> CoreResult<()> {
+    if value.get("version").and_then(serde_json::Value::as_u64) == Some(1) {
+        Ok(())
+    } else {
+        Err(CoreError::VerificationFailed)
+    }
 }
 
 #[cfg(feature = "signal-ratchet")]
 pub fn public_pre_key_bundle() -> CoreResult<Option<SignalPreKeyBundle>> {
     signal::public_pre_key_bundle().map(Some)
+}
+
+#[cfg(feature = "signal-ratchet")]
+pub(crate) fn avoid_device_id_collisions(reserved: &[(u8, Vec<u8>)]) -> CoreResult<bool> {
+    signal::avoid_device_id_collisions(reserved)
+}
+
+#[cfg(not(feature = "signal-ratchet"))]
+pub(crate) fn avoid_device_id_collisions(_reserved: &[(u8, Vec<u8>)]) -> CoreResult<bool> {
+    Ok(false)
 }
 
 #[cfg(not(feature = "signal-ratchet"))]
@@ -918,12 +959,33 @@ pub fn encrypt_message(
 }
 
 #[cfg(feature = "signal-ratchet")]
-pub fn decrypt_message(peer_identity: &[u8], ciphertext: &[u8]) -> CoreResult<Vec<u8>> {
-    signal::decrypt(peer_identity, ciphertext)
+pub(crate) use signal::PendingDecrypt;
+
+#[cfg(not(feature = "signal-ratchet"))]
+pub(crate) struct PendingDecrypt;
+
+#[cfg(not(feature = "signal-ratchet"))]
+impl PendingDecrypt {
+    pub(crate) fn commit(self) -> CoreResult<()> {
+        Err(CoreError::FeatureUnavailable)
+    }
+}
+
+#[cfg(feature = "signal-ratchet")]
+pub fn decrypt_message(
+    peer_identity: &[u8],
+    sender_device_id: u8,
+    ciphertext: &[u8],
+) -> CoreResult<(Vec<u8>, PendingDecrypt)> {
+    signal::decrypt(peer_identity, sender_device_id, ciphertext)
 }
 
 #[cfg(not(feature = "signal-ratchet"))]
-pub fn decrypt_message(_peer_identity: &[u8], _ciphertext: &[u8]) -> CoreResult<Vec<u8>> {
+pub fn decrypt_message(
+    _peer_identity: &[u8],
+    _sender_device_id: u8,
+    _ciphertext: &[u8],
+) -> CoreResult<(Vec<u8>, PendingDecrypt)> {
     Err(CoreError::FeatureUnavailable)
 }
 

@@ -55,10 +55,25 @@ class PlatformDeviceSecretStore implements DeviceSecretStore {
           );
 
   static const _storageKey = 'sylphy_identity_vault_secret_v1';
+  static Future<String>? _sharedSecret;
   final FlutterSecureStorage _storage;
 
   @override
-  Future<String> getOrCreate() async {
+  Future<String> getOrCreate() {
+    final pending = _sharedSecret;
+    if (pending != null) return pending;
+    final created = _readOrCreate();
+    _sharedSecret = created;
+    return created.onError((error, stackTrace) {
+      if (identical(_sharedSecret, created)) _sharedSecret = null;
+      Error.throwWithStackTrace(
+        error ?? StateError('device_secret_unavailable'),
+        stackTrace,
+      );
+    });
+  }
+
+  Future<String> _readOrCreate() async {
     final existing = await _storage.read(key: _storageKey);
     if (existing != null && existing.length >= 43) {
       return existing;
@@ -88,11 +103,15 @@ class IdentityService extends ChangeNotifier {
   final DeviceSecretStore _deviceSecretStore;
   final Future<Directory> Function() _applicationSupportDirectory;
   IdentitySnapshot _snapshot;
-  bool _isLoading = false;
   bool _disposed = false;
   UserProfile? _publicProfile;
   bool _shareDisplayName = true;
   bool _shareProfilePhoto = true;
+  UserProfile? _lastPublishedProfile;
+  bool? _lastShareDisplayName;
+  bool? _lastShareProfilePhoto;
+  Future<void>? _initializationLoop;
+  bool _refreshPending = false;
 
   IdentitySnapshot get snapshot => _snapshot;
 
@@ -100,21 +119,47 @@ class IdentityService extends ChangeNotifier {
     UserProfile? profile,
     bool shareDisplayName = true,
     bool shareProfilePhoto = true,
-  }) async {
+  }) {
     if (profile != null) _publicProfile = profile;
     _shareDisplayName = shareDisplayName;
     _shareProfilePhoto = shareProfilePhoto;
-    final core = _nativeCore;
-    if (core == null || _isLoading || _disposed) {
-      return;
+    if (_nativeCore == null || _disposed) {
+      return Future.value();
     }
-    _isLoading = true;
+    if (_snapshot.phase == IdentityPhase.ready &&
+        _snapshot.hasShortInvitation &&
+        _samePublishedConfiguration()) {
+      return Future.value();
+    }
+    _refreshPending = true;
+    return _initializationLoop ??= _runInitializationLoop().whenComplete(() {
+      _initializationLoop = null;
+    });
+  }
+
+  Future<void> _runInitializationLoop() async {
+    do {
+      _refreshPending = false;
+      await _initializeOnce();
+    } while (_refreshPending && !_disposed);
+  }
+
+  Future<void> _initializeOnce() async {
+    final core = _nativeCore;
+    if (core == null || _disposed) return;
+    final publishedProfile = _publicProfile;
+    final publishDisplayName = _shareDisplayName;
+    final publishProfilePhoto = _shareProfilePhoto;
     AppLog.instance.record(
       category: 'identity',
       action: 'initialization_started',
       verbose: true,
     );
-    _setSnapshot(const IdentitySnapshot(phase: IdentityPhase.loading));
+    // A refresh can republish profile metadata or renew a short invitation.
+    // Keep the already unlocked identity visible while that work continues.
+    if (_snapshot.phase != IdentityPhase.ready) {
+      _setSnapshot(const IdentitySnapshot(phase: IdentityPhase.loading));
+    }
     try {
       final results = await Future.wait<Object>([
         _applicationSupportDirectory(),
@@ -126,12 +171,12 @@ class IdentityService extends ChangeNotifier {
         '${supportDirectory.path}${Platform.pathSeparator}native',
       );
       await nativeDirectory.create(recursive: true);
-      final displayName = _shareDisplayName
-          ? _publicProfile?.displayName
+      final displayName = publishDisplayName
+          ? publishedProfile?.displayName
           : null;
       final avatarBase64 =
-          _shareProfilePhoto && _publicProfile?.photoBytes != null
-          ? await _encodePublishedAvatar(_publicProfile!.photoBytes!)
+          publishProfilePhoto && publishedProfile?.photoBytes != null
+          ? await _encodePublishedAvatar(publishedProfile!.photoBytes!)
           : null;
       final response = core is NativeCoreClient
           ? await core.ensureIdentityInBackground(
@@ -195,6 +240,9 @@ class IdentityService extends ChangeNotifier {
           ).toLocal(),
         ),
       );
+      _lastPublishedProfile = publishedProfile;
+      _lastShareDisplayName = publishDisplayName;
+      _lastShareProfilePhoto = publishProfilePhoto;
       AppLog.instance.record(
         category: 'identity',
         action: 'initialization_completed',
@@ -212,9 +260,26 @@ class IdentityService extends ChangeNotifier {
           errorCode: 'identity_initialization_failed',
         ),
       );
-    } finally {
-      _isLoading = false;
+    } finally {}
+  }
+
+  void invalidateAfterAccountImport() {
+    _lastPublishedProfile = null;
+    _lastShareDisplayName = null;
+    _lastShareProfilePhoto = null;
+    _refreshPending = true;
+    if (_snapshot.phase == IdentityPhase.ready) {
+      _setSnapshot(const IdentitySnapshot(phase: IdentityPhase.loading));
     }
+  }
+
+  bool _samePublishedConfiguration() {
+    final current = _publicProfile;
+    final previous = _lastPublishedProfile;
+    return current?.displayName == previous?.displayName &&
+        listEquals(current?.photoBytes, previous?.photoBytes) &&
+        _shareDisplayName == _lastShareDisplayName &&
+        _shareProfilePhoto == _lastShareProfilePhoto;
   }
 
   void _setSnapshot(IdentitySnapshot value) {

@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../storage/atomic_file.dart';
+
 enum AppLogLevel { debug, info, warning, error }
 
 @immutable
@@ -86,6 +88,11 @@ class AppLog extends ChangeNotifier {
         }
       }
       _initialized = true;
+      for (final entry in List<AppLogEntry>.of(_entries)) {
+        if (_verboseEnabled || entry.level == AppLogLevel.error) {
+          _appendToDisk(entry);
+        }
+      }
       record(
         category: 'app',
         action: 'diagnostics_initialized',
@@ -115,10 +122,16 @@ class AppLog extends ChangeNotifier {
     notifyListeners();
     final settingsFile = _settingsFile;
     if (settingsFile != null) {
-      await settingsFile.writeAsString(
-        jsonEncode({'verbose_logging': value}),
-        flush: true,
-      );
+      try {
+        await writeFileRecoverably(
+          settingsFile,
+          Uint8List.fromList(
+            utf8.encode(jsonEncode({'verbose_logging': value})),
+          ),
+        );
+      } on Object {
+        // Developer settings must never crash the application.
+      }
     }
   }
 
@@ -180,6 +193,7 @@ class AppLog extends ChangeNotifier {
   }
 
   Future<void> clear() async {
+    await _writeQueue;
     _entries.clear();
     notifyListeners();
     final logFile = _logFile;

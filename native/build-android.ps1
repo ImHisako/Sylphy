@@ -1,11 +1,28 @@
 param(
     [ValidateSet('debug', 'release')]
-    [string]$Profile = 'release'
+    [string]$Profile = 'release',
+    [switch]$CleanupOnly
 )
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $nativeCorePath = Join-Path $PSScriptRoot 'core'
 $jniLibrariesPath = Join-Path $projectRoot 'android\app\src\main\jniLibs'
+
+function Remove-UnneededNativeLibraries {
+    foreach ($abi in @('armeabi-v7a', 'arm64-v8a', 'x86_64')) {
+        $abiPath = Join-Path $jniLibrariesPath $abi
+        if (Test-Path -LiteralPath $abiPath) {
+            Get-ChildItem -LiteralPath $abiPath -Filter '*.so' |
+                Where-Object Name -ne 'libsylphy_core.so' |
+                Remove-Item -Force
+        }
+    }
+}
+
+if ($CleanupOnly) {
+    Remove-UnneededNativeLibraries
+    exit 0
+}
 
 if (-not $env:ANDROID_HOME -and -not $env:ANDROID_SDK_ROOT) {
     $defaultAndroidSdk = Join-Path $env:LOCALAPPDATA 'Android\Sdk'
@@ -34,7 +51,9 @@ try {
     # use the installed GNU host toolchain when MSVC Build Tools/link.exe are
     # absent; the produced Android libraries are identical NDK targets.
     $gnuToolchain = 'stable-x86_64-pc-windows-gnu'
-    $useGnuHost = $IsWindows -and
+    $runningOnWindows = ($env:OS -eq 'Windows_NT') -or
+        (Get-Variable IsWindows -ErrorAction SilentlyContinue -ValueOnly)
+    $useGnuHost = $runningOnWindows -and
         -not (Get-Command link.exe -ErrorAction SilentlyContinue) -and
         ((& rustup toolchain list) -match [regex]::Escape($gnuToolchain))
     if ($useGnuHost) {
@@ -46,6 +65,37 @@ try {
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
+    $metadata = @(
+        'abi=10'
+        'libsignal=signalapp/libsignal@v0.100.0'
+        "profile=$Profile"
+    )
+    $sourceFiles = @(
+        Get-ChildItem -LiteralPath (Join-Path $nativeCorePath 'src') -Recurse -File
+        Get-Item -LiteralPath (Join-Path $nativeCorePath 'Cargo.toml')
+        Get-Item -LiteralPath (Join-Path $nativeCorePath 'Cargo.lock')
+    ) | Sort-Object FullName
+    $sourceHashes = ($sourceFiles | ForEach-Object {
+        (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    }) -join ''
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $sourceDigest = $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($sourceHashes))
+        $metadata += 'source.sha256=' + (($sourceDigest | ForEach-Object { $_.ToString('x2') }) -join '')
+    }
+    finally {
+        $sha256.Dispose()
+    }
+    Remove-UnneededNativeLibraries
+    foreach ($abi in @('armeabi-v7a', 'arm64-v8a', 'x86_64')) {
+        $library = Join-Path (Join-Path $jniLibrariesPath $abi) 'libsylphy_core.so'
+        if (-not (Test-Path -LiteralPath $library)) {
+            throw "Missing native library after build: $library"
+        }
+        $hash = (Get-FileHash -LiteralPath $library -Algorithm SHA256).Hash.ToLowerInvariant()
+        $metadata += "$abi.sha256=$hash"
+    }
+    Set-Content -LiteralPath (Join-Path $jniLibrariesPath 'sylphy-core.properties') -Value $metadata -Encoding ascii
 }
 finally {
     Pop-Location

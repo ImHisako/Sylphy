@@ -1,4 +1,5 @@
 import java.util.Properties
+import java.security.MessageDigest
 
 plugins {
     id("com.android.application")
@@ -14,6 +15,63 @@ if (releaseSigningFile.exists()) {
 }
 val hasReleaseSigning = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
     .all { !releaseSigningProperties.getProperty(it).isNullOrBlank() }
+
+fun sha256(file: File): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    file.inputStream().use { input ->
+        val buffer = ByteArray(64 * 1024)
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            digest.update(buffer, 0, count)
+        }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
+}
+
+fun sha256(value: String): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
+    return digest.joinToString("") { "%02x".format(it) }
+}
+
+val verifySylphyNativeCore by tasks.registering {
+    group = "verification"
+    description = "Rejects stale or mismatched Rust libraries before Android packaging."
+    doLast {
+        val root = file("src/main/jniLibs")
+        val metadataFile = root.resolve("sylphy-core.properties")
+        check(metadataFile.isFile) {
+            "Native metadata missing. Run native/build-android.ps1 before building Android."
+        }
+        val metadata = Properties().apply {
+            metadataFile.inputStream().use(::load)
+        }
+        check(metadata.getProperty("abi") == "10") { "Stale Sylphy native ABI." }
+        check(metadata.getProperty("libsignal") == "signalapp/libsignal@v0.100.0") {
+            "Android native core was not built with libsignal v0.100.0."
+        }
+        val nativeCore = file("../../native/core")
+        val sourceFiles = (
+            fileTree(nativeCore.resolve("src")) { include("**/*.rs") }.files +
+                listOf(nativeCore.resolve("Cargo.toml"), nativeCore.resolve("Cargo.lock"))
+            ).sortedBy { it.absolutePath }
+        val sourceFingerprint = sha256(sourceFiles.joinToString("") { sha256(it) })
+        check(metadata.getProperty("source.sha256") == sourceFingerprint) {
+            "Sylphy Rust sources changed after the Android libraries were built."
+        }
+        listOf("armeabi-v7a", "arm64-v8a", "x86_64").forEach { abi ->
+            val library = root.resolve("$abi/libsylphy_core.so")
+            check(library.isFile) { "Missing Sylphy native library for $abi." }
+            check(metadata.getProperty("$abi.sha256") == sha256(library)) {
+                "Sylphy native library for $abi does not match its build metadata."
+            }
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name == "preBuild") dependsOn(verifySylphyNativeCore)
+}
 
 android {
     namespace = "com.example.sylphy"

@@ -114,6 +114,56 @@ void main() {
     },
     timeout: const Timeout(Duration(seconds: 20)),
   );
+
+  test(
+    'keeps an unlocked identity visible while republishing profile data',
+    () async {
+      final supportDirectory = await Directory.systemTemp.createTemp(
+        'sylphy-identity-refresh-test-',
+      );
+      addTearDown(() => supportDirectory.delete(recursive: true));
+      final core = _IdentityNativeCore(invitationCode: 'sylphy:VLD0:example');
+      final service = IdentityService(
+        nativeCore: core,
+        deviceSecretStore: _TestDeviceSecretStore(),
+        applicationSupportDirectory: () async => supportDirectory,
+      );
+      addTearDown(service.dispose);
+
+      await service.initialize(profile: const UserProfile(displayName: 'Ada'));
+      final refresh = service.initialize(
+        profile: const UserProfile(displayName: 'Grace'),
+      );
+
+      expect(service.snapshot.phase, IdentityPhase.ready);
+      await refresh;
+      expect(service.snapshot.phase, IdentityPhase.ready);
+      expect(core.ensureIdentityCalls, 2);
+    },
+  );
+
+  test(
+    'skips an unchanged identity refresh once the short ID is ready',
+    () async {
+      final supportDirectory = await Directory.systemTemp.createTemp(
+        'sylphy-identity-cache-test-',
+      );
+      addTearDown(() => supportDirectory.delete(recursive: true));
+      final core = _IdentityNativeCore(invitationCode: 'sylphy:VLD0:example');
+      final service = IdentityService(
+        nativeCore: core,
+        deviceSecretStore: _TestDeviceSecretStore(),
+        applicationSupportDirectory: () async => supportDirectory,
+      );
+      addTearDown(service.dispose);
+      const profile = UserProfile(displayName: 'Ada');
+
+      await service.initialize(profile: profile);
+      await service.initialize(profile: profile);
+
+      expect(core.ensureIdentityCalls, 1);
+    },
+  );
 }
 
 class _TestDeviceSecretStore implements DeviceSecretStore {

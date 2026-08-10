@@ -173,26 +173,6 @@ class _MessengerHomeState extends State<MessengerHome>
             : conversations.first.id;
       }
     });
-    unawaited(_prefetchRecentMessages(conversations));
-  }
-
-  Future<void> _prefetchRecentMessages(List<Conversation> conversations) async {
-    final bridge = widget.bridge;
-    if (bridge is! CachedMessagingBridge) return;
-    for (final conversation in conversations.take(8)) {
-      if (!mounted || conversation.id == _activeConversationId) continue;
-      if (bridge.cachedMessages(conversation.id) != null) continue;
-      try {
-        await bridge.refreshMessages(conversation.id);
-      } on Object catch (error) {
-        AppLog.instance.recordError(
-          category: 'messenger',
-          action: 'message_prefetch_failed',
-          error: error,
-        );
-        return;
-      }
-    }
   }
 
   Future<void> _refreshInbox({bool force = false}) async {
@@ -263,7 +243,6 @@ class _MessengerHomeState extends State<MessengerHome>
             : conversations.first.id;
       }
     });
-    unawaited(_prefetchRecentMessages(conversations));
   }
 
   @override
@@ -283,6 +262,10 @@ class _MessengerHomeState extends State<MessengerHome>
     if (mounted && _activeConversationId != conversationId) {
       setState(() => _activeConversationId = conversationId);
     }
+    unawaited(_markConversationRead(conversationId));
+  }
+
+  Future<void> _markConversationRead(String conversationId) async {
     try {
       await widget.bridge.markConversationRead(conversationId);
     } on Object catch (error) {
@@ -294,10 +277,7 @@ class _MessengerHomeState extends State<MessengerHome>
         error: error,
       );
     }
-    if (!mounted) {
-      return;
-    }
-    unawaited(_refreshInbox(force: true));
+    if (mounted) unawaited(_refreshInbox(force: true));
   }
 
   Future<void> _addContact() async {
@@ -351,7 +331,7 @@ class _MessengerHomeState extends State<MessengerHome>
       }
       final message = switch (error.code) {
         'native_core_unavailable' =>
-          'Il core nativo non è disponibile: ricompila l’app con ABI 8.',
+          'Il core nativo non è disponibile: ricompila l’app con ABI 10.',
         'feature_unavailable' =>
           'Lo storage nativo non è ancora pronto. Attendi l’avvio del nodo e riprova.',
         'verification_failed' =>
@@ -1124,6 +1104,7 @@ class _ChatPaneState extends State<_ChatPane> {
   int _lastInboxRevision = 0;
   bool _isRefreshingMessages = false;
   bool _isLoadingMessages = false;
+  bool _isLoadingOlder = false;
   int _messageLoadGeneration = 0;
 
   @override
@@ -1163,6 +1144,7 @@ class _ChatPaneState extends State<_ChatPane> {
       _composerController.clear();
       _optimisticMessages.clear();
       _lastAcknowledgedIncomingId = null;
+      _isLoadingOlder = false;
       final bridge = widget.bridge;
       if (bridge is CachedMessagingBridge) {
         final cached = bridge.cachedMessages(widget.conversation.id);
@@ -1228,6 +1210,24 @@ class _ChatPaneState extends State<_ChatPane> {
     _applyMessages(messages, force: force);
   }
 
+  Future<void> _loadOlderMessages() async {
+    final bridge = widget.bridge;
+    if (bridge is! CachedMessagingBridge || _isLoadingOlder) return;
+    setState(() => _isLoadingOlder = true);
+    try {
+      final messages = await bridge.loadOlderMessages(widget.conversation.id);
+      if (mounted) _applyMessages(messages, force: true);
+    } on Object catch (error) {
+      AppLog.instance.recordError(
+        category: 'messenger',
+        action: 'older_messages_load_failed',
+        error: error,
+      );
+    } finally {
+      if (mounted) setState(() => _isLoadingOlder = false);
+    }
+  }
+
   Future<void> _reloadMessagesAsync({bool force = false}) async {
     final bridge = widget.bridge;
     if (bridge is! CachedMessagingBridge) {
@@ -1243,7 +1243,10 @@ class _ChatPaneState extends State<_ChatPane> {
       setState(() => _isLoadingMessages = true);
     }
     try {
-      final messages = await bridge.refreshMessages(conversationId);
+      final messages = await bridge.refreshMessages(
+        conversationId,
+        priority: true,
+      );
       if (!mounted ||
           generation != _messageLoadGeneration ||
           widget.conversation.id != conversationId) {
@@ -1310,7 +1313,7 @@ class _ChatPaneState extends State<_ChatPane> {
       body: text,
       sentAt: DateTime.now(),
       isOutgoing: true,
-      deliveryState: DeliveryState.sent,
+      deliveryState: DeliveryState.queued,
     );
     setState(() => _optimisticMessages.add(optimistic));
     AppLog.instance.record(
@@ -1450,6 +1453,12 @@ class _ChatPaneState extends State<_ChatPane> {
   Widget build(BuildContext context) {
     final visibleMessages = [..._messages, ..._optimisticMessages]
       ..sort((left, right) => left.sentAt.compareTo(right.sentAt));
+    final cachedBridge = widget.bridge is CachedMessagingBridge
+        ? widget.bridge as CachedMessagingBridge
+        : null;
+    final hasOlder =
+        cachedBridge?.hasOlderMessages(widget.conversation.id) ?? false;
+    final leadingItems = hasOlder ? 2 : 1;
     return DecoratedBox(
       decoration: const BoxDecoration(
         gradient: LinearGradient(
@@ -1471,12 +1480,30 @@ class _ChatPaneState extends State<_ChatPane> {
                 ? const Center(child: CircularProgressIndicator())
                 : ListView.builder(
                     padding: const EdgeInsets.fromLTRB(22, 20, 22, 12),
-                    itemCount: visibleMessages.length + 1,
+                    itemCount: visibleMessages.length + leadingItems,
                     itemBuilder: (context, index) {
-                      if (index == 0) {
+                      if (hasOlder && index == 0) {
+                        return Center(
+                          child: TextButton.icon(
+                            onPressed: _isLoadingOlder
+                                ? null
+                                : _loadOlderMessages,
+                            icon: _isLoadingOlder
+                                ? const SizedBox.square(
+                                    dimension: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.history_rounded),
+                            label: const Text('Carica messaggi precedenti'),
+                          ),
+                        );
+                      }
+                      if (index == leadingItems - 1) {
                         return const _DaySeparator();
                       }
-                      final message = visibleMessages[index - 1];
+                      final message = visibleMessages[index - leadingItems];
                       return _MessageBubble(
                         message: message,
                         showReceipt:
@@ -2339,9 +2366,12 @@ class _MessageBubble extends StatelessWidget {
                 if (outgoing && showReceipt) ...[
                   const SizedBox(width: 4),
                   Icon(
-                    message.deliveryState == DeliveryState.sent
-                        ? Icons.done_rounded
-                        : Icons.done_all_rounded,
+                    switch (message.deliveryState) {
+                      DeliveryState.queued => Icons.schedule_rounded,
+                      DeliveryState.sent => Icons.done_rounded,
+                      DeliveryState.delivered ||
+                      DeliveryState.read => Icons.done_all_rounded,
+                    },
                     size: 14,
                     color: message.deliveryState == DeliveryState.read
                         ? const Color(0xFF2F6FED)
@@ -2970,9 +3000,13 @@ class _PrivacyOverviewSheetState extends State<_PrivacyOverviewSheet> {
     }
     setState(() => _isChecking = true);
     try {
-      final hybridResponse = nativeCore.verifyHybridPrimitives();
+      final hybridResponse = nativeCore is NativeCoreClient
+          ? await nativeCore.verifyHybridPrimitivesInBackground()
+          : nativeCore.verifyHybridPrimitives();
       final response = hybridResponse.ok
-          ? nativeCore.verifyDoubleRatchet()
+          ? nativeCore is NativeCoreClient
+                ? await nativeCore.verifyDoubleRatchetInBackground()
+                : nativeCore.verifyDoubleRatchet()
           : hybridResponse;
       if (mounted) {
         setState(() => _response = response);

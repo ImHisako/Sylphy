@@ -4,6 +4,9 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../profile/user_profile.dart';
+import '../storage/atomic_file.dart';
+
 class PrivacySettings {
   const PrivacySettings({
     this.shareProfilePhoto = true,
@@ -24,6 +27,15 @@ class PrivacySettings {
   final bool showLastSeen;
   final bool allowUnknownContacts;
   final bool reduceMotion;
+
+  static const failClosed = PrivacySettings(
+    shareProfilePhoto: false,
+    shareDisplayName: false,
+    sendReadReceipts: false,
+    showReadReceipts: false,
+    showOnlineStatus: false,
+    showLastSeen: false,
+  );
 
   PrivacySettings copyWith({
     bool? shareProfilePhoto,
@@ -74,49 +86,102 @@ class PrivacySettings {
 }
 
 class PrivacySettingsController extends ChangeNotifier {
-  PrivacySettingsController({Future<Directory> Function()? supportDirectory})
-    : _supportDirectory = supportDirectory ?? getApplicationSupportDirectory;
+  PrivacySettingsController({
+    required LocalDataCipher cipher,
+    Future<Directory> Function()? supportDirectory,
+  }) : _cipher = cipher,
+       _supportDirectory = supportDirectory ?? getApplicationSupportDirectory;
 
+  final LocalDataCipher _cipher;
   final Future<Directory> Function() _supportDirectory;
   PrivacySettings _value = const PrivacySettings();
   bool _loaded = false;
+  Object? _storageError;
+  Future<void> _updateTail = Future<void>.value();
 
   PrivacySettings get value => _value;
   bool get loaded => _loaded;
+  Object? get storageError => _storageError;
 
   Future<void> load() async {
     try {
       final file = await _file();
-      if (await file.exists()) {
-        final decoded = jsonDecode(await file.readAsString());
+      final recovered = await recoverFile(file);
+      if (recovered != null) {
+        final plaintext = await _cipher.open(await recovered.readAsBytes());
+        final decoded = jsonDecode(utf8.decode(plaintext));
         if (decoded is Map<String, dynamic> && decoded['version'] == 1) {
           _value = PrivacySettings.fromJson(decoded);
         }
+      } else {
+        await _migrateLegacy();
       }
-    } on Object {
-      _value = const PrivacySettings();
+    } on Object catch (error) {
+      _storageError = error;
+      _value = PrivacySettings.failClosed;
     }
     _loaded = true;
     notifyListeners();
   }
 
-  Future<void> update(PrivacySettings value) async {
-    if (_value.toJson().toString() == value.toJson().toString()) return;
+  Future<void> update(PrivacySettings value) {
+    if (_value.toJson().toString() == value.toJson().toString()) {
+      return Future<void>.value();
+    }
     _value = value;
+    _storageError = null;
     notifyListeners();
+    final operation = _updateTail.then((_) => _persist(value));
+    _updateTail = operation.onError((error, _) {
+      _storageError = error;
+      if (_value.toJson().toString() == value.toJson().toString()) {
+        _value = PrivacySettings.failClosed;
+      }
+      notifyListeners();
+    });
+    return _updateTail;
+  }
+
+  Future<void> _persist(PrivacySettings value) async {
     try {
       final file = await _file();
-      await file.parent.create(recursive: true);
-      await file.writeAsString(jsonEncode(value.toJson()), flush: true);
+      final plaintext = Uint8List.fromList(
+        utf8.encode(jsonEncode(value.toJson())),
+      );
+      await writeFileRecoverably(file, await _cipher.protect(plaintext));
+      final legacy = await _legacyFile();
+      await eraseFileBestEffort(legacy);
     } on Object {
-      // The in-memory setting remains active if local persistence is unavailable.
+      rethrow;
     }
   }
 
   Future<File> _file() async {
     final root = await _supportDirectory();
     return File(
+      '${root.path}${Platform.pathSeparator}privacy${Platform.pathSeparator}settings-v2.vault',
+    );
+  }
+
+  Future<File> _legacyFile() async {
+    final root = await _supportDirectory();
+    return File(
       '${root.path}${Platform.pathSeparator}privacy${Platform.pathSeparator}settings.json',
     );
+  }
+
+  Future<void> _migrateLegacy() async {
+    final legacy = await _legacyFile();
+    if (!await legacy.exists()) return;
+    final decoded = jsonDecode(await legacy.readAsString());
+    if (decoded is Map<String, dynamic> && decoded['version'] == 1) {
+      _value = PrivacySettings.fromJson(decoded);
+      final file = await _file();
+      final plaintext = Uint8List.fromList(
+        utf8.encode(jsonEncode(_value.toJson())),
+      );
+      await writeFileRecoverably(file, await _cipher.protect(plaintext));
+      await eraseFileBestEffort(legacy);
+    }
   }
 }

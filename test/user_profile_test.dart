@@ -11,6 +11,7 @@ void main() {
     );
     addTearDown(() => supportDirectory.delete(recursive: true));
     final store = FileUserProfileStore(
+      cipher: const _TestCipher(),
       supportDirectory: () async => supportDirectory,
     );
     final photo = Uint8List.fromList([0x89, 0x50, 0x4e, 0x47]);
@@ -21,6 +22,11 @@ void main() {
     expect(restored?.displayName, 'Ada Lovelace');
     expect(restored?.initials, 'AL');
     expect(restored?.photoBytes, photo);
+    final stored = await File(
+      '${supportDirectory.path}${Platform.pathSeparator}profile'
+      '${Platform.pathSeparator}profile-v2.vault',
+    ).readAsBytes();
+    expect(String.fromCharCodes(stored), isNot(contains('Ada Lovelace')));
   });
 
   test('requires a non-empty bounded display name', () async {
@@ -29,6 +35,7 @@ void main() {
     );
     addTearDown(() => supportDirectory.delete(recursive: true));
     final store = FileUserProfileStore(
+      cipher: const _TestCipher(),
       supportDirectory: () async => supportDirectory,
     );
 
@@ -43,4 +50,16 @@ void main() {
       ),
     );
   });
+}
+
+class _TestCipher implements LocalDataCipher {
+  const _TestCipher();
+
+  @override
+  Future<Uint8List> open(Uint8List record) async =>
+      Uint8List.fromList(record.reversed.toList());
+
+  @override
+  Future<Uint8List> protect(Uint8List plaintext) async =>
+      Uint8List.fromList(plaintext.reversed.toList());
 }

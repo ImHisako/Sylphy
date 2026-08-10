@@ -9,7 +9,7 @@ import 'package:ffi/ffi.dart';
 
 import '../diagnostics/app_log.dart';
 
-const _expectedAbiVersion = 8;
+const _expectedAbiVersion = 10;
 
 typedef _NativeAbiVersion = Uint32 Function();
 typedef _DartAbiVersion = int Function();
@@ -78,7 +78,7 @@ class NativeCoreClient implements NativeCoreApi {
   final Queue<_PendingNativeCall> _urgentCalls = Queue();
   final Queue<_PendingNativeCall> _normalCalls = Queue();
   final List<Completer<void>> _idleWaiters = [];
-  Future<SendPort>? _workerPort;
+  Future<_NativeWorker>? _worker;
   bool _workerBusy = false;
 
   bool get backgroundCallInProgress => _pendingBackgroundCalls > 0;
@@ -132,6 +132,9 @@ class NativeCoreClient implements NativeCoreApi {
   @override
   NativeCoreResponse status() => call(const {'command': 'status'});
 
+  Future<NativeCoreResponse> statusInBackground() =>
+      _callInBackground(const {'command': 'status'}, priority: true);
+
   @override
   NativeCoreResponse startVeilid(String storageDirectory) =>
       call({'command': 'start_veilid', 'storage_directory': storageDirectory});
@@ -141,6 +144,9 @@ class NativeCoreClient implements NativeCoreApi {
         'command': 'start_veilid',
         'storage_directory': storageDirectory,
       });
+
+  Future<NativeCoreResponse> veilidStatusInBackground() =>
+      _callInBackground(const {'command': 'veilid_status'}, priority: true);
 
   @override
   NativeCoreResponse veilidStatus() => call(const {'command': 'veilid_status'});
@@ -164,14 +170,29 @@ class NativeCoreClient implements NativeCoreApi {
     return call({
       'command': 'list_messages',
       'conversation_id': conversationId,
+      'limit': 120,
     });
   }
 
-  Future<NativeCoreResponse> listMessagesInBackground(String conversationId) =>
-      _callInBackground({
-        'command': 'list_messages',
-        'conversation_id': conversationId,
-      });
+  Future<NativeCoreResponse> listMessagesInBackground(
+    String conversationId, {
+    bool priority = false,
+    int? beforeMs,
+    String? beforeId,
+  }) => _callInBackground({
+    'command': 'list_messages',
+    'conversation_id': conversationId,
+    if (beforeMs != null) 'before_ms': beforeMs,
+    if (beforeId != null) 'before_id': beforeId,
+    'limit': 120,
+  }, priority: priority);
+
+  Future<NativeCoreResponse> configurePrivacyInBackground({
+    required bool allowUnknownContacts,
+  }) => _callInBackground({
+    'command': 'configure_privacy',
+    'allow_unknown_contacts': allowUnknownContacts,
+  }, priority: true);
 
   Future<NativeCoreResponse> syncInboundInBackground() =>
       _callInBackground(const {'command': 'sync_inbound'});
@@ -347,10 +368,31 @@ class NativeCoreClient implements NativeCoreApi {
     'vault_password': vaultPassword,
   });
 
-  Future<NativeCoreResponse> _callInBackground(Map<String, Object> request) {
+  Future<NativeCoreResponse> protectLocalDataInBackground({
+    required String vaultPassword,
+    required String valueBase64,
+  }) => _callInBackground({
+    'command': 'protect_local_data',
+    'vault_password': vaultPassword,
+    'value_base64': valueBase64,
+  }, priority: true);
+
+  Future<NativeCoreResponse> openLocalDataInBackground({
+    required String vaultPassword,
+    required String recordBase64,
+  }) => _callInBackground({
+    'command': 'open_local_data',
+    'vault_password': vaultPassword,
+    'record_base64': recordBase64,
+  }, priority: true);
+
+  Future<NativeCoreResponse> _callInBackground(
+    Map<String, Object> request, {
+    bool priority = false,
+  }) {
     final pending = _PendingNativeCall(request);
     _pendingBackgroundCalls += 1;
-    if (_isUrgentCommand(request['command'])) {
+    if (priority || _isUrgentCommand(request['command'])) {
       _urgentCalls.addLast(pending);
     } else {
       _normalCalls.addLast(pending);
@@ -360,7 +402,10 @@ class NativeCoreClient implements NativeCoreApi {
   }
 
   bool _isUrgentCommand(Object? command) =>
-      command == 'send_text' || command == 'send_attachment';
+      command == 'send_text' ||
+      command == 'send_attachment' ||
+      command == 'mark_conversation_read' ||
+      command == 'ensure_identity';
 
   void _drainBackgroundCalls() {
     if (_workerBusy) return;
@@ -415,35 +460,61 @@ class NativeCoreClient implements NativeCoreApi {
   }
 
   Future<NativeCoreResponse> _workerCall(Map<String, Object> request) async {
-    final worker = await (_workerPort ??= _spawnWorker());
+    final worker = await (_worker ??= _spawnWorker());
     final responsePort = ReceivePort();
     try {
-      worker.send((responsePort.sendPort, request));
-      final response = await responsePort.first;
+      worker.port.send((responsePort.sendPort, request));
+      final command = request['command'];
+      final timeout = command == 'export_account' || command == 'import_account'
+          ? const Duration(minutes: 2)
+          : const Duration(seconds: 30);
+      final response = await responsePort.first.timeout(timeout);
       if (response is Map) {
         return NativeCoreResponse.fromJson(response.cast<String, dynamic>());
       }
       throw const NativeCoreException('Risposta non valida dal worker nativo.');
+    } on TimeoutException {
+      throw const NativeCoreException(
+        'Il core nativo sta ancora completando l’operazione. Riprova più tardi.',
+      );
+    } on Object {
+      worker.isolate.kill(priority: Isolate.immediate);
+      _worker = null;
+      rethrow;
     } finally {
       responsePort.close();
     }
   }
 
-  static Future<SendPort> _spawnWorker() async {
+  static Future<_NativeWorker> _spawnWorker() async {
     final ready = ReceivePort();
-    await Isolate.spawn(_nativeWorkerMain, ready.sendPort);
-    final port = await ready.first;
-    ready.close();
-    if (port is! SendPort) {
-      throw const NativeCoreException('Worker nativo non disponibile.');
+    Isolate? isolate;
+    try {
+      isolate = await Isolate.spawn(_nativeWorkerMain, ready.sendPort);
+      final port = await ready.first.timeout(const Duration(seconds: 10));
+      if (port is! SendPort) {
+        isolate.kill(priority: Isolate.immediate);
+        throw const NativeCoreException('Worker nativo non disponibile.');
+      }
+      return _NativeWorker(isolate: isolate, port: port);
+    } on Object {
+      isolate?.kill(priority: Isolate.immediate);
+      rethrow;
+    } finally {
+      ready.close();
     }
-    return port;
   }
 
   @override
   NativeCoreResponse verifyHybridPrimitives() {
     return call(const {'command': 'hybrid_self_test'});
   }
+
+  Future<NativeCoreResponse> verifyHybridPrimitivesInBackground() =>
+      _callInBackground(const {'command': 'hybrid_self_test'}, priority: true);
+
+  Future<NativeCoreResponse> verifyDoubleRatchetInBackground() =>
+      _callInBackground(const {'command': 'ratchet_self_test'}, priority: true);
 
   @override
   NativeCoreResponse verifyDoubleRatchet() {
@@ -452,13 +523,6 @@ class NativeCoreClient implements NativeCoreApi {
 
   NativeCoreResponse call(Map<String, Object> request) {
     final command = request['command'] as String? ?? 'unknown';
-    if (backgroundCallInProgress) {
-      return const NativeCoreResponse(
-        ok: false,
-        code: 'native_core_busy',
-        data: {},
-      );
-    }
     final stopwatch = Stopwatch()..start();
     AppLog.instance.record(
       category: 'native_core',
@@ -518,6 +582,13 @@ class _PendingNativeCall {
 
   final Map<String, Object> request;
   final Completer<NativeCoreResponse> completer = Completer();
+}
+
+class _NativeWorker {
+  const _NativeWorker({required this.isolate, required this.port});
+
+  final Isolate isolate;
+  final SendPort port;
 }
 
 @pragma('vm:entry-point')

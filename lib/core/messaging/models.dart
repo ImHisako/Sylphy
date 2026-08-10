@@ -1,6 +1,6 @@
 import 'dart:typed_data';
 
-enum DeliveryState { sent, delivered, read }
+enum DeliveryState { queued, sent, delivered, read }
 
 enum ContactSafety { verified, pending, refreshRequired }
 

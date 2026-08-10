@@ -13,7 +13,11 @@ const SALT_LENGTH: usize = 16;
 const NONCE_LENGTH: usize = 24;
 const KEY_LENGTH: usize = 32;
 const MIN_CIPHERTEXT_LENGTH: usize = 16;
-const MAX_VAULT_PAYLOAD_LENGTH: usize = 32 * 1024 * 1024;
+// Account exports contain an encrypted message history and may legitimately
+// exceed the per-record message limit. Keep one explicit ceiling shared by
+// password and device-key vault records so the advertised backup limit can be
+// honoured without unbounded allocations.
+const MAX_VAULT_PAYLOAD_LENGTH: usize = 128 * 1024 * 1024;
 const KEY_RECORD_VERSION: u8 = 2;
 
 pub fn seal(password: &str, plaintext: &[u8]) -> CoreResult<Vec<u8>> {

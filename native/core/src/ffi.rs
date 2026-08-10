@@ -25,6 +25,15 @@ enum CoreRequest {
     SyncInbound,
     ListMessages {
         conversation_id: String,
+        #[serde(default)]
+        before_ms: Option<u64>,
+        #[serde(default)]
+        before_id: Option<String>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    ConfigurePrivacy {
+        allow_unknown_contacts: bool,
     },
     AddContact {
         display_name: String,
@@ -77,6 +86,14 @@ enum CoreRequest {
         backup_base64: String,
         storage_directory: String,
         vault_password: String,
+    },
+    ProtectLocalData {
+        vault_password: String,
+        value_base64: String,
+    },
+    OpenLocalData {
+        vault_password: String,
+        record_base64: String,
     },
 }
 
@@ -182,11 +199,31 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
             code: "ok",
             data: messaging_adapter::sync_inbound_messages()?,
         }),
-        CoreRequest::ListMessages { conversation_id } => Ok(CoreResponse {
+        CoreRequest::ListMessages {
+            conversation_id,
+            before_ms,
+            before_id,
+            limit,
+        } => Ok(CoreResponse {
             ok: true,
             code: "ok",
-            data: messaging_adapter::list_messages(&conversation_id)?,
+            data: messaging_adapter::list_messages(
+                &conversation_id,
+                before_ms,
+                before_id.as_deref(),
+                limit,
+            )?,
         }),
+        CoreRequest::ConfigurePrivacy {
+            allow_unknown_contacts,
+        } => {
+            messaging_adapter::configure_privacy(allow_unknown_contacts)?;
+            Ok(CoreResponse {
+                ok: true,
+                code: "ok",
+                data: json!({"configured": true}),
+            })
+        }
         CoreRequest::AddContact {
             display_name,
             invitation_code,
@@ -315,6 +352,34 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
                 &vault_password,
             )?,
         }),
+        CoreRequest::ProtectLocalData {
+            vault_password,
+            value_base64,
+        } => {
+            let value = STANDARD_NO_PAD
+                .decode(value_base64)
+                .map_err(|_| CoreError::InvalidInput)?;
+            let record = vault::seal(&vault_password, &value)?;
+            Ok(CoreResponse {
+                ok: true,
+                code: "ok",
+                data: json!({"record_base64": STANDARD_NO_PAD.encode(record)}),
+            })
+        }
+        CoreRequest::OpenLocalData {
+            vault_password,
+            record_base64,
+        } => {
+            let record = STANDARD_NO_PAD
+                .decode(record_base64)
+                .map_err(|_| CoreError::InvalidInput)?;
+            let value = vault::open(&vault_password, &record)?;
+            Ok(CoreResponse {
+                ok: true,
+                code: "ok",
+                data: json!({"value_base64": STANDARD_NO_PAD.encode(value.as_slice())}),
+            })
+        }
     }
 }
 

@@ -147,6 +147,10 @@ pub(crate) fn active_identity() -> CoreResult<IdentityRecord> {
         .ok_or(CoreError::FeatureUnavailable)
 }
 
+pub(crate) fn active_dht_descriptor() -> CoreResult<Option<String>> {
+    Ok(active_identity()?.dht_descriptor_json.clone())
+}
+
 pub(crate) fn export_account_record() -> CoreResult<serde_json::Value> {
     serde_json::to_value(active_identity()?).map_err(|_| CoreError::Internal)
 }
@@ -163,6 +167,28 @@ pub(crate) fn import_account_record(
     let directory = PathBuf::from(storage_directory).join("identity");
     fs::create_dir_all(&directory).map_err(|_| CoreError::Internal)?;
     persist_record(&directory.join(IDENTITY_FILE_NAME), vault_password, &record)?;
+    *active_identity_store()
+        .lock()
+        .map_err(|_| CoreError::Internal)? = Some(record);
+    ratchet_adapter::configure_storage(storage_directory)
+}
+
+pub(crate) fn validate_account_record(value: &serde_json::Value) -> CoreResult<()> {
+    let record: IdentityRecord =
+        serde_json::from_value(value.clone()).map_err(|_| CoreError::VerificationFailed)?;
+    record.validate()
+}
+
+pub(crate) fn activate_from_storage(
+    storage_directory: &str,
+    vault_password: &str,
+) -> CoreResult<()> {
+    validate_inputs(storage_directory, vault_password)?;
+    let path = PathBuf::from(storage_directory)
+        .join("identity")
+        .join(IDENTITY_FILE_NAME);
+    let record = load_record(&path, vault_password)?;
+    record.validate()?;
     *active_identity_store()
         .lock()
         .map_err(|_| CoreError::Internal)? = Some(record);
@@ -241,12 +267,19 @@ pub fn ensure_identity(
         record.rotate_prekeys(next_expiration);
     }
     record.validate()?;
+    // Private key material must be durable before a matching public bundle is
+    // made observable through Veilid. Descriptor changes are persisted again
+    // after publication below.
+    if should_persist {
+        persist_record(&path, vault_password, &record)?;
+        should_persist = false;
+    }
     *active_identity_store()
         .lock()
         .map_err(|_| CoreError::Internal)? = Some(record.clone());
     ratchet_adapter::configure_storage(storage_directory)?;
-    let signal_pre_key = ratchet_adapter::public_pre_key_bundle()?;
-    let bundle = record.public_bundle(signal_pre_key)?;
+    let mut signal_pre_key = ratchet_adapter::public_pre_key_bundle()?;
+    let mut bundle = record.public_bundle(signal_pre_key.clone())?;
     bundle.validate()?;
     let identity_hash = Sha256::digest(&bundle.identity_ed25519);
     let identity_id = grouped_hex(&identity_hash[..8]);
@@ -269,12 +302,36 @@ pub fn ensure_identity(
         crate::peer_identity::set_public_mailbox(None)?;
     }
     if let Ok(route_blob) = crate::veilid_adapter::local_route_blob() {
-        let published = crate::peer_identity::PublishedIdentity::new(
+        let previous = record
+            .dht_descriptor_json
+            .as_deref()
+            .and_then(|descriptor| crate::veilid_adapter::resolve_owned_identity(descriptor).ok());
+        if let Some(previous) = &previous {
+            let reserved = previous
+                .delivery_devices()?
+                .into_iter()
+                .filter_map(|device| {
+                    device
+                        .bundle
+                        .signal_pre_key
+                        .map(|pre_key| (pre_key.device_id, pre_key.identity_key))
+                })
+                .collect::<Vec<_>>();
+            if ratchet_adapter::avoid_device_id_collisions(&reserved)? {
+                signal_pre_key = ratchet_adapter::public_pre_key_bundle()?;
+                bundle = record.public_bundle(signal_pre_key.clone())?;
+                let serialized_bundle =
+                    serde_json::to_vec(&bundle).map_err(|_| CoreError::Internal)?;
+                invitation_code = format!("sylphy:{}", STANDARD_NO_PAD.encode(serialized_bundle));
+            }
+        }
+        let published = crate::peer_identity::PublishedIdentity::merged_for_current_device(
             &record.signing_key()?,
+            previous.as_ref(),
             bundle.clone(),
             route_blob,
             public_profile,
-            crate::peer_identity::current_public_mailbox(),
+            None,
         )?;
         if let Ok((short_code, descriptor)) = crate::veilid_adapter::publish_identity(
             record.dht_descriptor_json.as_deref(),

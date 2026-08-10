@@ -1,5 +1,7 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 
 import '../../core/diagnostics/app_log.dart';
 import '../../core/identity/account_transfer_service.dart';
@@ -7,6 +9,7 @@ import '../../core/native/native_core.dart';
 import '../../core/profile/user_profile.dart';
 import '../../core/privacy/privacy_settings.dart';
 import '../../core/veilid/veilid_service.dart';
+import 'account_qr_scanner_page.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({
@@ -34,7 +37,10 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _accountTransferRunning = false;
   String? _accountTransferResult;
 
-  Future<String?> _requestTransferPassword({required bool confirm}) async {
+  Future<String?> _requestTransferPassword({
+    required bool confirm,
+    String? actionLabel,
+  }) async {
     final first = TextEditingController();
     final second = TextEditingController();
     String? error;
@@ -91,7 +97,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 }
                 Navigator.of(dialogContext).pop(first.text);
               },
-              child: Text(confirm ? 'Crea file' : 'Scegli file'),
+              child: Text(actionLabel ?? (confirm ? 'Crea file' : 'Continua')),
             ),
           ],
         ),
@@ -102,9 +108,76 @@ class _SettingsPageState extends State<SettingsPage> {
     return result;
   }
 
-  Future<void> _exportAccount() async {
+  NativeCoreClient? _transferCoreOrExplain() {
     final core = widget.nativeCore;
-    if (core is! NativeCoreClient || _accountTransferRunning) return;
+    if (core is NativeCoreClient) return core;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Trasferimento non disponibile: installa la build Sylphy ABI 10 più recente.',
+        ),
+      ),
+    );
+    return null;
+  }
+
+  Future<void> _linkAnotherDevice() async {
+    if (_accountTransferRunning || _transferCoreOrExplain() == null) return;
+    if (!_isDesktopPlatform) {
+      await _exportAccount();
+      return;
+    }
+    final choice = await showModalBottomSheet<_AccountExportMethod>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const ListTile(
+                title: Text(
+                  'Collega un altro dispositivo',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+                subtitle: Text('Scegli come trasferire l’account cifrato.'),
+              ),
+              ListTile(
+                key: const ValueKey('export-account-qr'),
+                leading: const Icon(Icons.qr_code_2_rounded),
+                title: const Text('Mostra QR Code'),
+                subtitle: const Text(
+                  'Trasferimento diretto sulla stessa rete Wi-Fi o LAN.',
+                ),
+                onTap: () =>
+                    Navigator.pop(context, _AccountExportMethod.qrCode),
+              ),
+              ListTile(
+                key: const ValueKey('export-account-file'),
+                leading: const Icon(Icons.save_alt_rounded),
+                title: const Text('Salva file cifrato'),
+                subtitle: const Text(
+                  'Metodo compatibile con tutti i dispositivi.',
+                ),
+                onTap: () => Navigator.pop(context, _AccountExportMethod.file),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted || choice == null) return;
+    if (choice == _AccountExportMethod.qrCode) {
+      await _exportAccountViaQr();
+    } else {
+      await _exportAccount();
+    }
+  }
+
+  Future<void> _exportAccount() async {
+    final core = _transferCoreOrExplain();
+    if (core == null || _accountTransferRunning) return;
     final password = await _requestTransferPassword(confirm: true);
     if (password == null || !mounted) return;
     setState(() {
@@ -136,45 +209,161 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  Future<void> _exportAccountViaQr() async {
+    final core = _transferCoreOrExplain();
+    if (core == null || _accountTransferRunning) return;
+    final password = await _requestTransferPassword(
+      confirm: true,
+      actionLabel: 'Mostra QR',
+    );
+    if (password == null || !mounted) return;
+    setState(() {
+      _accountTransferRunning = true;
+      _accountTransferResult = 'Preparazione del trasferimento sicuro…';
+    });
+    AccountQrTransferSession? session;
+    try {
+      final service = AccountTransferService(nativeCore: core);
+      final document = await service.createBackupDocument(
+        profile: widget.profile,
+        transferPassword: password,
+      );
+      session = await AccountQrTransferSession.start(document);
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => _AccountQrDialog(session: session!),
+      );
+      if (mounted) {
+        setState(() {
+          _accountTransferResult =
+              session!.state.value == AccountQrTransferState.transferred
+              ? 'Account inviato al telefono.'
+              : 'Trasferimento QR chiuso.';
+        });
+      }
+    } on AccountTransferException catch (error) {
+      AppLog.instance.recordError(
+        category: 'account',
+        action: 'qr_export_failed',
+        error: error,
+      );
+      if (mounted) {
+        setState(() {
+          _accountTransferResult = error.code == 'no_local_network'
+              ? 'Collega computer e telefono alla stessa rete e riprova.'
+              : 'Impossibile avviare il trasferimento QR.';
+        });
+      }
+    } finally {
+      await session?.dispose();
+      if (mounted) setState(() => _accountTransferRunning = false);
+    }
+  }
+
   Future<void> _importAccount() async {
-    final core = widget.nativeCore;
-    if (core is! NativeCoreClient || _accountTransferRunning) return;
+    final core = _transferCoreOrExplain();
+    if (core == null || _accountTransferRunning) return;
+    String? qrPayload;
+    var useQr = false;
+    if (_isMobilePlatform) {
+      final source = await showModalBottomSheet<_AccountImportMethod>(
+        context: context,
+        showDragHandle: true,
+        builder: (context) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const ListTile(
+                title: Text(
+                  'Usa un account esistente',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+                subtitle: Text('Scegli il computer o un file già esportato.'),
+              ),
+              ListTile(
+                key: const ValueKey('import-account-qr'),
+                leading: const Icon(Icons.qr_code_scanner_rounded),
+                title: const Text('Scansiona QR dal computer'),
+                onTap: () =>
+                    Navigator.pop(context, _AccountImportMethod.qrCode),
+              ),
+              ListTile(
+                key: const ValueKey('import-account-file'),
+                leading: const Icon(Icons.file_open_outlined),
+                title: const Text('Scegli file account'),
+                onTap: () => Navigator.pop(context, _AccountImportMethod.file),
+              ),
+              const SizedBox(height: 12),
+            ],
+          ),
+        ),
+      );
+      if (!mounted || source == null) return;
+      useQr = source == _AccountImportMethod.qrCode;
+      if (useQr) {
+        qrPayload = await Navigator.of(context).push<String>(
+          MaterialPageRoute(
+            settings: const RouteSettings(name: '/account-qr-scanner'),
+            builder: (context) => const AccountQrScannerPage(),
+          ),
+        );
+        if (!mounted || qrPayload == null) return;
+      }
+    }
     final password = await _requestTransferPassword(confirm: false);
     if (password == null || !mounted) return;
     setState(() {
       _accountTransferRunning = true;
       _accountTransferResult = null;
     });
+    var networkStopped = false;
     try {
-      await widget.veilidService.stop();
-      final profile = await AccountTransferService(
-        nativeCore: core,
-      ).importFromFile(transferPassword: password);
-      if (profile != null) {
-        widget.onAccountImported(profile);
-        await widget.veilidService.start();
+      final service = AccountTransferService(nativeCore: core);
+      final Uint8List? document = useQr
+          ? await service.downloadFromQrPayload(qrPayload!)
+          : await service.pickBackupDocument();
+      if (document == null) {
+        if (mounted) {
+          setState(() => _accountTransferResult = 'Importazione annullata.');
+        }
+        return;
       }
+      await widget.veilidService.stop();
+      networkStopped = true;
+      final profile = await service.importFromDocument(
+        bytes: document,
+        transferPassword: password,
+      );
+      widget.onAccountImported(profile);
       if (mounted) {
-        setState(() {
-          _accountTransferResult = profile == null
-              ? 'Importazione annullata.'
-              : 'Account collegato: profilo, chat e messaggi sono stati ripristinati.';
-        });
+        setState(
+          () => _accountTransferResult =
+              'Account collegato: profilo, chat e messaggi sono stati ripristinati.',
+        );
       }
     } on Object catch (error) {
+      final importedProfile = error is AccountTransferException
+          ? error.importedProfile
+          : null;
+      if (importedProfile != null) {
+        widget.onAccountImported(importedProfile);
+      }
       AppLog.instance.recordError(
         category: 'account',
         action: 'import_failed',
         error: error,
       );
-      await widget.veilidService.start();
       if (mounted) {
         setState(
-          () => _accountTransferResult =
-              'Importazione non riuscita. Controlla file e password.',
+          () => _accountTransferResult = importedProfile == null
+              ? 'Importazione non riuscita. Controlla file e password.'
+              : 'Account collegato, ma il profilo non è stato salvato sul dispositivo. Riprova dal profilo.',
         );
       }
     } finally {
+      if (networkStopped) await widget.veilidService.start();
       if (mounted) setState(() => _accountTransferRunning = false);
     }
   }
@@ -197,7 +386,9 @@ class _SettingsPageState extends State<SettingsPage> {
       if (core == null) {
         _diagnosticResult = 'Core nativo non caricato.';
       } else {
-        final status = core.status();
+        final status = core is NativeCoreClient
+            ? await core.statusInBackground()
+            : core.status();
         await widget.veilidService.retry();
         final network = widget.veilidService.snapshot;
         _diagnosticResult = status.ok
@@ -292,11 +483,9 @@ class _SettingsPageState extends State<SettingsPage> {
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
                           : const Icon(Icons.chevron_right_rounded),
-                      onTap:
-                          widget.nativeCore is NativeCoreClient &&
-                              !_accountTransferRunning
-                          ? _exportAccount
-                          : null,
+                      onTap: _accountTransferRunning
+                          ? null
+                          : _linkAnotherDevice,
                     ),
                     const Divider(height: 1),
                     ListTile(
@@ -307,11 +496,7 @@ class _SettingsPageState extends State<SettingsPage> {
                         'Importa il file creato sull’altro telefono o computer.',
                       ),
                       trailing: const Icon(Icons.chevron_right_rounded),
-                      onTap:
-                          widget.nativeCore is NativeCoreClient &&
-                              !_accountTransferRunning
-                          ? _importAccount
-                          : null,
+                      onTap: _accountTransferRunning ? null : _importAccount,
                     ),
                     if (_accountTransferResult != null) ...[
                       const Divider(height: 1),
@@ -357,24 +542,6 @@ class _SettingsPageState extends State<SettingsPage> {
                         privacy.copyWith(shareProfilePhoto: value),
                       ),
                     ),
-                    const Divider(height: 1),
-                    SwitchListTile(
-                      secondary: const Icon(Icons.circle_outlined),
-                      title: const Text('Mostra quando sei online'),
-                      value: privacy.showOnlineStatus,
-                      onChanged: (value) => widget.privacySettings.update(
-                        privacy.copyWith(showOnlineStatus: value),
-                      ),
-                    ),
-                    const Divider(height: 1),
-                    SwitchListTile(
-                      secondary: const Icon(Icons.schedule_outlined),
-                      title: const Text('Mostra ultimo accesso'),
-                      value: privacy.showLastSeen,
-                      onChanged: (value) => widget.privacySettings.update(
-                        privacy.copyWith(showLastSeen: value),
-                      ),
-                    ),
                   ],
                 ),
               ),
@@ -384,19 +551,6 @@ class _SettingsPageState extends State<SettingsPage> {
               _SettingsCard(
                 child: Column(
                   children: [
-                    SwitchListTile(
-                      key: const ValueKey('send-read-receipts'),
-                      secondary: const Icon(Icons.done_all_rounded),
-                      title: const Text('Conferme di lettura'),
-                      subtitle: const Text(
-                        'Se disattivate, l’altro utente non vedrà le doppie spunte di lettura.',
-                      ),
-                      value: privacy.sendReadReceipts,
-                      onChanged: (value) => widget.privacySettings.update(
-                        privacy.copyWith(sendReadReceipts: value),
-                      ),
-                    ),
-                    const Divider(height: 1),
                     SwitchListTile(
                       key: const ValueKey('show-read-receipts'),
                       secondary: const Icon(Icons.visibility_outlined),
@@ -546,6 +700,82 @@ class _SettingsCard extends StatelessWidget {
   }
 }
 
+enum _AccountExportMethod { qrCode, file }
+
+enum _AccountImportMethod { qrCode, file }
+
+class _AccountQrDialog extends StatelessWidget {
+  const _AccountQrDialog({required this.session});
+
+  final AccountQrTransferSession session;
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Scansiona dal telefono'),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 390),
+        child: AnimatedBuilder(
+          animation: session.state,
+          builder: (context, _) {
+            final state = session.state.value;
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (state == AccountQrTransferState.waiting)
+                  Container(
+                    color: Colors.white,
+                    padding: const EdgeInsets.all(12),
+                    child: QrImageView(
+                      key: const ValueKey('account-transfer-qr'),
+                      data: session.qrPayload,
+                      size: 280,
+                      backgroundColor: Colors.white,
+                      eyeStyle: const QrEyeStyle(color: Colors.black),
+                      dataModuleStyle: const QrDataModuleStyle(
+                        color: Colors.black,
+                      ),
+                      errorCorrectionLevel: QrErrorCorrectLevel.M,
+                    ),
+                  )
+                else
+                  Icon(
+                    state == AccountQrTransferState.transferred
+                        ? Icons.check_circle_rounded
+                        : state == AccountQrTransferState.expired
+                        ? Icons.timer_off_outlined
+                        : Icons.error_outline_rounded,
+                    size: 72,
+                    color: state == AccountQrTransferState.transferred
+                        ? const Color(0xFF8CE6AC)
+                        : const Color(0xFFFF9D95),
+                  ),
+                const SizedBox(height: 16),
+                Text(switch (state) {
+                  AccountQrTransferState.waiting =>
+                    'Sul telefono apri “Usa un account esistente” e scegli “Scansiona QR”. I dispositivi devono essere sulla stessa rete.',
+                  AccountQrTransferState.transferred =>
+                    'File cifrato trasferito. Completa l’importazione sul telefono.',
+                  AccountQrTransferState.expired =>
+                    'Il QR è scaduto dopo 5 minuti. Chiudi e generane uno nuovo.',
+                  AccountQrTransferState.error =>
+                    'Trasferimento interrotto. Chiudi e riprova.',
+                }, textAlign: TextAlign.center),
+              ],
+            );
+          },
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Chiudi'),
+        ),
+      ],
+    );
+  }
+}
+
 class _SectionTitle extends StatelessWidget {
   const _SectionTitle(this.label);
 
@@ -614,3 +844,14 @@ Color _logColor(AppLogLevel level) => switch (level) {
   AppLogLevel.warning => const Color(0xFFFFC56B),
   AppLogLevel.error => const Color(0xFFFF8F86),
 };
+
+bool get _isDesktopPlatform =>
+    !kIsWeb &&
+    (defaultTargetPlatform == TargetPlatform.windows ||
+        defaultTargetPlatform == TargetPlatform.linux ||
+        defaultTargetPlatform == TargetPlatform.macOS);
+
+bool get _isMobilePlatform =>
+    !kIsWeb &&
+    (defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS);

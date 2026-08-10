@@ -2,7 +2,7 @@
 
 ## ABI
 
-Il confine Flutter/Rust è una singola ABI C JSON, attualmente alla versione 7. Le richieste sono UTF-8; le risposte di stato non riportano password, chiavi, plaintext o diagnostica crittografica. I comandi messaging possono restituire soltanto read model già autenticati e decrittati dal core. Ogni stringa restituita viene liberata esclusivamente tramite `sylphy_core_free_string`.
+Il confine Flutter/Rust è una singola ABI C JSON, attualmente alla versione 10. Le richieste sono UTF-8; le risposte di stato non riportano password, chiavi, plaintext o diagnostica crittografica. I comandi messaging possono restituire soltanto read model già autenticati e decrittati dal core. Ogni stringa restituita viene liberata esclusivamente tramite `sylphy_core_free_string`.
 
 `ensure_identity` crea o riapre un record Argon2id/XChaCha20-Poly1305 contenente la chiave Ed25519 stabile, la prekey privata X25519 e il seed ML-KEM-768. Le prekey pubbliche sono firmate e ruotate alla scadenza, mentre il fingerprint Ed25519 rimane stabile. Il boundary restituisce esclusivamente fingerprint, scadenza e invito pubblico `sylphy:`; il segreto del vault è device-bound e proviene dal secure storage della piattaforma.
 
@@ -14,12 +14,12 @@ I comandi ABI `start_veilid`, `veilid_status` e `stop_veilid` sono sincroni risp
 
 `add_contact` usa il codice breve Veilid per recuperare una `PublishedIdentity` firmata. Il nome mostrato è sempre il display name autenticato contenuto nel profilo remoto (oppure un identificatore Sylphy deterministico se il proprietario ha scelto di non pubblicarlo): il client che importa non può più assegnare un alias arbitrario. Il core impone limiti di dimensione, versione e cardinalità, verifica firme, capability e scadenza e rifiuta record duplicati.
 
-Il layer di trasporto riceve esclusivamente `MessageEnvelope` già autenticati e cifrati. Bundle pubblici firmati, mailbox cifrate e riferimenti ad allegati cifrati sono gli unici record pubblicabili.
+Il layer di trasporto riceve esclusivamente `MessageEnvelope` già autenticati e cifrati. I bundle pubblici firmati non includono una chiave di scrittura mailbox condivisa: i messaggi tra contatti usano la route diretta, mentre la mailbox cifrata resta privata ai dispositivi dello stesso account. Identità firmate e riferimenti ad allegati cifrati sono gli altri record pubblicabili.
 
 ## Ratchet
 
-La feature `signal-ratchet` integra `signalapp/libsignal` v0.99.3 tramite commit immutabile. Il percorso di produzione invoca direttamente `process_prekey_bundle`, `message_encrypt` e `message_decrypt`; il bundle pubblico contiene identity key, signed prekey EC e Kyber prekey Signal, tutte legate al fingerprint Sylphy dalla firma Ed25519. Root key, chain key, contatori e skipped-message keys non attraversano mai FFI.
+La feature `signal-ratchet` integra `signalapp/libsignal` v0.100.0 tramite commit immutabile. Il percorso di produzione invoca direttamente `process_prekey_bundle`, `message_encrypt` e `message_decrypt`; il bundle pubblico contiene identity key, signed prekey EC e Kyber prekey Signal, tutte legate al fingerprint Sylphy dalla firma Ed25519. Root key, chain key, contatori e skipped-message keys non attraversano mai FFI.
 
 Il ciphertext opaco Signal/PreKey viene inserito in un envelope Sylphy ibrido e autenticato. Il self-test ABI usa lo stesso provider ufficiale e verifica un round trip PreKey completo.
 
-L'account Signal globale e ogni sessione per contatto sono file cifrati distinti e sostituiti atomicamente. La cronologia usa `messages-v2.log`: ogni mutazione è un frame autenticato append-only, con compattazione occasionale e migrazione automatica da `messages-v1.vault`. Il segreto casuale di cifratura è conservato nell'identity vault Argon2id, evitando di rieseguire Argon2 per ogni messaggio. Le capability firmate negoziano `signal-libsignal-v1`; i bundle precedenti restano sul formato ibrido v1.
+L'account Signal globale e ogni sessione per contatto sono file cifrati distinti e sostituiti atomicamente. Il backup account non esporta questi file: ogni dispositivo collegato crea un device ID e uno stato Signal indipendenti, mentre il record pubblico firmato elenca fino a quattro endpoint dell'account. Gli invii vengono prima registrati in un outbox cifrato e sono ritentati con lo stesso ciphertext e message ID. La cronologia usa `messages-v2.log`: ogni mutazione è un frame autenticato append-only, con compattazione occasionale e migrazione automatica da `messages-v1.vault`. Il segreto casuale di cifratura è conservato nell'identity vault Argon2id, evitando di rieseguire Argon2 per ogni messaggio. Le capability firmate negoziano `signal-libsignal-v1`; i bundle precedenti privi della prekey Signal vengono rifiutati senza fallback crittografico.
