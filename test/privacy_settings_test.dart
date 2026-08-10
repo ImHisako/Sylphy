@@ -6,6 +6,29 @@ import 'package:sylphy/core/privacy/privacy_settings.dart';
 import 'package:sylphy/core/profile/user_profile.dart';
 
 void main() {
+  test('accepts the first authenticated contact request by default', () {
+    expect(const PrivacySettings().allowUnknownContacts, isTrue);
+  });
+
+  test('migrates the version 1 incoming-contact default to enabled', () {
+    final migrated = PrivacySettings.fromJson({
+      'version': 1,
+      'allow_unknown_contacts': false,
+    });
+
+    expect(migrated.allowUnknownContacts, isTrue);
+    expect(migrated.toJson()['version'], 2);
+  });
+
+  test('preserves an explicit version 2 incoming-contact opt-out', () {
+    final settings = PrivacySettings.fromJson({
+      'version': 2,
+      'allow_unknown_contacts': false,
+    });
+
+    expect(settings.allowUnknownContacts, isFalse);
+  });
+
   test('persists profile and read-receipt privacy choices', () async {
     final directory = await Directory.systemTemp.createTemp(
       'sylphy-privacy-test-',
@@ -57,6 +80,7 @@ void main() {
     expect(controller.value.shareProfilePhoto, isFalse);
     expect(controller.value.shareDisplayName, isFalse);
     expect(controller.value.showOnlineStatus, isFalse);
+    expect(controller.value.allowUnknownContacts, isFalse);
   });
 
   test(

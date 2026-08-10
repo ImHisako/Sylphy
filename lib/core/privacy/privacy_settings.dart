@@ -15,7 +15,7 @@ class PrivacySettings {
     this.showReadReceipts = true,
     this.showOnlineStatus = true,
     this.showLastSeen = true,
-    this.allowUnknownContacts = false,
+    this.allowUnknownContacts = true,
     this.reduceMotion = false,
   });
 
@@ -35,6 +35,7 @@ class PrivacySettings {
     showReadReceipts: false,
     showOnlineStatus: false,
     showLastSeen: false,
+    allowUnknownContacts: false,
   );
 
   PrivacySettings copyWith({
@@ -58,7 +59,7 @@ class PrivacySettings {
   );
 
   Map<String, Object> toJson() => {
-    'version': 1,
+    'version': 2,
     'share_profile_photo': shareProfilePhoto,
     'share_display_name': shareDisplayName,
     'send_read_receipts': sendReadReceipts,
@@ -79,7 +80,13 @@ class PrivacySettings {
       showReadReceipts: value('show_read_receipts', true),
       showOnlineStatus: value('show_online_status', true),
       showLastSeen: value('show_last_seen', true),
-      allowUnknownContacts: value('allow_unknown_contacts', false),
+      // Version 1 shipped with incoming contact requests disabled by default,
+      // which forced both people to import each other before the first chat
+      // could appear. Migrate that old default to the new one. Version 2 still
+      // preserves an explicit opt-out selected by the user.
+      allowUnknownContacts: json['version'] == 1
+          ? true
+          : value('allow_unknown_contacts', true),
       reduceMotion: value('reduce_motion', false),
     );
   }
@@ -110,8 +117,12 @@ class PrivacySettingsController extends ChangeNotifier {
       if (recovered != null) {
         final plaintext = await _cipher.open(await recovered.readAsBytes());
         final decoded = jsonDecode(utf8.decode(plaintext));
-        if (decoded is Map<String, dynamic> && decoded['version'] == 1) {
+        if (decoded is Map<String, dynamic> &&
+            (decoded['version'] == 1 || decoded['version'] == 2)) {
           _value = PrivacySettings.fromJson(decoded);
+          if (decoded['version'] == 1) {
+            await _persist(_value);
+          }
         }
       } else {
         await _migrateLegacy();
@@ -174,7 +185,8 @@ class PrivacySettingsController extends ChangeNotifier {
     final legacy = await _legacyFile();
     if (!await legacy.exists()) return;
     final decoded = jsonDecode(await legacy.readAsString());
-    if (decoded is Map<String, dynamic> && decoded['version'] == 1) {
+    if (decoded is Map<String, dynamic> &&
+        (decoded['version'] == 1 || decoded['version'] == 2)) {
       _value = PrivacySettings.fromJson(decoded);
       final file = await _file();
       final plaintext = Uint8List.fromList(

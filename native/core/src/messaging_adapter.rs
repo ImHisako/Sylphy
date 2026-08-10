@@ -175,7 +175,7 @@ fn contact_store() -> &'static Mutex<ContactStore> {
 
 pub fn configure_privacy(allow_unknown_contacts: bool) -> CoreResult<()> {
     *ALLOW_UNKNOWN_CONTACTS
-        .get_or_init(|| Mutex::new(false))
+        .get_or_init(|| Mutex::new(true))
         .lock()
         .map_err(|_| CoreError::Internal)? = allow_unknown_contacts;
     Ok(())
@@ -183,7 +183,7 @@ pub fn configure_privacy(allow_unknown_contacts: bool) -> CoreResult<()> {
 
 fn allows_unknown_contacts() -> CoreResult<bool> {
     Ok(*ALLOW_UNKNOWN_CONTACTS
-        .get_or_init(|| Mutex::new(false))
+        .get_or_init(|| Mutex::new(true))
         .lock()
         .map_err(|_| CoreError::Internal)?)
 }

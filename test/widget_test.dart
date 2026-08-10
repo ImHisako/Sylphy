@@ -211,6 +211,37 @@ void main() {
     expect(find.text('Messaggio arrivato ora'), findsOneWidget);
   });
 
+  testWidgets('scrolls to the latest message when a new one arrives', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final bridge = _TestMessagingBridge();
+    for (var index = 0; index < 30; index++) {
+      bridge.injectIncoming('Messaggio precedente $index');
+    }
+    await tester.pumpWidget(
+      SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Contatto di test'));
+    await tester.pumpAndSettle();
+    final messageList = find.byKey(const ValueKey('chat-message-list'));
+    await tester.drag(messageList, const Offset(0, -5000));
+    await tester.pump();
+
+    bridge.injectIncoming('Ultimo messaggio automatico');
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(
+      find.text('Ultimo messaggio automatico').hitTestable(),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('opens a mobile chat without waiting for the read receipt', (
     tester,
   ) async {

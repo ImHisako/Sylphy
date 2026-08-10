@@ -1095,9 +1095,11 @@ class _ChatPane extends StatefulWidget {
 
 class _ChatPaneState extends State<_ChatPane> {
   final TextEditingController _composerController = TextEditingController();
+  final ScrollController _messageScrollController = ScrollController();
   Timer? _messageTimer;
   List<ChatMessage> _messages = const [];
   String _messageSignature = '';
+  String? _latestMessageId;
   bool _isSendingAttachment = false;
   final List<ChatMessage> _optimisticMessages = [];
   String? _lastAcknowledgedIncomingId;
@@ -1118,9 +1120,13 @@ class _ChatPaneState extends State<_ChatPane> {
       } else {
         _messages = cached;
         _messageSignature = _signatureForMessages(cached);
+        _latestMessageId = cached.isEmpty ? null : cached.last.id;
       }
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) unawaited(_reloadMessagesAsync(force: true));
+        if (mounted) {
+          _scrollToBottom();
+          unawaited(_reloadMessagesAsync(force: true));
+        }
       });
     } else {
       _reloadMessages(force: true);
@@ -1150,11 +1156,16 @@ class _ChatPaneState extends State<_ChatPane> {
         final cached = bridge.cachedMessages(widget.conversation.id);
         _messages = cached ?? const [];
         _messageSignature = cached == null ? '' : _signatureForMessages(cached);
+        _latestMessageId = cached == null || cached.isEmpty
+            ? null
+            : cached.last.id;
         _isLoadingMessages = cached == null;
+        _scheduleScrollToBottom();
         unawaited(_reloadMessagesAsync(force: true));
       } else {
         _messages = const [];
         _messageSignature = '';
+        _latestMessageId = null;
         _reloadMessages(force: true);
       }
     } else if (oldWidget.conversation.lastActivity !=
@@ -1195,8 +1206,24 @@ class _ChatPaneState extends State<_ChatPane> {
   @override
   void dispose() {
     _messageTimer?.cancel();
+    _messageScrollController.dispose();
     _composerController.dispose();
     super.dispose();
+  }
+
+  void _scheduleScrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+  }
+
+  void _scrollToBottom() {
+    if (!mounted || !_messageScrollController.hasClients) return;
+    unawaited(
+      _messageScrollController.animateTo(
+        0,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+      ),
+    );
   }
 
   void _reloadMessages({bool force = false}) {
@@ -1269,11 +1296,17 @@ class _ChatPaneState extends State<_ChatPane> {
     if (!mounted) return;
     final signature = _signatureForMessages(messages);
     if (!force && signature == _messageSignature) return;
+    final previousLatestId = _latestMessageId;
+    final latestId = messages.isEmpty ? null : messages.last.id;
     setState(() {
       _messages = messages;
       _messageSignature = signature;
+      _latestMessageId = latestId;
       _isLoadingMessages = false;
     });
+    if (latestId != null && latestId != previousLatestId) {
+      _scheduleScrollToBottom();
+    }
     String? latestIncomingId;
     for (final message in messages.reversed) {
       if (!message.isOutgoing) {
@@ -1316,6 +1349,7 @@ class _ChatPaneState extends State<_ChatPane> {
       deliveryState: DeliveryState.queued,
     );
     setState(() => _optimisticMessages.add(optimistic));
+    _scheduleScrollToBottom();
     AppLog.instance.record(
       category: 'messenger',
       action: 'send_requested',
@@ -1458,7 +1492,6 @@ class _ChatPaneState extends State<_ChatPane> {
         : null;
     final hasOlder =
         cachedBridge?.hasOlderMessages(widget.conversation.id) ?? false;
-    final leadingItems = hasOlder ? 2 : 1;
     return DecoratedBox(
       decoration: const BoxDecoration(
         gradient: LinearGradient(
@@ -1479,10 +1512,25 @@ class _ChatPaneState extends State<_ChatPane> {
             child: _isLoadingMessages && _messages.isEmpty
                 ? const Center(child: CircularProgressIndicator())
                 : ListView.builder(
+                    key: const ValueKey('chat-message-list'),
+                    controller: _messageScrollController,
+                    reverse: true,
                     padding: const EdgeInsets.fromLTRB(22, 20, 22, 12),
-                    itemCount: visibleMessages.length + leadingItems,
+                    itemCount: visibleMessages.length + 1 + (hasOlder ? 1 : 0),
                     itemBuilder: (context, index) {
-                      if (hasOlder && index == 0) {
+                      if (index < visibleMessages.length) {
+                        final message =
+                            visibleMessages[visibleMessages.length - 1 - index];
+                        return _MessageBubble(
+                          message: message,
+                          showReceipt:
+                              widget.privacySettings.value.showReadReceipts,
+                        );
+                      }
+                      if (index == visibleMessages.length) {
+                        return const _DaySeparator();
+                      }
+                      if (hasOlder) {
                         return Center(
                           child: TextButton.icon(
                             onPressed: _isLoadingOlder
@@ -1500,15 +1548,7 @@ class _ChatPaneState extends State<_ChatPane> {
                           ),
                         );
                       }
-                      if (index == leadingItems - 1) {
-                        return const _DaySeparator();
-                      }
-                      final message = visibleMessages[index - leadingItems];
-                      return _MessageBubble(
-                        message: message,
-                        showReceipt:
-                            widget.privacySettings.value.showReadReceipts,
-                      );
+                      return const SizedBox.shrink();
                     },
                   ),
           ),
