@@ -17,6 +17,7 @@ import '../../core/platform/attachment_downloads.dart';
 import '../../core/veilid/veilid_service.dart';
 import '../profile/profile_sheet.dart';
 import '../settings/settings_page.dart';
+import 'encrypted_file_archive_page.dart';
 
 class MessengerHome extends StatefulWidget {
   const MessengerHome({
@@ -185,7 +186,12 @@ class _MessengerHomeState extends State<MessengerHome>
     var revisionChanged = false;
     try {
       final bridge = widget.bridge;
-      if (bridge is InboxRefreshingBridge) {
+      // A local conversation refresh is still useful while offline, but the
+      // native inbox command requires a running Veilid node. Avoid turning an
+      // expected offline/startup state into an error every three seconds.
+      if (bridge is InboxRefreshingBridge &&
+          (widget.nativeCore == null ||
+              widget.veilidService.snapshot.isAttached)) {
         final revision = await (bridge as InboxRefreshingBridge).refreshInbox();
         revisionChanged = revision != _lastInboxRevision;
         _lastInboxRevision = revision;
@@ -478,6 +484,14 @@ class _DesktopMessenger extends StatelessWidget {
               onProfilePressed: onProfilePressed,
               onPrivacyPressed: () =>
                   _showPrivacyOverview(context, nativeCore, veilidService),
+              onFilesPressed: () => Navigator.of(context).push<void>(
+                MaterialPageRoute(
+                  builder: (context) => EncryptedFileArchivePage(
+                    bridge: bridge,
+                    conversations: conversations,
+                  ),
+                ),
+              ),
               onSettingsPressed: onSettingsPressed,
             ),
             const VerticalDivider(width: 1),
@@ -612,6 +626,7 @@ class _DesktopAppRail extends StatelessWidget {
     required this.onAddContact,
     required this.onProfilePressed,
     required this.onPrivacyPressed,
+    required this.onFilesPressed,
     required this.onSettingsPressed,
   });
 
@@ -620,6 +635,7 @@ class _DesktopAppRail extends StatelessWidget {
   final VoidCallback onAddContact;
   final VoidCallback onProfilePressed;
   final VoidCallback onPrivacyPressed;
+  final VoidCallback onFilesPressed;
   final VoidCallback onSettingsPressed;
 
   @override
@@ -665,10 +681,10 @@ class _DesktopAppRail extends StatelessWidget {
                 onPressed: onAddContact,
               ),
               _RailButton(
+                key: const ValueKey('open-encrypted-files'),
                 icon: Icons.folder_copy_outlined,
                 tooltip: 'File cifrati',
-                onPressed: () =>
-                    _showNotReadyNotice(context, 'Archivio cifrato'),
+                onPressed: onFilesPressed,
               ),
               const Spacer(),
               Tooltip(
@@ -914,6 +930,19 @@ class _MobileConversationList extends StatelessWidget {
             onPressed: () =>
                 _showPrivacyOverview(context, nativeCore, veilidService),
             icon: const Icon(Icons.shield_outlined),
+          ),
+          IconButton(
+            key: const ValueKey('open-encrypted-files'),
+            tooltip: 'File cifrati',
+            onPressed: () => Navigator.of(context).push<void>(
+              MaterialPageRoute(
+                builder: (context) => EncryptedFileArchivePage(
+                  bridge: bridge,
+                  conversations: conversations,
+                ),
+              ),
+            ),
+            icon: const Icon(Icons.folder_copy_outlined),
           ),
           IconButton(
             key: const ValueKey('open-settings'),
@@ -1792,6 +1821,11 @@ class _EmojiCategoryPickerState extends State<_EmojiCategoryPicker> {
                       message: item.name,
                       child: TextButton(
                         key: ValueKey('emoji-${item.char}'),
+                        style: TextButton.styleFrom(
+                          minimumSize: Size.zero,
+                          padding: EdgeInsets.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
                         onPressed: () => widget.onSelected(item),
                         child: Text(
                           item.char,
@@ -2981,17 +3015,6 @@ String _clockTime(DateTime value) {
 String _fileSizeLabel(int bytes) {
   if (bytes < 1024) return '$bytes B';
   return '${(bytes / 1024).toStringAsFixed(bytes < 10 * 1024 ? 1 : 0)} KB';
-}
-
-void _showNotReadyNotice(BuildContext context, String feature) {
-  ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(
-      content: Text(
-        '$feature: disponibile quando il bridge nativo è collegato.',
-      ),
-      behavior: SnackBarBehavior.floating,
-    ),
-  );
 }
 
 void _showPrivacyOverview(

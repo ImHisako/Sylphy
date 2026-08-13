@@ -18,6 +18,8 @@ enum CoreRequest {
     Status,
     StartVeilid {
         storage_directory: String,
+        #[serde(default)]
+        messaging_storage_directory: Option<String>,
     },
     VeilidStatus,
     StopVeilid,
@@ -168,8 +170,20 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
                 "ratchet": ratchet_adapter::capability_status(),
             }),
         }),
-        CoreRequest::StartVeilid { storage_directory } => {
-            messaging_adapter::configure_storage(&storage_directory)?;
+        CoreRequest::StartVeilid {
+            storage_directory,
+            messaging_storage_directory,
+        } => {
+            // Veilid's protected/local stores and the account vault have
+            // different lifecycles. Older clients used the network directory
+            // for both, which made imported conversations disappear as soon
+            // as the node restarted. Keep backward compatibility for callers
+            // that do not send the dedicated account-vault path yet.
+            messaging_adapter::configure_storage(
+                messaging_storage_directory
+                    .as_deref()
+                    .unwrap_or(&storage_directory),
+            )?;
             Ok(CoreResponse {
                 ok: true,
                 code: "ok",
@@ -416,4 +430,32 @@ fn serialize_response(response: CoreResponse) -> *mut c_char {
                 .expect("static JSON")
         })
         .into_raw()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CoreRequest;
+
+    #[test]
+    fn start_request_keeps_network_and_account_storage_separate() {
+        let request: CoreRequest = serde_json::from_str(
+            r#"{
+                "command":"start_veilid",
+                "storage_directory":"network",
+                "messaging_storage_directory":"account"
+            }"#,
+        )
+        .expect("valid start request");
+
+        match request {
+            CoreRequest::StartVeilid {
+                storage_directory,
+                messaging_storage_directory,
+            } => {
+                assert_eq!(storage_directory, "network");
+                assert_eq!(messaging_storage_directory.as_deref(), Some("account"));
+            }
+            _ => panic!("unexpected request"),
+        }
+    }
 }

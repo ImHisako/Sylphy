@@ -172,6 +172,11 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Cibo e bevande'), findsOneWidget);
     expect(find.byKey(const ValueKey('emoji-🍇')), findsOneWidget);
+    final grapeButton = tester.widget<TextButton>(
+      find.byKey(const ValueKey('emoji-🍇')),
+    );
+    expect(grapeButton.style?.minimumSize?.resolve({}), Size.zero);
+    expect(grapeButton.style?.padding?.resolve({}), EdgeInsets.zero);
     await tester.tap(find.byKey(const ValueKey('emoji-category-smileys')));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('emoji-😀')));
@@ -190,6 +195,30 @@ void main() {
       find.byKey(const ValueKey('message-composer')),
     );
     expect(composer.controller?.text, '😀(＾▽＾)');
+  });
+
+  testWidgets('opens the encrypted file archive and lists attachments', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final bridge = _TestMessagingBridge();
+    await bridge.sendAttachment(
+      conversationId: bridge.conversation.id,
+      fileName: 'documento-segreto.pdf',
+      bytes: [1, 2, 3, 4],
+    );
+    await tester.pumpWidget(
+      SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('open-encrypted-files')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('encrypted-files-page')), findsOneWidget);
+    expect(find.text('documento-segreto.pdf'), findsOneWidget);
+    expect(find.textContaining('Contatto di test'), findsOneWidget);
   });
 
   testWidgets('shows a new mobile message without leaving the chat', (

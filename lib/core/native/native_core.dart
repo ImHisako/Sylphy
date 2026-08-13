@@ -139,11 +139,15 @@ class NativeCoreClient implements NativeCoreApi {
   NativeCoreResponse startVeilid(String storageDirectory) =>
       call({'command': 'start_veilid', 'storage_directory': storageDirectory});
 
-  Future<NativeCoreResponse> startVeilidInBackground(String storageDirectory) =>
-      _callInBackground({
-        'command': 'start_veilid',
-        'storage_directory': storageDirectory,
-      });
+  Future<NativeCoreResponse> startVeilidInBackground(
+    String storageDirectory, {
+    String? messagingStorageDirectory,
+  }) => _callInBackground({
+    'command': 'start_veilid',
+    'storage_directory': storageDirectory,
+    if (messagingStorageDirectory != null)
+      'messaging_storage_directory': messagingStorageDirectory,
+  });
 
   Future<NativeCoreResponse> veilidStatusInBackground() =>
       _callInBackground(const {'command': 'veilid_status'}, priority: true);

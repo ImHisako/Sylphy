@@ -69,4 +69,11 @@ void main() {
 
     expect(endpoint.host, '10.0.0.5');
   });
+
+  test('account transfer errors expose their diagnostic code', () {
+    expect(
+      const AccountTransferException('qr_download_failed').toString(),
+      'AccountTransferException(qr_download_failed)',
+    );
+  });
 }

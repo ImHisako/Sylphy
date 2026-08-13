@@ -472,4 +472,7 @@ class AccountTransferException implements Exception {
   const AccountTransferException(this.code, {this.importedProfile});
   final String code;
   final UserProfile? importedProfile;
+
+  @override
+  String toString() => 'AccountTransferException($code)';
 }

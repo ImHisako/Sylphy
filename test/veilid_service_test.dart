@@ -54,6 +54,55 @@ void main() {
     expect(Directory(core.storageDirectory!).existsSync(), isTrue);
   });
 
+  test(
+    'copies legacy messaging vault files without overwriting imports',
+    () async {
+      final supportDirectory = await Directory.systemTemp.createTemp(
+        'sylphy-storage-migration-test-',
+      );
+      addTearDown(() => supportDirectory.delete(recursive: true));
+      final legacyMessaging = Directory(
+        '${supportDirectory.path}${Platform.pathSeparator}veilid'
+        '${Platform.pathSeparator}messaging',
+      );
+      final accountMessaging = Directory(
+        '${supportDirectory.path}${Platform.pathSeparator}native'
+        '${Platform.pathSeparator}messaging',
+      );
+      await legacyMessaging.create(recursive: true);
+      await accountMessaging.create(recursive: true);
+      await File(
+        '${legacyMessaging.path}${Platform.pathSeparator}contacts-v2.vault',
+      ).writeAsString('legacy contacts');
+      await File(
+        '${legacyMessaging.path}${Platform.pathSeparator}messages-v2.log',
+      ).writeAsString('legacy messages');
+      await File(
+        '${accountMessaging.path}${Platform.pathSeparator}contacts-v2.vault',
+      ).writeAsString('imported contacts');
+      final service = VeilidService(
+        nativeCore: _FakeNativeCore(),
+        applicationSupportDirectory: () async => supportDirectory,
+      );
+      addTearDown(service.dispose);
+
+      await service.start();
+
+      expect(
+        await File(
+          '${accountMessaging.path}${Platform.pathSeparator}contacts-v2.vault',
+        ).readAsString(),
+        'imported contacts',
+      );
+      expect(
+        await File(
+          '${accountMessaging.path}${Platform.pathSeparator}messages-v2.log',
+        ).readAsString(),
+        'legacy messages',
+      );
+    },
+  );
+
   test('keeps the native startup error code without sensitive details', () {
     const response = NativeCoreResponse(
       ok: false,

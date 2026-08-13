@@ -178,9 +178,22 @@ class VeilidService extends ChangeNotifier {
       final storage = Directory(
         '${supportDirectory.path}${Platform.pathSeparator}veilid',
       );
-      await storage.create(recursive: true);
+      final accountStorage = Directory(
+        '${supportDirectory.path}${Platform.pathSeparator}native',
+      );
+      await Future.wait([
+        storage.create(recursive: true),
+        accountStorage.create(recursive: true),
+      ]);
+      await _migrateLegacyMessagingStorage(
+        networkStorage: storage,
+        accountStorage: accountStorage,
+      );
       final response = core is NativeCoreClient
-          ? await core.startVeilidInBackground(storage.path)
+          ? await core.startVeilidInBackground(
+              storage.path,
+              messagingStorageDirectory: accountStorage.path,
+            )
           : core.startVeilid(storage.path);
       _setSnapshot(VeilidSnapshot.fromResponse(response));
     } on Object catch (error) {
@@ -195,6 +208,51 @@ class VeilidService extends ChangeNotifier {
           diagnosticCode: 'startup_failed',
         ),
       );
+    }
+  }
+
+  Future<void> _migrateLegacyMessagingStorage({
+    required Directory networkStorage,
+    required Directory accountStorage,
+  }) async {
+    final legacy = Directory(
+      '${networkStorage.path}${Platform.pathSeparator}messaging',
+    );
+    if (!await legacy.exists()) return;
+    final destination = Directory(
+      '${accountStorage.path}${Platform.pathSeparator}messaging',
+    );
+    await destination.create(recursive: true);
+    const accountFiles = [
+      'contacts-v2.vault',
+      'contacts-v1.json',
+      'messages-v1.vault',
+      'messages-v2.log',
+      'outbox-v1.vault',
+      'attachment-leases-v1.vault',
+      'device-sync-outbox-v1.vault',
+    ];
+    for (final name in accountFiles) {
+      final source = File('${legacy.path}${Platform.pathSeparator}$name');
+      final target = File('${destination.path}${Platform.pathSeparator}$name');
+      if (!await source.exists() || await target.exists()) continue;
+      try {
+        await source.copy(target.path);
+        AppLog.instance.record(
+          category: 'storage',
+          action: 'legacy_messaging_file_migrated',
+          result: name,
+          verbose: true,
+        );
+      } on Object catch (error) {
+        // Migration is best-effort and never replaces the old file. A copy
+        // failure must not prevent Veilid from starting.
+        AppLog.instance.recordError(
+          category: 'storage',
+          action: 'legacy_messaging_migration_failed',
+          error: error,
+        );
+      }
     }
   }
 
