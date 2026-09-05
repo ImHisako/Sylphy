@@ -23,7 +23,7 @@ use crate::{
     error::{CoreError, CoreResult},
     identity,
     peer_identity::PublishedIdentity,
-    secure_packet, vault, veilid_adapter,
+    ratchet_adapter, secure_packet, vault, veilid_adapter,
 };
 
 const MAX_CONVERSATION_ID_BYTES: usize = 128;
@@ -42,8 +42,12 @@ const MAX_CLOCK_SKEW_MS: u64 = 5 * 60 * 1000;
 const DEFAULT_MESSAGE_PAGE_SIZE: usize = 120;
 const MAX_MESSAGE_PAGE_SIZE: usize = 500;
 const ATTACHMENT_PREFIX: &str = "sylphy-attachment-v1:";
+const GROUP_INVITE_PREFIX: &str = "sylphy-group-invite-v1:";
+const GROUP_MESSAGE_PREFIX: &str = "sylphy-group-message-v1:";
+const MAX_GROUP_MEMBERS: usize = 64;
 const DEVICE_SYNC_PREFIX: &[u8] = b"SYLPHY-DEVICE-SYNC-V1\0";
 const CONTACT_STORE_FILE: &str = "contacts-v2.vault";
+const GROUP_STORE_FILE: &str = "groups-v1.vault";
 const LEGACY_CONTACT_STORE_FILE: &str = "contacts-v1.json";
 const MESSAGE_STORE_FILE: &str = "messages-v1.vault";
 const MESSAGE_LOG_FILE: &str = "messages-v2.log";
@@ -69,6 +73,38 @@ struct StoredContact {
     invitation_code: Option<String>,
 }
 
+/// A group keeps the authenticated public identity of every member. The
+/// private ratchet state remains owned by each direct session in the secure
+/// core; this record is only the encrypted local directory and membership
+/// policy used to fan out messages.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct GroupMember {
+    id: String,
+    display_name: String,
+    fingerprint: String,
+    identity: PublishedIdentity,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct StoredGroup {
+    id: String,
+    name: String,
+    description: String,
+    /// `group` is a classic chat; `channel` is the professional broadcast
+    /// style. Both use the same authenticated member fan-out underneath.
+    mode: String,
+    admin_id: String,
+    created_at_ms: u64,
+    members: Vec<GroupMember>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct GroupInvitation {
+    version: u8,
+    group: StoredGroup,
+    admin: GroupMember,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct StoredMessage {
     id: String,
@@ -92,6 +128,8 @@ struct MessagingAccountBackup {
     version: u8,
     contacts: Vec<StoredContact>,
     messages: Vec<StoredMessage>,
+    #[serde(default)]
+    groups: Vec<StoredGroup>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -111,6 +149,13 @@ enum DeviceSyncEvent {
     },
     UpsertMessage {
         contact: StoredContact,
+        message: StoredMessage,
+    },
+    UpsertGroup {
+        group: StoredGroup,
+    },
+    UpsertGroupMessage {
+        group: StoredGroup,
         message: StoredMessage,
     },
 }
@@ -156,7 +201,9 @@ struct ContactStore {
     outbox_path: Option<PathBuf>,
     attachment_lease_path: Option<PathBuf>,
     device_sync_outbox_path: Option<PathBuf>,
+    groups_path: Option<PathBuf>,
     contacts: Vec<StoredContact>,
+    groups: Vec<StoredGroup>,
     messages: Vec<StoredMessage>,
     messages_loaded: bool,
     message_event_count: usize,
@@ -207,6 +254,8 @@ pub fn configure_storage(storage_directory: &str) -> CoreResult<()> {
     let attachment_leases = load_attachment_leases(&attachment_lease_path)?;
     let device_sync_outbox_path = directory.join(DEVICE_SYNC_OUTBOX_FILE);
     let device_sync_outbox = load_device_sync_outbox(&device_sync_outbox_path)?;
+    let groups_path = directory.join(GROUP_STORE_FILE);
+    let groups = load_groups(&groups_path)?;
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     store.path = Some(path);
     store.message_path = Some(directory.join(MESSAGE_LOG_FILE));
@@ -214,7 +263,9 @@ pub fn configure_storage(storage_directory: &str) -> CoreResult<()> {
     store.outbox_path = Some(outbox_path);
     store.attachment_lease_path = Some(attachment_lease_path);
     store.device_sync_outbox_path = Some(device_sync_outbox_path);
+    store.groups_path = Some(groups_path);
     store.contacts = contacts;
+    store.groups = groups;
     store.messages.clear();
     store.messages_loaded = false;
     store.message_event_count = 0;
@@ -232,6 +283,7 @@ pub(crate) fn export_account_backup() -> CoreResult<Value> {
         version: 1,
         contacts: store.contacts.clone(),
         messages: store.messages.clone(),
+        groups: store.groups.clone(),
     })
     .map_err(|_| CoreError::Internal)
 }
@@ -246,9 +298,15 @@ pub(crate) fn import_account_backup(value: Value) -> CoreResult<()> {
         .message_path
         .clone()
         .ok_or(CoreError::FeatureUnavailable)?;
+    let groups_path = store
+        .groups_path
+        .clone()
+        .ok_or(CoreError::FeatureUnavailable)?;
     persist_contacts(&contact_path, &backup.contacts)?;
     write_message_snapshot(&message_path, &backup.messages)?;
+    persist_groups(&groups_path, &backup.groups)?;
     store.contacts = backup.contacts;
+    store.groups = backup.groups;
     store.messages = backup.messages;
     store.messages_loaded = true;
     store.message_event_count = store.messages.len();
@@ -262,8 +320,22 @@ pub(crate) fn validate_account_backup(value: &Value) -> CoreResult<()> {
     if backup.version != 1
         || backup.contacts.len() > MAX_CONTACTS
         || backup.messages.len() > MAX_MESSAGES
+        || backup.groups.len() > MAX_CONTACTS
     {
         return Err(CoreError::LimitExceeded);
+    }
+    validate_groups(&backup.groups)?;
+    let contact_ids = backup
+        .contacts
+        .iter()
+        .map(|contact| contact.id.as_str())
+        .collect::<HashSet<_>>();
+    if backup
+        .groups
+        .iter()
+        .any(|group| contact_ids.contains(group.id.as_str()))
+    {
+        return Err(CoreError::VerificationFailed);
     }
     for contact in &backup.contacts {
         validate_conversation_id(&contact.id)?;
@@ -281,11 +353,12 @@ pub(crate) fn validate_account_backup(value: &Value) -> CoreResult<()> {
             }
         }
     }
-    validate_backup_messages(&backup.contacts, &backup.messages)
+    validate_backup_messages(&backup.contacts, &backup.groups, &backup.messages)
 }
 
 fn validate_backup_messages(
     contacts: &[StoredContact],
+    groups: &[StoredGroup],
     messages: &[StoredMessage],
 ) -> CoreResult<()> {
     let contact_ids = contacts
@@ -293,10 +366,17 @@ fn validate_backup_messages(
         .map(|contact| contact.id.as_str())
         .collect::<HashSet<_>>();
     let mut message_ids = HashSet::with_capacity(messages.len());
+    let group_ids = groups
+        .iter()
+        .map(|group| group.id.as_str())
+        .collect::<HashSet<_>>();
     for message in messages {
         validate_stored_message(message)?;
-        if !contact_ids.contains(message.conversation_id.as_str())
-            || (!message.is_outgoing && message.author_id != message.conversation_id)
+        if (!contact_ids.contains(message.conversation_id.as_str())
+            && !group_ids.contains(message.conversation_id.as_str()))
+            || (!message.is_outgoing
+                && !group_ids.contains(message.conversation_id.as_str())
+                && message.author_id != message.conversation_id)
             || (message.is_outgoing && message.author_id != "me")
             || !message_ids.insert(message.id.as_str())
         {
@@ -360,7 +440,7 @@ pub fn list_conversations() -> CoreResult<Value> {
             summary.1 += 1;
         }
     }
-    let conversations = store
+    let mut conversations = store
         .contacts
         .iter()
         .map(|contact| {
@@ -389,14 +469,43 @@ pub fn list_conversations() -> CoreResult<Value> {
                 "unread_count": unread,
                 "is_online": false,
                 "is_group": false,
+                "conversation_type": "direct",
+                "member_count": 2,
+                "is_admin": false,
+                "description": "",
                 "safety": if contact.verified { "verified" } else if can_message { "pending" } else { "refresh_required" },
                 "fingerprint": contact.fingerprint,
             })
         })
         .collect::<Vec<_>>();
+    conversations.extend(store.groups.iter().map(|group| {
+        let (last, unread) = summaries
+            .get(group.id.as_str())
+            .copied()
+            .unwrap_or((None, 0));
+        json!({
+            "id": group.id,
+            "name": group.name,
+            "initials": initials(&group.name),
+            "avatar_base64": Value::Null,
+            "accent_value": accent_value(group.id.as_bytes()),
+            "last_message": last.map(|message| message.body.as_str()).unwrap_or("Gruppo creato"),
+            "last_activity_ms": last.map(|message| message.sent_at_ms).unwrap_or(group.created_at_ms),
+            "unread_count": unread,
+            "is_online": false,
+            "is_group": true,
+            "conversation_type": group.mode,
+            "member_count": group.members.len() + 1,
+            "is_admin": group.admin_id == "me",
+            "description": group.description,
+            "safety": "verified",
+            "fingerprint": "Gruppo cifrato con sessioni individuali",
+        })
+    }));
     Ok(json!({
         "state": if store.path.is_some() { "ready" } else { "storage_unconfigured" },
-        "can_send": store.contacts.iter().any(|contact| contact.published_identity.is_some()),
+        "can_send": store.contacts.iter().any(|contact| contact.published_identity.is_some())
+            || !store.groups.is_empty(),
         "conversations": conversations,
         "revision": store.revision,
     }))
@@ -515,8 +624,219 @@ pub fn add_contact(_legacy_display_name: &str, invitation_code: &str) -> CoreRes
     Ok(json!({"contact_id": id, "fingerprint": fingerprint, "safety": "pending"}))
 }
 
+fn local_published_identity() -> CoreResult<PublishedIdentity> {
+    let local = identity::active_identity()?;
+    let signing_key = local.signing_key()?;
+    let bundle = local.public_bundle(ratchet_adapter::public_pre_key_bundle()?)?;
+    PublishedIdentity::new(
+        &signing_key,
+        bundle,
+        veilid_adapter::local_route_blob()?,
+        crate::peer_identity::current_public_profile(),
+        None,
+    )
+}
+
+fn group_member(identity: PublishedIdentity) -> CoreResult<GroupMember> {
+    let id = contact_id(&identity.bundle.identity_ed25519);
+    let display_name = identity
+        .profile
+        .display_name
+        .clone()
+        .unwrap_or_else(|| format!("Contatto {}", &id[id.len().saturating_sub(8)..]));
+    Ok(GroupMember {
+        id,
+        display_name,
+        fingerprint: fingerprint(&identity.bundle.identity_ed25519),
+        identity,
+    })
+}
+
+pub fn create_group(
+    name: &str,
+    invitation_codes: &[String],
+    professional: bool,
+    description: &str,
+) -> CoreResult<Value> {
+    let name = validate_display_name(name)?;
+    let description = description.trim().to_owned();
+    if description.len() > MAX_MESSAGE_BODY_BYTES
+        || invitation_codes.is_empty()
+        || invitation_codes.len() > MAX_GROUP_MEMBERS
+    {
+        return Err(CoreError::LimitExceeded);
+    }
+    let admin_identity = local_published_identity()?;
+    let admin = group_member(admin_identity.clone())?;
+    let admin_id = admin.id.clone();
+    let mut members = Vec::with_capacity(invitation_codes.len());
+    let mut ids = HashSet::new();
+    for code in invitation_codes {
+        let (_, published) = decode_invitation(code)?;
+        let member = group_member(published.ok_or(CoreError::VerificationFailed)?)?;
+        if member.id == admin_id || !ids.insert(member.id.clone()) {
+            return Err(CoreError::VerificationFailed);
+        }
+        members.push(member);
+    }
+    let mut id_bytes = [0_u8; 16];
+    OsRng.fill_bytes(&mut id_bytes);
+    let group_id = compact_hex(&id_bytes);
+    let now_ms = current_time_ms()?;
+    let group = StoredGroup {
+        id: group_id.clone(),
+        name,
+        description,
+        mode: if professional { "channel" } else { "group" }.to_owned(),
+        // The local alias keeps the UI permission check independent of the
+        // rotating identity key. The invitation carries the real key id.
+        admin_id: "me".to_owned(),
+        created_at_ms: now_ms,
+        members: members.clone(),
+    };
+    let invitation_group = StoredGroup {
+        admin_id: admin_id.clone(),
+        ..group.clone()
+    };
+    let invitation = GroupInvitation {
+        version: 1,
+        group: invitation_group,
+        admin,
+    };
+    let encoded =
+        STANDARD_NO_PAD.encode(serde_json::to_vec(&invitation).map_err(|_| CoreError::Internal)?);
+    let plaintext = format!("{GROUP_INVITE_PREFIX}{encoded}");
+    if plaintext.len() > MAX_MESSAGE_BODY_BYTES {
+        return Err(CoreError::LimitExceeded);
+    }
+    let message_path = contact_store()
+        .lock()
+        .map_err(|_| CoreError::Internal)?
+        .message_path
+        .clone()
+        .ok_or(CoreError::FeatureUnavailable)?;
+    // A single durable system message carries one encrypted delivery per
+    // member. The secure packet still uses the member's individual session.
+    let mut deliveries = Vec::new();
+    for member in &members {
+        let (mut member_deliveries, _) = secure_packet::seal_for_all(&member.identity, &plaintext)?;
+        deliveries.append(&mut member_deliveries);
+    }
+    if deliveries.is_empty() {
+        return Err(CoreError::VerificationFailed);
+    }
+    {
+        let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+        let path = store
+            .groups_path
+            .clone()
+            .ok_or(CoreError::FeatureUnavailable)?;
+        if store.groups.len() >= MAX_CONTACTS
+            || store.groups.iter().any(|item| item.id == group_id)
+            || store.contacts.iter().any(|item| item.id == group_id)
+        {
+            return Err(CoreError::LimitExceeded);
+        }
+        let mut updated = store.groups.clone();
+        updated.push(group.clone());
+        persist_groups(&path, &updated)?;
+        store.groups = updated;
+        store.revision = store.revision.wrapping_add(1);
+    }
+    let system_message = StoredMessage {
+        id: group_id.clone(),
+        conversation_id: group_id.clone(),
+        author_id: "me".to_owned(),
+        body: "Gruppo creato".to_owned(),
+        sent_at_ms: now_ms,
+        is_outgoing: true,
+        is_read: true,
+        delivery_state: "queued".to_owned(),
+        attachment_name: None,
+        attachment_base64: None,
+    };
+    if let Err(error) = queue_outgoing(&message_path, system_message, deliveries) {
+        if let Ok(mut store) = contact_store().lock() {
+            if let Some(path) = store.groups_path.clone() {
+                let updated = store
+                    .groups
+                    .iter()
+                    .filter(|item| item.id != group_id)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if persist_groups(&path, &updated).is_ok() {
+                    store.groups = updated;
+                    store.revision = store.revision.wrapping_add(1);
+                }
+            }
+        }
+        return Err(error);
+    }
+    queue_device_sync(&DeviceSyncEvent::UpsertGroup {
+        group: group.clone(),
+    });
+    let _ = flush_outbox(Some(&group_id));
+    Ok(
+        json!({"group_id": group_id, "conversation_type": group.mode, "member_count": members.len() + 1}),
+    )
+}
+
 pub fn send_text(conversation_id: &str, plaintext: &str) -> CoreResult<Value> {
     validate_conversation_id(conversation_id)?;
+    if let Some(group) = contact_store()
+        .lock()
+        .map_err(|_| CoreError::Internal)?
+        .groups
+        .iter()
+        .find(|group| group.id == conversation_id)
+        .cloned()
+    {
+        let plaintext = plaintext.trim();
+        if group.mode == "channel" && group.admin_id != "me" {
+            return Err(CoreError::AuthenticationFailed);
+        }
+        if plaintext.is_empty() || plaintext.len() > MAX_MESSAGE_BODY_BYTES {
+            return Err(CoreError::LimitExceeded);
+        }
+        let body = format!(
+            "{GROUP_MESSAGE_PREFIX}{conversation_id}:{}",
+            STANDARD_NO_PAD.encode(plaintext.as_bytes())
+        );
+        let mut deliveries = Vec::new();
+        for member in &group.members {
+            let (mut sealed, _) = secure_packet::seal_for_all(&member.identity, &body)?;
+            deliveries.append(&mut sealed);
+        }
+        if deliveries.is_empty() {
+            return Err(CoreError::VerificationFailed);
+        }
+        let message_path = contact_store()
+            .lock()
+            .map_err(|_| CoreError::Internal)?
+            .message_path
+            .clone()
+            .ok_or(CoreError::FeatureUnavailable)?;
+        let mut id_bytes = [0_u8; 16];
+        OsRng.fill_bytes(&mut id_bytes);
+        let message_id = compact_hex(&id_bytes);
+        let message = StoredMessage {
+            id: message_id.clone(),
+            conversation_id: conversation_id.to_owned(),
+            author_id: "me".to_owned(),
+            body: plaintext.to_owned(),
+            sent_at_ms: current_time_ms()?,
+            is_outgoing: true,
+            is_read: true,
+            delivery_state: "queued".to_owned(),
+            attachment_name: None,
+            attachment_base64: None,
+        };
+        queue_outgoing(&message_path, message, deliveries)?;
+        let delivered = flush_outbox(Some(&message_id));
+        return Ok(
+            json!({"message_id": message_id, "delivery_state": if delivered { "sent" } else { "queued" }}),
+        );
+    }
     let message_path = {
         let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
         store
@@ -564,6 +884,91 @@ pub fn send_attachment(
         .map_err(|_| CoreError::InvalidInput)?;
     if bytes.is_empty() || bytes.len() > MAX_ATTACHMENT_BYTES {
         return Err(CoreError::LimitExceeded);
+    }
+    if let Some(group) = contact_store()
+        .lock()
+        .map_err(|_| CoreError::Internal)?
+        .groups
+        .iter()
+        .find(|group| group.id == conversation_id)
+        .cloned()
+    {
+        if group.mode == "channel" && group.admin_id != "me" {
+            return Err(CoreError::AuthenticationFailed);
+        }
+        let mut key = [0_u8; 32];
+        let mut nonce = [0_u8; 24];
+        OsRng.fill_bytes(&mut key);
+        OsRng.fill_bytes(&mut nonce);
+        let cipher = XChaCha20Poly1305::new((&key).into());
+        let encrypted = cipher
+            .encrypt(XNonce::from_slice(&nonce), bytes.as_slice())
+            .map_err(|_| CoreError::Internal)?;
+        let (record_key, chunk_count) = veilid_adapter::publish_attachment_blob(&encrypted)?;
+        if let Err(error) = register_attachment_lease(&record_key, chunk_count) {
+            let _ = veilid_adapter::delete_attachment_blob(&record_key, chunk_count);
+            return Err(error);
+        }
+        let pointer = AttachmentPointer {
+            version: 1,
+            file_name: file_name.clone(),
+            size: bytes.len(),
+            record_key: record_key.clone(),
+            chunk_count,
+            key_base64: STANDARD_NO_PAD.encode(key),
+            nonce_base64: STANDARD_NO_PAD.encode(nonce),
+        };
+        let control = format!(
+            "{ATTACHMENT_PREFIX}{}",
+            STANDARD_NO_PAD.encode(serde_json::to_vec(&pointer).map_err(|_| CoreError::Internal)?,)
+        );
+        let wrapped = format!(
+            "{GROUP_MESSAGE_PREFIX}{conversation_id}:{}",
+            STANDARD_NO_PAD.encode(control.as_bytes())
+        );
+        let mut deliveries = Vec::new();
+        for member in &group.members {
+            let result = secure_packet::seal_for_all(&member.identity, &wrapped);
+            match result {
+                Ok((mut sealed, _)) => deliveries.append(&mut sealed),
+                Err(error) => {
+                    let _ = veilid_adapter::delete_attachment_blob(&record_key, chunk_count);
+                    remove_attachment_lease(&record_key);
+                    return Err(error);
+                }
+            }
+        }
+        let message_path = contact_store()
+            .lock()
+            .map_err(|_| CoreError::Internal)?
+            .message_path
+            .clone()
+            .ok_or(CoreError::FeatureUnavailable)?;
+        let mut id_bytes = [0_u8; 16];
+        OsRng.fill_bytes(&mut id_bytes);
+        let message_id = compact_hex(&id_bytes);
+        let message = StoredMessage {
+            id: message_id.clone(),
+            conversation_id: conversation_id.to_owned(),
+            author_id: "me".to_owned(),
+            body: format!("📎 {file_name}"),
+            sent_at_ms: current_time_ms()?,
+            is_outgoing: true,
+            is_read: true,
+            delivery_state: "queued".to_owned(),
+            attachment_name: Some(file_name),
+            attachment_base64: Some(STANDARD.encode(bytes)),
+        };
+        if let Err(error) = queue_outgoing(&message_path, message, deliveries) {
+            let _ = veilid_adapter::delete_attachment_blob(&record_key, chunk_count);
+            remove_attachment_lease(&record_key);
+            return Err(error);
+        }
+        let delivered = flush_outbox(Some(&message_id));
+        return Ok(json!({
+            "message_id": message_id,
+            "delivery_state": if delivered { "sent" } else { "queued" }
+        }));
     }
     let message_path = {
         let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
@@ -670,6 +1075,42 @@ pub fn mark_conversation_read(conversation_id: &str) -> CoreResult<Value> {
 pub fn delete_conversation(conversation_id: &str) -> CoreResult<Value> {
     validate_conversation_id(conversation_id)?;
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    if store.groups.iter().any(|group| group.id == conversation_id) {
+        let path = store
+            .groups_path
+            .clone()
+            .ok_or(CoreError::FeatureUnavailable)?;
+        let updated = store
+            .groups
+            .iter()
+            .filter(|group| group.id != conversation_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let message_path = store
+            .message_path
+            .clone()
+            .ok_or(CoreError::FeatureUnavailable)?;
+        ensure_messages_loaded(&mut store)?;
+        let messages = store
+            .messages
+            .iter()
+            .filter(|message| message.conversation_id != conversation_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        persist_groups(&path, &updated)?;
+        append_message_event(
+            &message_path,
+            &MessageEvent::DeleteConversation {
+                conversation_id: conversation_id.to_owned(),
+            },
+        )?;
+        store.groups = updated;
+        store.messages = messages;
+        store.message_event_count += 1;
+        store.revision = store.revision.wrapping_add(1);
+        compact_message_log_if_needed(&mut store)?;
+        return Ok(json!({"conversation_id": conversation_id, "deleted": true}));
+    }
     let original_len = store.contacts.len();
     let updated = store
         .contacts
@@ -788,10 +1229,6 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<()> {
     {
         let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
         ensure_messages_loaded(&mut store)?;
-        let known = store.contacts.iter().any(|contact| contact.id == id);
-        if !known && !allows_unknown_contacts()? {
-            return Err(CoreError::AuthenticationFailed);
-        }
         if store
             .messages
             .iter()
@@ -801,12 +1238,83 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<()> {
         }
     }
     let mut opened = secure_packet::open(payload)?;
+    if let Some(invitation) = decode_group_invitation(&opened.plaintext)? {
+        let sender = group_member(opened.sender.clone())?;
+        if invitation.version != 1
+            || invitation.group.admin_id != sender.id
+            || invitation.admin.id != sender.id
+            || invitation.admin.fingerprint != sender.fingerprint
+            || invitation.group.members.len() > MAX_GROUP_MEMBERS
+        {
+            return Err(CoreError::VerificationFailed);
+        }
+        let mut group = invitation.group;
+        if !group.members.iter().any(|member| member.id == sender.id) {
+            group.members.push(sender.clone());
+        }
+        validate_groups(std::slice::from_ref(&group))?;
+        let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+        if !allows_unknown_contacts()?
+            && !store.contacts.iter().any(|contact| contact.id == sender.id)
+        {
+            return Err(CoreError::AuthenticationFailed);
+        }
+        let path = store
+            .groups_path
+            .clone()
+            .ok_or(CoreError::FeatureUnavailable)?;
+        if let Some(existing) = store.groups.iter().find(|item| item.id == group.id) {
+            if existing.name != group.name || existing.admin_id != group.admin_id {
+                return Err(CoreError::VerificationFailed);
+            }
+        } else {
+            let mut updated = store.groups.clone();
+            updated.push(group);
+            persist_groups(&path, &updated)?;
+            store.groups = updated;
+            store.revision = store.revision.wrapping_add(1);
+        }
+        drop(store);
+        opened.commit_ratchet()?;
+        return Ok(());
+    }
+    let (conversation_id, plaintext) =
+        if let Some((group_id, body)) = decode_group_message(&opened.plaintext)? {
+            let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+            if let Some(group) = store.groups.iter().find(|group| group.id == group_id) {
+                let sender_id = contact_id(&opened.sender.bundle.identity_ed25519);
+                if group.mode == "channel" && group.admin_id != sender_id {
+                    return Err(CoreError::AuthenticationFailed);
+                }
+                if !group.members.iter().any(|member| member.id == sender_id)
+                    && group.admin_id != sender_id
+                {
+                    return Err(CoreError::AuthenticationFailed);
+                }
+                (group_id, body)
+            } else if store.contacts.iter().any(|contact| contact.id == id) {
+                // A direct message may legitimately begin with the reserved
+                // prefix. Unknown senders retain a possible out-of-order group
+                // envelope until its invitation arrives.
+                (id.clone(), opened.plaintext.clone())
+            } else {
+                return Err(CoreError::FeatureUnavailable);
+            }
+        } else {
+            if !allows_unknown_contacts()? {
+                let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+                if !store.contacts.iter().any(|contact| contact.id == id) {
+                    return Err(CoreError::AuthenticationFailed);
+                }
+            }
+            (id.clone(), opened.plaintext.clone())
+        };
     // Attachment retrieval may perform network I/O and must never run while
     // the global contact/message store is locked.
-    let (body, attachment_name, attachment_base64) = decode_incoming_content(&opened.plaintext)?;
+    let (body, attachment_name, attachment_base64) = decode_incoming_content(&plaintext)?;
     let message = StoredMessage {
         id: opened.message_id.clone(),
-        conversation_id: id.clone(),
+        conversation_id: conversation_id.clone(),
         author_id: id.clone(),
         body,
         sent_at_ms: opened.sent_at_ms,
@@ -827,7 +1335,10 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<()> {
     if store.messages.iter().any(|item| item.id == message.id) {
         return Ok(());
     }
-    if let Some(contact) = store.contacts.iter_mut().find(|contact| contact.id == id) {
+    let is_group = store.groups.iter().any(|group| group.id == conversation_id);
+    if is_group {
+        // Membership was checked against the signed sender above.
+    } else if let Some(contact) = store.contacts.iter_mut().find(|contact| contact.id == id) {
         contact.bundle = opened.sender.bundle.clone();
         contact.published_identity = Some(opened.sender.clone());
     } else if allows_unknown_contacts()? && store.contacts.len() < MAX_CONTACTS {
@@ -1083,16 +1594,24 @@ fn flush_outbox(only_message_id: Option<&str>) -> bool {
         return false;
     }
     let mut delivered_ids = HashSet::new();
-    let mut delivered_messages = HashSet::new();
+    let mut delivered_counts: HashMap<String, usize> = HashMap::new();
+    let mut total_counts: HashMap<String, usize> = HashMap::new();
     for item in pending {
+        *total_counts.entry(item.message_id.clone()).or_default() += 1;
         if veilid_adapter::deliver_payload(&item.route_blob, None, item.payload).is_ok() {
             delivered_ids.insert(item.id);
-            delivered_messages.insert(item.message_id);
+            *delivered_counts.entry(item.message_id).or_default() += 1;
         }
     }
     if delivered_ids.is_empty() {
         return false;
     }
+    let delivered_messages = delivered_counts
+        .into_iter()
+        .filter_map(|(message_id, delivered)| {
+            (total_counts.get(&message_id).copied() == Some(delivered)).then_some(message_id)
+        })
+        .collect::<HashSet<_>>();
     let sync_events = (|| -> CoreResult<Vec<DeviceSyncEvent>> {
         let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
         let outbox_path = store
@@ -1133,6 +1652,13 @@ fn flush_outbox(only_message_id: Option<&str>) -> bool {
                     .cloned()
                 {
                     events.push(DeviceSyncEvent::UpsertMessage { contact, message });
+                } else if let Some(group) = store
+                    .groups
+                    .iter()
+                    .find(|item| item.id == message.conversation_id)
+                    .cloned()
+                {
+                    events.push(DeviceSyncEvent::UpsertGroupMessage { group, message });
                 }
             }
         }
@@ -1199,6 +1725,10 @@ fn apply_device_sync(encrypted: &[u8]) -> CoreResult<()> {
         .message_path
         .clone()
         .ok_or(CoreError::FeatureUnavailable)?;
+    let groups_path = store
+        .groups_path
+        .clone()
+        .ok_or(CoreError::FeatureUnavailable)?;
     ensure_messages_loaded(&mut store)?;
     let mut changed = false;
     match event {
@@ -1242,9 +1772,51 @@ fn apply_device_sync(encrypted: &[u8]) -> CoreResult<()> {
                 changed = true;
             }
         }
+        DeviceSyncEvent::UpsertGroup { group } => {
+            validate_groups(std::slice::from_ref(&group))?;
+            if let Some(existing) = store.groups.iter_mut().find(|item| item.id == group.id) {
+                if serde_json::to_vec(existing).ok() != serde_json::to_vec(&group).ok() {
+                    *existing = group;
+                    changed = true;
+                }
+            } else if store.groups.len() < MAX_CONTACTS {
+                store.groups.push(group);
+                changed = true;
+            }
+        }
+        DeviceSyncEvent::UpsertGroupMessage { group, message } => {
+            validate_groups(std::slice::from_ref(&group))?;
+            validate_stored_message(&message)?;
+            if message.conversation_id != group.id {
+                return Err(CoreError::VerificationFailed);
+            }
+            if let Some(existing) = store.groups.iter_mut().find(|item| item.id == group.id) {
+                if serde_json::to_vec(existing).ok() != serde_json::to_vec(&group).ok() {
+                    *existing = group.clone();
+                    changed = true;
+                }
+            } else if store.groups.len() < MAX_CONTACTS {
+                store.groups.push(group);
+                changed = true;
+            }
+            if !store.messages.iter().any(|item| item.id == message.id)
+                && store.messages.len() < MAX_MESSAGES
+            {
+                append_message_event(
+                    &message_path,
+                    &MessageEvent::Upsert {
+                        message: message.clone(),
+                    },
+                )?;
+                store.messages.push(message);
+                store.message_event_count += 1;
+                changed = true;
+            }
+        }
     }
     if changed {
         persist_contacts(&contact_path, &store.contacts)?;
+        persist_groups(&groups_path, &store.groups)?;
         store.revision = store.revision.wrapping_add(1);
         compact_message_log_if_needed(&mut store)?;
     }
@@ -1325,6 +1897,64 @@ fn load_contacts(path: &Path, legacy_path: &Path) -> CoreResult<(Vec<StoredConta
 
 fn persist_contacts(path: &Path, contacts: &[StoredContact]) -> CoreResult<()> {
     let encoded = serde_json::to_vec(contacts).map_err(|_| CoreError::Internal)?;
+    if encoded.len() as u64 > MAX_CONTACT_STORE_BYTES {
+        return Err(CoreError::LimitExceeded);
+    }
+    let key = identity::active_identity()?.storage_key()?;
+    let encrypted = vault::seal_with_key(&key, &encoded)?;
+    persist_bytes(path, &encrypted)
+}
+
+fn validate_groups(groups: &[StoredGroup]) -> CoreResult<()> {
+    let mut ids = HashSet::with_capacity(groups.len());
+    for group in groups {
+        validate_conversation_id(&group.id)?;
+        validate_display_name(&group.name)?;
+        if group.description.len() > MAX_MESSAGE_BODY_BYTES
+            || group.description.chars().any(char::is_control)
+            || !matches!(group.mode.as_str(), "group" | "channel")
+            || group.admin_id.is_empty()
+            || group.members.is_empty()
+            || group.members.len() > MAX_CONTACTS
+            || !ids.insert(group.id.as_str())
+        {
+            return Err(CoreError::VerificationFailed);
+        }
+        let mut member_ids = HashSet::new();
+        for member in &group.members {
+            validate_conversation_id(&member.id)?;
+            validate_display_name(&member.display_name)?;
+            member.identity.validate()?;
+            if member.id != contact_id(&member.identity.bundle.identity_ed25519)
+                || member.fingerprint != fingerprint(&member.identity.bundle.identity_ed25519)
+                || !member_ids.insert(member.id.as_str())
+            {
+                return Err(CoreError::VerificationFailed);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_groups(path: &Path) -> CoreResult<Vec<StoredGroup>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    if fs::metadata(path).map_err(|_| CoreError::Internal)?.len() > MAX_CONTACT_STORE_BYTES + 64 {
+        return Err(CoreError::LimitExceeded);
+    }
+    let encrypted = fs::read(path).map_err(|_| CoreError::Internal)?;
+    let key = identity::active_identity()?.storage_key()?;
+    let plaintext = vault::open_with_key(&key, &encrypted)?;
+    let groups: Vec<StoredGroup> =
+        serde_json::from_slice(&plaintext).map_err(|_| CoreError::VerificationFailed)?;
+    validate_groups(&groups)?;
+    Ok(groups)
+}
+
+fn persist_groups(path: &Path, groups: &[StoredGroup]) -> CoreResult<()> {
+    validate_groups(groups)?;
+    let encoded = serde_json::to_vec(groups).map_err(|_| CoreError::Internal)?;
     if encoded.len() as u64 > MAX_CONTACT_STORE_BYTES {
         return Err(CoreError::LimitExceeded);
     }
@@ -1691,6 +2321,37 @@ fn default_delivery_state() -> String {
     "sent".to_owned()
 }
 
+fn decode_group_invitation(plaintext: &str) -> CoreResult<Option<GroupInvitation>> {
+    let Some(encoded) = plaintext.strip_prefix(GROUP_INVITE_PREFIX) else {
+        return Ok(None);
+    };
+    let bytes = STANDARD_NO_PAD
+        .decode(encoded)
+        .map_err(|_| CoreError::InvalidInput)?;
+    if bytes.len() > MAX_MESSAGE_BODY_BYTES {
+        return Err(CoreError::LimitExceeded);
+    }
+    let invitation: GroupInvitation =
+        serde_json::from_slice(&bytes).map_err(|_| CoreError::VerificationFailed)?;
+    Ok(Some(invitation))
+}
+
+fn decode_group_message(plaintext: &str) -> CoreResult<Option<(String, String)>> {
+    let Some(value) = plaintext.strip_prefix(GROUP_MESSAGE_PREFIX) else {
+        return Ok(None);
+    };
+    let (group_id, encoded) = value.split_once(':').ok_or(CoreError::InvalidInput)?;
+    validate_conversation_id(group_id)?;
+    let bytes = STANDARD_NO_PAD
+        .decode(encoded)
+        .map_err(|_| CoreError::InvalidInput)?;
+    let body = String::from_utf8(bytes).map_err(|_| CoreError::InvalidInput)?;
+    if body.trim().is_empty() || body.len() > MAX_MESSAGE_BODY_BYTES {
+        return Err(CoreError::LimitExceeded);
+    }
+    Ok(Some((group_id.to_owned(), body)))
+}
+
 fn decode_incoming_content(
     plaintext: &str,
 ) -> CoreResult<(String, Option<String>, Option<String>)> {
@@ -1755,7 +2416,10 @@ fn validate_display_name(value: &str) -> CoreResult<String> {
 
 fn validate_conversation_id(conversation_id: &str) -> CoreResult<()> {
     let length = conversation_id.len();
-    if length == 0 || length > MAX_CONVERSATION_ID_BYTES {
+    if length == 0
+        || length > MAX_CONVERSATION_ID_BYTES
+        || conversation_id.chars().any(char::is_control)
+    {
         return Err(CoreError::InvalidInput);
     }
     Ok(())

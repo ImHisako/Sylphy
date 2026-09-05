@@ -41,6 +41,13 @@ enum CoreRequest {
         display_name: String,
         invitation_code: String,
     },
+    CreateGroup {
+        name: String,
+        invitation_codes: Vec<String>,
+        professional: bool,
+        #[serde(default)]
+        description: String,
+    },
     SendText {
         conversation_id: String,
         plaintext: String,
@@ -245,6 +252,21 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
             ok: true,
             code: "ok",
             data: messaging_adapter::add_contact(&display_name, &invitation_code)?,
+        }),
+        CoreRequest::CreateGroup {
+            name,
+            invitation_codes,
+            professional,
+            description,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::create_group(
+                &name,
+                &invitation_codes,
+                professional,
+                &description,
+            )?,
         }),
         CoreRequest::SendText {
             conversation_id,

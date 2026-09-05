@@ -4,6 +4,9 @@ enum DeliveryState { queued, sent, delivered, read }
 
 enum ContactSafety { verified, pending, refreshRequired }
 
+/// The two supported multi-person conversation styles.
+enum ConversationType { direct, group, channel }
+
 class ChatMessage {
   const ChatMessage({
     required this.id,
@@ -52,6 +55,10 @@ class Conversation {
     this.unreadCount = 0,
     this.isOnline = false,
     this.isGroup = false,
+    this.type = ConversationType.direct,
+    this.memberCount = 2,
+    this.isAdmin = false,
+    this.description = '',
     this.avatarBytes,
   });
 
@@ -64,6 +71,10 @@ class Conversation {
   final int unreadCount;
   final bool isOnline;
   final bool isGroup;
+  final ConversationType type;
+  final int memberCount;
+  final bool isAdmin;
+  final String description;
   final Uint8List? avatarBytes;
   final ContactSafety safety;
   final String fingerprint;
@@ -85,6 +96,10 @@ class Conversation {
       unreadCount: unreadCount ?? this.unreadCount,
       isOnline: isOnline ?? this.isOnline,
       isGroup: isGroup,
+      type: type,
+      memberCount: memberCount,
+      isAdmin: isAdmin,
+      description: description,
       safety: safety ?? this.safety,
       fingerprint: fingerprint,
       avatarBytes: avatarBytes,

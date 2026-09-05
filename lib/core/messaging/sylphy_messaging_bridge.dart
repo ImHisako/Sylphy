@@ -9,6 +9,7 @@ import 'secure_messaging_bridge.dart';
 class SylphyMessagingBridge
     implements
         SecureMessagingBridge,
+        GroupMessagingBridge,
         InboxRefreshingBridge,
         CachedMessagingBridge {
   SylphyMessagingBridge({required NativeCoreApi core}) : _core = core;
@@ -250,6 +251,40 @@ class SylphyMessagingBridge
   }
 
   @override
+  Future<String> createGroup({
+    required String name,
+    required List<String> invitationCodes,
+    required bool professional,
+    String description = '',
+  }) async {
+    await _waitUntilCoreIsAvailable();
+    final core = _core;
+    if (core is NativeCoreClient) {
+      final response = await core.createGroupInBackground(
+        name: name,
+        invitationCodes: invitationCodes,
+        professional: professional,
+        description: description,
+      );
+      _requireSuccess(response);
+      _conversationCache = null;
+      return _requiredString(response.data, 'group_id');
+    }
+    if (core is! NativeCoreGroupApi) {
+      throw const SecureMessagingException('unsupported');
+    }
+    final response = core.createGroup(
+      name: name,
+      invitationCodes: invitationCodes,
+      professional: professional,
+      description: description,
+    );
+    _requireSuccess(response);
+    _conversationCache = null;
+    return _requiredString(response.data, 'group_id');
+  }
+
+  @override
   Future<void> markConversationRead(String conversationId) async {
     await _waitUntilCoreIsAvailable();
     final core = _core;
@@ -367,6 +402,13 @@ Conversation _parseConversation(Object? value) {
     unreadCount: _requiredInt(value, 'unread_count'),
     isOnline: value['is_online'] == true,
     isGroup: value['is_group'] == true,
+    type: _parseConversationType(
+      value['conversation_type'],
+      isGroup: value['is_group'] == true,
+    ),
+    memberCount: _optionalInt(value, 'member_count', 2),
+    isAdmin: value['is_admin'] == true,
+    description: _optionalString(value, 'description', ''),
     safety: switch (_requiredString(value, 'safety')) {
       'verified' => ContactSafety.verified,
       'pending' => ContactSafety.pending,
@@ -379,6 +421,45 @@ Conversation _parseConversation(Object? value) {
       _ => null,
     },
   );
+}
+
+ConversationType _parseConversationType(
+  Object? value, {
+  required bool isGroup,
+}) {
+  if (value == null) {
+    return isGroup ? ConversationType.group : ConversationType.direct;
+  }
+  return switch (value) {
+    'direct' => ConversationType.direct,
+    'group' => ConversationType.group,
+    'channel' => ConversationType.channel,
+    _ => throw const SecureMessagingException('invalid_native_response'),
+  };
+}
+
+int _optionalInt(Map<String, dynamic> value, String key, int fallback) {
+  final field = value[key];
+  if (field == null) {
+    return fallback;
+  }
+  if (field is! int || field < 1) {
+    throw const SecureMessagingException('invalid_native_response');
+  }
+  return field;
+}
+
+String _optionalString(
+  Map<String, dynamic> value,
+  String key,
+  String fallback,
+) {
+  final field = value[key];
+  if (field == null) return fallback;
+  if (field is! String) {
+    throw const SecureMessagingException('invalid_native_response');
+  }
+  return field;
 }
 
 ChatMessage _parseMessage(Object? value, {ChatMessage? cached}) {

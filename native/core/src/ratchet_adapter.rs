@@ -972,7 +972,7 @@ impl PendingDecrypt {
 }
 
 #[cfg(feature = "signal-ratchet")]
-pub fn decrypt_message(
+pub(crate) fn decrypt_message(
     peer_identity: &[u8],
     sender_device_id: u8,
     ciphertext: &[u8],
@@ -981,7 +981,7 @@ pub fn decrypt_message(
 }
 
 #[cfg(not(feature = "signal-ratchet"))]
-pub fn decrypt_message(
+pub(crate) fn decrypt_message(
     _peer_identity: &[u8],
     _sender_device_id: u8,
     _ciphertext: &[u8],

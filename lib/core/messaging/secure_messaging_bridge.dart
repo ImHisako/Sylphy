@@ -38,6 +38,40 @@ abstract interface class InboxRefreshingBridge {
   Future<int> refreshInbox();
 }
 
+/// Optional capability so existing integrations can keep implementing the
+/// direct messaging bridge without a breaking API change.
+abstract interface class GroupMessagingBridge {
+  Future<String> createGroup({
+    required String name,
+    required List<String> invitationCodes,
+    required bool professional,
+    String description = '',
+  });
+}
+
+/// Convenience API for callers that only hold the original direct bridge
+/// type. Capability detection remains explicit at runtime for older fakes and
+/// integrations.
+extension GroupMessagingOperations on SecureMessagingBridge {
+  Future<String> createGroup({
+    required String name,
+    required List<String> invitationCodes,
+    required bool professional,
+    String description = '',
+  }) {
+    final capability = this;
+    if (capability is GroupMessagingBridge) {
+      return capability.createGroup(
+        name: name,
+        invitationCodes: invitationCodes,
+        professional: professional,
+        description: description,
+      );
+    }
+    return Future<String>.error(const SecureMessagingException('unsupported'));
+  }
+}
+
 /// Optional fast-path used by the UI to render local data immediately while
 /// disk/network refreshes continue on the native worker isolate.
 abstract interface class CachedMessagingBridge
@@ -58,7 +92,8 @@ abstract interface class CachedMessagingBridge
   Future<List<ChatMessage>> loadOlderMessages(String conversationId);
 }
 
-class UnavailableMessagingBridge implements SecureMessagingBridge {
+class UnavailableMessagingBridge
+    implements SecureMessagingBridge, GroupMessagingBridge {
   const UnavailableMessagingBridge();
 
   @override
@@ -71,6 +106,16 @@ class UnavailableMessagingBridge implements SecureMessagingBridge {
   Future<String> addContact({
     required String displayName,
     required String invitationCode,
+  }) async {
+    throw const SecureMessagingException('native_core_unavailable');
+  }
+
+  @override
+  Future<String> createGroup({
+    required String name,
+    required List<String> invitationCodes,
+    required bool professional,
+    String description = '',
   }) async {
     throw const SecureMessagingException('native_core_unavailable');
   }

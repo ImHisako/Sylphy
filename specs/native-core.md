@@ -14,6 +14,8 @@ I comandi ABI `start_veilid`, `veilid_status` e `stop_veilid` sono sincroni risp
 
 `add_contact` usa il codice breve Veilid per recuperare una `PublishedIdentity` firmata. Il nome mostrato è sempre il display name autenticato contenuto nel profilo remoto (oppure un identificatore Sylphy deterministico se il proprietario ha scelto di non pubblicarlo): il client che importa non può più assegnare un alias arbitrario. Il core impone limiti di dimensione, versione e cardinalità, verifica firme, capability e scadenza e rifiuta record duplicati.
 
+`create_group` aggiunge una directory `groups-v1.vault` cifrata nel vault locale. La modalità `group` rappresenta una chat classica; `channel` rappresenta un canale professionale in cui solo l'amministratore pubblica. Ogni invito contiene il gruppo, gli endpoint pubblici firmati dei membri e l'identità dell'amministratore, ed è trasportato come payload E2EE individuale. I messaggi di gruppo vengono cifrati separatamente per ogni membro e validati contro la membership prima della persistenza; gli inviti fuori ordine non vengono scartati.
+
 Il layer di trasporto riceve esclusivamente `MessageEnvelope` già autenticati e cifrati. I bundle pubblici firmati non includono una chiave di scrittura mailbox condivisa: i messaggi tra contatti usano la route diretta, mentre la mailbox cifrata resta privata ai dispositivi dello stesso account. Identità firmate e riferimenti ad allegati cifrati sono gli altri record pubblicabili.
 
 ## Ratchet

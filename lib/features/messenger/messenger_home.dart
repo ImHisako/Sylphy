@@ -351,6 +351,41 @@ class _MessengerHomeState extends State<MessengerHome>
     }
   }
 
+  Future<void> _createGroup() async {
+    final draft = await showDialog<_GroupDraft>(
+      context: context,
+      builder: (context) => const _CreateGroupDialog(),
+    );
+    if (draft == null || !mounted) return;
+    try {
+      final capability = widget.bridge;
+      if (capability is! GroupMessagingBridge) {
+        throw const SecureMessagingException('unsupported');
+      }
+      final groupBridge = capability as GroupMessagingBridge;
+      final id = await groupBridge.createGroup(
+        name: draft.name,
+        invitationCodes: draft.invitationCodes,
+        professional: draft.professional,
+        description: draft.description,
+      );
+      await _refreshInbox(force: true);
+      if (mounted) setState(() => _activeConversationId = id);
+    } on SecureMessagingException catch (error) {
+      if (!mounted) return;
+      final message = switch (error.code) {
+        'feature_unavailable' => 'Lo storage sicuro non è ancora pronto.',
+        'limit_exceeded' => 'Troppi membri oppure gruppo troppo grande.',
+        'verification_failed' =>
+          'Uno dei codici invito non è valido o è duplicato.',
+        _ => 'Impossibile creare il gruppo.',
+      };
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    }
+  }
+
   void _refresh() => unawaited(_refreshInbox(force: true));
 
   void _openProfile() {
@@ -416,6 +451,7 @@ class _MessengerHomeState extends State<MessengerHome>
             onConversationSelected: _selectConversation,
             onChanged: _refresh,
             onAddContact: _addContact,
+            onCreateGroup: _createGroup,
             onProfilePressed: _openProfile,
             onSettingsPressed: _openSettings,
             privacySettings: widget.privacySettings,
@@ -431,6 +467,7 @@ class _MessengerHomeState extends State<MessengerHome>
           onConversationSelected: _selectConversation,
           onChanged: _refresh,
           onAddContact: _addContact,
+          onCreateGroup: _createGroup,
           onProfilePressed: _openProfile,
           onSettingsPressed: _openSettings,
           privacySettings: widget.privacySettings,
@@ -451,6 +488,7 @@ class _DesktopMessenger extends StatelessWidget {
     required this.onConversationSelected,
     required this.onChanged,
     required this.onAddContact,
+    required this.onCreateGroup,
     required this.onProfilePressed,
     required this.onSettingsPressed,
     required this.privacySettings,
@@ -466,6 +504,7 @@ class _DesktopMessenger extends StatelessWidget {
   final Future<void> Function(String conversationId) onConversationSelected;
   final VoidCallback onChanged;
   final VoidCallback onAddContact;
+  final VoidCallback onCreateGroup;
   final VoidCallback onProfilePressed;
   final VoidCallback onSettingsPressed;
   final PrivacySettingsController privacySettings;
@@ -481,6 +520,7 @@ class _DesktopMessenger extends StatelessWidget {
               snapshot: veilidService.snapshot,
               profile: profile,
               onAddContact: onAddContact,
+              onCreateGroup: onCreateGroup,
               onProfilePressed: onProfilePressed,
               onPrivacyPressed: () =>
                   _showPrivacyOverview(context, nativeCore, veilidService),
@@ -624,6 +664,7 @@ class _DesktopAppRail extends StatelessWidget {
     required this.snapshot,
     required this.profile,
     required this.onAddContact,
+    required this.onCreateGroup,
     required this.onProfilePressed,
     required this.onPrivacyPressed,
     required this.onFilesPressed,
@@ -633,6 +674,7 @@ class _DesktopAppRail extends StatelessWidget {
   final VeilidSnapshot snapshot;
   final UserProfile profile;
   final VoidCallback onAddContact;
+  final VoidCallback onCreateGroup;
   final VoidCallback onProfilePressed;
   final VoidCallback onPrivacyPressed;
   final VoidCallback onFilesPressed;
@@ -679,6 +721,11 @@ class _DesktopAppRail extends StatelessWidget {
                 icon: Icons.person_add_alt_1_rounded,
                 tooltip: 'Aggiungi contatto',
                 onPressed: onAddContact,
+              ),
+              _RailButton(
+                icon: Icons.groups_2_outlined,
+                tooltip: 'Crea gruppo o canale',
+                onPressed: onCreateGroup,
               ),
               _RailButton(
                 key: const ValueKey('open-encrypted-files'),
@@ -893,6 +940,7 @@ class _MobileConversationList extends StatelessWidget {
     required this.onConversationSelected,
     required this.onChanged,
     required this.onAddContact,
+    required this.onCreateGroup,
     required this.onProfilePressed,
     required this.onSettingsPressed,
     required this.privacySettings,
@@ -906,6 +954,7 @@ class _MobileConversationList extends StatelessWidget {
   final Future<void> Function(String conversationId) onConversationSelected;
   final VoidCallback onChanged;
   final VoidCallback onAddContact;
+  final VoidCallback onCreateGroup;
   final VoidCallback onProfilePressed;
   final VoidCallback onSettingsPressed;
   final PrivacySettingsController privacySettings;
@@ -1009,13 +1058,27 @@ class _MobileConversationList extends StatelessWidget {
           },
         ),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        key: const ValueKey('mobile-add-contact'),
-        onPressed: onAddContact,
-        backgroundColor: Theme.of(context).colorScheme.primary,
-        foregroundColor: Theme.of(context).colorScheme.onPrimary,
-        icon: const Icon(Icons.edit_square),
-        label: const Text('Aggiungi contatto'),
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          FloatingActionButton.small(
+            heroTag: 'mobile-create-group',
+            tooltip: 'Crea gruppo o canale',
+            onPressed: onCreateGroup,
+            child: const Icon(Icons.groups_2_outlined),
+          ),
+          const SizedBox(height: 10),
+          FloatingActionButton.extended(
+            key: const ValueKey('mobile-add-contact'),
+            heroTag: 'mobile-add-contact',
+            onPressed: onAddContact,
+            backgroundColor: Theme.of(context).colorScheme.primary,
+            foregroundColor: Theme.of(context).colorScheme.onPrimary,
+            icon: const Icon(Icons.edit_square),
+            label: const Text('Aggiungi contatto'),
+          ),
+        ],
       ),
     );
   }
@@ -2080,6 +2143,34 @@ class _ConversationDetails extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             Center(child: _SafetyBadge(safety: conversation.safety)),
+            if (conversation.isGroup) ...[
+              const SizedBox(height: 10),
+              Center(
+                child: Text(
+                  conversation.type == ConversationType.channel
+                      ? 'Canale professionale · ${conversation.memberCount} membri'
+                      : '${conversation.memberCount} membri',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Color(0xFFAEB7C3),
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+              if (conversation.description.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Center(
+                  child: Text(
+                    conversation.description,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Color(0xFF9299A5),
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+              ],
+            ],
             const SizedBox(height: 30),
             const _DetailLabel('SICUREZZA SESSIONE'),
             const SizedBox(height: 9),
@@ -2482,6 +2573,14 @@ class _ContactAvatar extends StatelessWidget {
               : MemoryImage(conversation.avatarBytes!),
           child: conversation.avatarBytes != null
               ? null
+              : conversation.isGroup
+              ? Icon(
+                  conversation.type == ConversationType.channel
+                      ? Icons.campaign_rounded
+                      : Icons.groups_2_rounded,
+                  color: Color(conversation.accentValue),
+                  size: radius * 0.9,
+                )
               : Text(
                   conversation.initials,
                   style: TextStyle(
@@ -2634,6 +2733,153 @@ class _ProfileAvatar extends StatelessWidget {
               : null,
         ),
       ),
+    );
+  }
+}
+
+class _GroupDraft {
+  const _GroupDraft({
+    required this.name,
+    required this.invitationCodes,
+    required this.professional,
+    required this.description,
+  });
+
+  final String name;
+  final List<String> invitationCodes;
+  final bool professional;
+  final String description;
+}
+
+class _CreateGroupDialog extends StatefulWidget {
+  const _CreateGroupDialog();
+
+  @override
+  State<_CreateGroupDialog> createState() => _CreateGroupDialogState();
+}
+
+class _CreateGroupDialogState extends State<_CreateGroupDialog> {
+  final _formKey = GlobalKey<FormState>();
+  final _nameController = TextEditingController();
+  final _descriptionController = TextEditingController();
+  final _membersController = TextEditingController();
+  bool _professional = false;
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _descriptionController.dispose();
+    _membersController.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    if (!_formKey.currentState!.validate()) return;
+    final codes = _membersController.text
+        .split(RegExp(r'[\n,]'))
+        .map(
+          (value) => value.trim().replaceFirst(
+            RegExp(r'^sylphy:', caseSensitive: false),
+            '',
+          ),
+        )
+        .where((value) => value.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+    Navigator.of(context).pop(
+      _GroupDraft(
+        name: _nameController.text.trim(),
+        invitationCodes: codes,
+        professional: _professional,
+        description: _descriptionController.text.trim(),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Row(
+        children: [
+          Icon(Icons.groups_2_outlined),
+          SizedBox(width: 12),
+          Flexible(child: Text('Crea gruppo o canale')),
+        ],
+      ),
+      content: SizedBox(
+        width: 480,
+        child: Form(
+          key: _formKey,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: _nameController,
+                  autofocus: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Nome',
+                    prefixIcon: Icon(Icons.title_rounded),
+                  ),
+                  validator: (value) => value == null || value.trim().isEmpty
+                      ? 'Inserisci un nome.'
+                      : null,
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _descriptionController,
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                    labelText: 'Descrizione (facoltativa)',
+                    prefixIcon: Icon(Icons.subject_rounded),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Modalità professionale a canale'),
+                  subtitle: const Text(
+                    'Pensata per team e comunicazioni aziendali',
+                  ),
+                  value: _professional,
+                  onChanged: (value) => setState(() => _professional = value),
+                ),
+                const SizedBox(height: 8),
+                TextFormField(
+                  controller: _membersController,
+                  minLines: 4,
+                  maxLines: 8,
+                  autocorrect: false,
+                  decoration: const InputDecoration(
+                    labelText: 'Codici invito dei membri',
+                    hintText: 'Un codice per riga',
+                    alignLabelWithHint: true,
+                    prefixIcon: Icon(Icons.person_add_alt_1_rounded),
+                  ),
+                  validator: (value) {
+                    final count = (value ?? '')
+                        .split(RegExp(r'[\n,]'))
+                        .where((item) => item.trim().isNotEmpty)
+                        .length;
+                    return count == 0 ? 'Aggiungi almeno una persona.' : null;
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Annulla'),
+        ),
+        FilledButton.icon(
+          onPressed: _submit,
+          icon: const Icon(Icons.check_rounded),
+          label: const Text('Crea'),
+        ),
+      ],
     );
   }
 }
@@ -2987,7 +3233,9 @@ String _presenceLabel(Conversation conversation) {
     return 'Verifica la nuova chiave';
   }
   if (conversation.isGroup) {
-    return 'Gruppo protetto';
+    return conversation.type == ConversationType.channel
+        ? 'Canale aziendale · ${conversation.memberCount} membri'
+        : 'Gruppo protetto · ${conversation.memberCount} membri';
   }
   return 'Ultima attività ${_relativeTime(conversation.lastActivity)}';
 }
@@ -3401,7 +3649,7 @@ String _signatureForConversations(
 ) => conversations
     .map(
       (item) =>
-          '${item.id}|${item.lastActivity.microsecondsSinceEpoch}|${item.lastMessage}|${item.unreadCount}|${item.safety.name}|${item.isOnline}',
+          '${item.id}|${item.lastActivity.microsecondsSinceEpoch}|${item.lastMessage}|${item.unreadCount}|${item.safety.name}|${item.isOnline}|${item.type.name}|${item.memberCount}',
     )
     .join('\n');
 

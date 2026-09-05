@@ -68,7 +68,38 @@ abstract interface class NativeCoreApi {
   NativeCoreResponse verifyDoubleRatchet();
 }
 
-class NativeCoreClient implements NativeCoreApi {
+/// Optional command surface kept outside the base interface so existing test
+/// and platform adapters remain source compatible.
+extension NativeCoreGroupOperations on NativeCoreApi {
+  NativeCoreResponse createGroup({
+    required String name,
+    required List<String> invitationCodes,
+    required bool professional,
+    required String description,
+  }) {
+    final client = this;
+    if (client is NativeCoreClient) {
+      return client.createGroup(
+        name: name,
+        invitationCodes: invitationCodes,
+        professional: professional,
+        description: description,
+      );
+    }
+    throw UnsupportedError('create_group');
+  }
+}
+
+abstract interface class NativeCoreGroupApi {
+  NativeCoreResponse createGroup({
+    required String name,
+    required List<String> invitationCodes,
+    required bool professional,
+    required String description,
+  });
+}
+
+class NativeCoreClient implements NativeCoreApi, NativeCoreGroupApi {
   NativeCoreClient._(this._call, this._freeString, this.abiVersion);
 
   final _DartCall _call;
@@ -178,6 +209,22 @@ class NativeCoreClient implements NativeCoreApi {
     });
   }
 
+  @override
+  NativeCoreResponse createGroup({
+    required String name,
+    required List<String> invitationCodes,
+    required bool professional,
+    required String description,
+  }) {
+    return call({
+      'command': 'create_group',
+      'name': name,
+      'invitation_codes': invitationCodes,
+      'professional': professional,
+      'description': description,
+    });
+  }
+
   Future<NativeCoreResponse> listMessagesInBackground(
     String conversationId, {
     bool priority = false,
@@ -220,6 +267,19 @@ class NativeCoreClient implements NativeCoreApi {
     'command': 'add_contact',
     'display_name': displayName,
     'invitation_code': invitationCode,
+  });
+
+  Future<NativeCoreResponse> createGroupInBackground({
+    required String name,
+    required List<String> invitationCodes,
+    required bool professional,
+    required String description,
+  }) => _callInBackground({
+    'command': 'create_group',
+    'name': name,
+    'invitation_codes': invitationCodes,
+    'professional': professional,
+    'description': description,
   });
 
   @override
