@@ -44,6 +44,16 @@ class MainActivity : FlutterActivity() {
     private var pendingSaveResult: MethodChannel.Result? = null
     private var pendingSaveBytes: ByteArray? = null
 
+    override fun onResume() {
+        super.onResume()
+        MessagingService.uiResumed = true
+    }
+
+    override fun onPause() {
+        MessagingService.uiResumed = false
+        super.onPause()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         ensureVeilidInitialized()
         // Veilid needs Android's Context/JVM before Flutter can invoke FFI.
@@ -70,7 +80,7 @@ class MainActivity : FlutterActivity() {
                         result.success(true)
                     }
                     "showMessageNotification" -> {
-                        showMessageNotification()
+                        showMessageNotification(call.argument<Boolean>("pinned") == true)
                         result.success(true)
                     }
                     "startBackgroundMessaging" -> {
@@ -170,7 +180,7 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun showMessageNotification() {
+    private fun showMessageNotification(pinned: Boolean = false) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
                 PackageManager.PERMISSION_GRANTED
@@ -188,8 +198,8 @@ class MainActivity : FlutterActivity() {
         )
         val notification = NotificationCompat.Builder(this, MESSAGE_CHANNEL_ID)
             .setSmallIcon(R.drawable.sylphy_notification)
-            .setContentTitle("Nuovo messaggio")
-            .setContentText("Hai ricevuto un nuovo messaggio su Sylphy")
+            .setContentTitle(if (pinned) "Messaggio fissato" else "Nuovo messaggio")
+            .setContentText(if (pinned) "Un messaggio è stato fissato in un gruppo Sylphy" else "Hai ricevuto un nuovo messaggio su Sylphy")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setAutoCancel(true)

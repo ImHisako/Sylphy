@@ -106,6 +106,7 @@ impl PublicBundle {
             capabilities.push("signal-libsignal-v1".to_owned());
             capabilities.push("offline-mailbox-v1".to_owned());
             capabilities.push("group-invite-blob-v2".to_owned());
+            capabilities.push("group-management-v1".to_owned());
             capabilities.push("device-sync-blob-v2".to_owned());
         }
         let bundle = Self {

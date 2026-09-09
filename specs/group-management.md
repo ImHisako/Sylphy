@@ -1,0 +1,120 @@
+# Gestione dei gruppi · protocollo v1
+
+## Comportamento e compatibilità
+
+L'ABI 11 introduce `group_details`, `group_action`, `join_group`, `search_messages`
+e `send_reply`. Flutter e libreria nativa devono essere aggiornati insieme.
+I nuovi inviti pubblicano la capability firmata `group-management-v1`; creazione,
+aggiunta di membri e amministrazione richiedono che tutti gli endpoint del gruppo
+la supportino. I vecchi codici personali vanno rigenerati con il client aggiornato.
+I record locali preesistenti ricevono permessi aperti grazie ai default Serde.
+
+`group` e `channel` distinguono gruppo normale e aziendale: entrambi consentono
+ai membri di scrivere per impostazione predefinita. Il proprietario o un admin
+con `manage_permissions` può consentire o negare messaggi, allegati e link,
+impostare un intervallo minimo tra messaggi e attivare l'antispam aggressivo.
+Sylphy non espone permessi per sticker o sondaggi, che non sono tipi di messaggio
+implementati. Le GIF seguono i permessi degli allegati.
+
+Le restrizioni individuali si sommano a quelle del gruppo. Proprietario e admin
+sono esenti dai limiti di scrittura; per limitare un admin va prima revocato il
+ruolo. I privilegi delegabili sono eliminazione messaggi, gestione membri,
+modifica informazioni, inviti, nomina admin, messaggi fissati e gestione permessi.
+Un delegato non può conferire privilegi che non possiede né modificare un altro
+admin; solo il proprietario può eliminare il gruppo per tutti.
+
+## Trasporto e autorità
+
+Il dispositivo creatore coordina le revisioni del gruppo. Le azioni dei delegati
+sono richieste E2EE indirizzate al proprietario: l'interfaccia indica che restano
+in attesa se quel dispositivo è offline. Il coordinatore ricontrolla membership
+e privilegi prima di applicarle e distribuisce snapshot a revisione crescente.
+I destinatari verificano la firma dell'endpoint e l'identità/dispositivo del
+coordinatore; non accettano snapshot prodotti da un normale membro.
+
+I controlli `Request`, `Snapshot`, `Join`, `Invite` e `Rejected` usano blob cifrati
+e puntatori compatti autenticati nelle sessioni individuali esistenti. Nessuna
+directory di gruppo viene pubblicata in chiaro. Il vault del gruppo persiste
+atomicamente stato e consegne pendenti prima di trasferirle nell'outbox; gli
+effetti locali vengono registrati per poterli ripetere dopo un'interruzione.
+I backup validano anche le consegne di controllo prive di un messaggio visibile.
+
+I messaggi normali e gli allegati usano lo stesso ID logico per la copia locale
+e per tutte le consegne cifrate separatamente. Questo rende riferimenti di
+risposta, pin e cancellazione coerenti tra destinatari. I vecchi messaggi inviati
+con ID diversi non ricevono retroattivamente un ID condiviso.
+
+## Membri, inviti e cancellazioni
+
+L'aggiunta diretta verifica i codici personali firmati. I link di gruppo hanno
+token casuale, scadenza di sette giorni e revoca; crearne uno nuovo invalida il
+precedente. Chi entra tramite link conserva una richiesta pendente fino alla
+risposta del proprietario. I nuovi membri ricevono la directory e i messaggi
+successivi, non la cronologia pregressa.
+
+Rimozione e chiusura vengono inviate anche ai membri appena rimossi. Una chiusura
+è persistente e non viene annullata da inviti o sincronizzazioni precedenti. Gli
+ID dei messaggi cancellati vengono conservati come tombstone; la ricerca, la
+cronologia e la sincronizzazione dei dispositivi li escludono. I client aggiornati
+eliminano le copie locali gestite dall'app, incluse quelle ancora in outbox.
+La consegna ai dispositivi offline resta soggetta alla disponibilità e alla
+retention della rete: non è una garanzia di cancellazione remota di esportazioni,
+screenshot o client modificati.
+
+## Ricerca, risposte e fissati
+
+L'indice testuale locale usa trigrammi e liste per conversazione. Si aggiorna
+incrementalmente con nuovi messaggi e si ricostruisce dopo cancellazioni o cambio
+account. Rimane esclusivamente in memoria: nessun indice plaintext viene scritto
+su disco. Le parole cercate sono combinate in AND, senza distinzione tra maiuscole
+e minuscole; query brevi usano la lista della conversazione. I risultati sono
+paginati a 50 elementi; `id:` risolve un messaggio nella sola chat richiesta.
+
+Le risposte conservano un ID nel payload testuale versionato e cifrato.
+Menzioni testuali e hashtag sono cliccabili e ricercabili; il selettore dei membri
+inserisce `@nome`. Non sono tag d'identità immutabili: omonimi e cambi di nome
+non vengono risolti automaticamente. I pin sono visibili in alto e nella gestione
+del gruppo. Alla ricezione di nuovi pin viene mostrato un avviso specifico;
+Android usa una notifica generica "Messaggio fissato", senza contenuto della chat.
+
+Gli avvisi di messaggio e di pin sono soppressi per la conversazione effettivamente
+visibile quando l'app è in primo piano. Una chat selezionata ma coperta da un'altra
+pagina, oppure chiusa nella lista mobile, non viene considerata visibile. Su
+Android il servizio lascia il polling e la decisione sugli avvisi a Flutter mentre
+l'Activity è ripresa, evitando una seconda notifica indipendente dalla chat aperta.
+
+Ogni messaggio di gruppo mostra il nome del mittente sopra testo e allegati.
+Il core conserva nel log cifrato il nome del profilo autenticato alla ricezione,
+così resta disponibile dopo un riavvio o la rimozione del membro. Per i record
+precedenti recupera il nome dalla directory del gruppo o dai contatti; in assenza
+di questi dati mostra un identificatore del membro. Il read model `author_name`
+è opzionale e non cambia i pacchetti di rete esistenti.
+
+## Antispam e limiti effettivi
+
+La modalità lenta permette da 0 a 3.600 secondi. Il core verifica le restrizioni
+sia all'invio sia alla ricezione. Per il rate limit in ricezione usa l'orario
+locale di arrivo, non un timestamp scelto dal mittente. L'antispam aggressivo
+blocca raffiche di almeno cinque messaggi recenti in dieci secondi, duplicati
+entro un minuto e testi con più di cinque `@`. È un filtro euristico locale:
+consegne accumulate offline possono attivarlo e client con storie diverse
+possono avere decisioni diverse. Non è un classificatore centralizzato.
+
+Questa implementazione conserva i limiti dell'archivio esistente: 100.000 messaggi
+e log cifrato di 64 MiB, allegati di 700 KiB, al massimo 64 destinatari oltre al
+creatore. Il gruppo ammette 50 pin, 512 richieste pendenti e 4.096 azioni applicate
+registrate per deduplicazione. La ricerca è verificata su 100.000 messaggi sintetici;
+**non è supportata né certificata la ricerca su milioni di messaggi**. Per quella
+scala servono un archivio cifrato segmentato e una politica di compattazione dei
+controlli distinta, con migrazione e benchmark dedicati.
+
+## Verifica
+
+I test Rust verificano invio dei membri in entrambe le modalità con crittografia
+reale e ID condivisi, permessi e antispam, richieste non autorizzate, snapshot
+contraffatti/fuori ordine, tombstone, backup e un ciclo completo di delega,
+invito cifrato, ingresso, revoca, rimozione e chiusura. Nei test di gestione viene
+sostituito soltanto il trasporto di rete dei blob; identità, pacchetti Signal e
+vault sono reali. I test Flutter coprono impostazioni, aggiunta membri, conferma
+di eliminazione, accessi senza privilegi e risposte di ricerca fuori ordine.
+Questi test non sostituiscono una prova su dispositivi reali collegati a Veilid.

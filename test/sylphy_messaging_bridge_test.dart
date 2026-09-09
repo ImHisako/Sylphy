@@ -8,6 +8,45 @@ import 'package:sylphy/core/native/native_core.dart';
 
 void main() {
   test(
+    'sender names survive parsing, receipt updates and cache refreshes',
+    () async {
+      final core = _FakeNativeCore();
+      core.messages.add({..._record('named', 1), 'author_name': 'Alice'});
+      final bridge = SylphyMessagingBridge(core: core);
+      final message = bridge.listMessages('chat').single;
+      expect(message.authorName, 'Alice');
+      expect(
+        message.copyWith(deliveryState: DeliveryState.read).authorName,
+        'Alice',
+      );
+      core.messages.single['author_name'] = 'Alice Rossi';
+      expect(
+        (await bridge.refreshMessages('chat')).single.authorName,
+        'Alice Rossi',
+      );
+    },
+  );
+  test(
+    'a newer group page cannot merge deleted messages from an older cache',
+    () async {
+      final core = _PagedCore()..groupRevision = 1;
+      final bridge = SylphyMessagingBridge(core: core);
+      await bridge.refreshMessages('chat');
+      final pending = bridge.loadOlderMessages('chat');
+      core.groupRevision = 2;
+      core.latest = [_record('retained', 3)];
+      core.older.complete(_page([_record('old', 1)], false, groupRevision: 2));
+      expect((await pending).map((message) => message.id), ['retained']);
+      expect(bridge.cachedMessages('chat')!.map((message) => message.id), [
+        'retained',
+      ]);
+      bridge.clearCachesAfterAccountImport();
+      core.groupRevision = 0;
+      core.latest = [_record('new-account', 4)];
+      expect((await bridge.refreshMessages('chat')).single.id, 'new-account');
+    },
+  );
+  test(
     'older pages merge with concurrent refresh and survive later refreshes',
     () async {
       final core = _PagedCore();
@@ -179,16 +218,24 @@ Map<String, Object> _record(String id, int time) => {
   'delivery_state': 'sent',
 };
 
-NativeCoreResponse _page(List<Map<String, Object>> messages, bool hasMore) =>
-    NativeCoreResponse(
-      ok: true,
-      code: 'ok',
-      data: {'messages': messages, 'has_more': hasMore},
-    );
+NativeCoreResponse _page(
+  List<Map<String, Object>> messages,
+  bool hasMore, {
+  int? groupRevision,
+}) => NativeCoreResponse(
+  ok: true,
+  code: 'ok',
+  data: {
+    'messages': messages,
+    'has_more': hasMore,
+    if (groupRevision != null) 'group_revision': groupRevision,
+  },
+);
 
 class _PagedCore extends _FakeNativeCore implements NativeCoreMessagePageApi {
   final older = Completer<NativeCoreResponse>();
   int olderCalls = 0;
+  int? groupRevision;
   List<Map<String, Object>> latest = [_record('middle', 2)];
 
   @override
@@ -202,7 +249,7 @@ class _PagedCore extends _FakeNativeCore implements NativeCoreMessagePageApi {
       olderCalls++;
       return older.future;
     }
-    return Future.value(_page(latest, true));
+    return Future.value(_page(latest, true, groupRevision: groupRevision));
   }
 }
 

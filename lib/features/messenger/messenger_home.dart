@@ -19,6 +19,7 @@ import '../../core/veilid/veilid_service.dart';
 import '../profile/profile_sheet.dart';
 import '../settings/settings_page.dart';
 import 'encrypted_file_archive_page.dart';
+import 'group_management_page.dart';
 
 class MessengerHome extends StatefulWidget {
   const MessengerHome({
@@ -244,10 +245,29 @@ class _MessengerHomeState extends State<MessengerHome>
     if (!force && signature == _conversationSignature) return;
     final hasNewMessage = conversations.any(
       (conversation) =>
+          !MessageNotifications.isConversationVisible(conversation.id) &&
           conversation.unreadCount > (_unreadCounts[conversation.id] ?? 0),
     );
-    if (hasNewMessage) {
-      unawaited(const MessageNotifications().showIncomingMessage());
+    final newPin = conversations.any(
+      (conversation) =>
+          !MessageNotifications.isConversationVisible(conversation.id) &&
+          conversation.pinnedMessageIds.any(
+            (id) => !_conversations
+                .where((old) => old.id == conversation.id)
+                .any((old) => old.pinnedMessageIds.contains(id)),
+          ),
+    );
+    if (hasNewMessage || newPin) {
+      unawaited(
+        const MessageNotifications().showIncomingMessage(pinned: newPin),
+      );
+    }
+    if (newPin && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Un messaggio è stato fissato in un gruppo.'),
+        ),
+      );
     }
     setState(() {
       _conversations = conversations;
@@ -352,7 +372,7 @@ class _MessengerHomeState extends State<MessengerHome>
       }
       final message = switch (error.code) {
         'native_core_unavailable' =>
-          'Il core nativo non è disponibile: ricompila l’app con ABI 10.',
+          'Il servizio di messaggistica non è disponibile: aggiorna Sylphy.',
         'feature_unavailable' =>
           'Lo storage nativo non è ancora pronto. Attendi l’avvio del nodo e riprova.',
         'verification_failed' =>
@@ -374,6 +394,23 @@ class _MessengerHomeState extends State<MessengerHome>
     if (draft == null || !mounted) return;
     try {
       final capability = widget.bridge;
+      if (draft.joinLink != null && capability is GroupManagementBridge) {
+        final id = await (capability as GroupManagementBridge).joinGroup(
+          draft.joinLink!,
+        );
+        await _refreshInbox(force: true);
+        if (mounted) {
+          setState(() => _activeConversationId = id);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Richiesta di ingresso inviata. Attendi che il proprietario sia online.',
+              ),
+            ),
+          );
+        }
+        return;
+      }
       if (capability is! GroupMessagingBridge) {
         throw const SecureMessagingException('unsupported');
       }
@@ -1205,6 +1242,192 @@ class _ChatPane extends StatefulWidget {
 }
 
 class _ChatPaneState extends State<_ChatPane> {
+  ChatMessage? _replyTo;
+  GroupManagementBridge? get _management =>
+      widget.bridge is GroupManagementBridge
+      ? widget.bridge as GroupManagementBridge
+      : null;
+
+  Future<void> _manageGroup() async {
+    final bridge = _management;
+    if (bridge == null) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => GroupManagementPage(
+          bridge: bridge,
+          conversationId: widget.conversation.id,
+        ),
+      ),
+    );
+    if (mounted) {
+      widget.onChanged();
+      await _reloadMessagesAsync(force: true);
+    }
+  }
+
+  Future<void> _searchChat([String initial = '']) async {
+    final bridge = _management;
+    if (bridge == null) return;
+    final id = widget.conversation.id;
+    final result = await Navigator.of(context).push<Map>(
+      MaterialPageRoute(
+        builder: (_) => ChatSearchPage(
+          bridge: bridge,
+          conversationId: id,
+          initialQuery: initial,
+        ),
+      ),
+    );
+    if (result != null && mounted && widget.conversation.id == id) {
+      setState(
+        () => _replyTo = ChatMessage(
+          id: result['id'] as String,
+          authorId: result['author_id'] as String,
+          authorName: result['author_name'] as String?,
+          body: result['body'] as String,
+          sentAt: DateTime.fromMillisecondsSinceEpoch(
+            result['sent_at_ms'] as int,
+          ),
+          isOutgoing: result['is_outgoing'] == true,
+        ),
+      );
+    }
+  }
+
+  Future<void> _mentionMember() async {
+    final bridge = _management;
+    if (bridge == null) return;
+    final id = widget.conversation.id;
+    try {
+      final details = await bridge.groupDetails(id);
+      if (!mounted || widget.conversation.id != id) return;
+      final member = await showModalBottomSheet<Map>(
+        context: context,
+        builder: (context) => SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              const ListTile(title: Text('Menziona un membro')),
+              for (final member in (details['members'] as List).cast<Map>())
+                ListTile(
+                  title: Text(member['name'] as String),
+                  onTap: () => Navigator.pop(context, member),
+                ),
+            ],
+          ),
+        ),
+      );
+      if (!mounted || member == null || widget.conversation.id != id) return;
+      final mention =
+          '@${(member['name'] as String).replaceAll(RegExp(r'\s+'), '_')}';
+      _composerController.text = '${_composerController.text}$mention ';
+      _composerController.selection = TextSelection.collapsed(
+        offset: _composerController.text.length,
+      );
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(groupError(error))));
+      }
+    }
+  }
+
+  Future<void> _messageActions(ChatMessage message) async {
+    final bridge = _management;
+    if (bridge == null) return;
+    final conversationId = widget.conversation.id;
+    try {
+      final details = widget.conversation.isGroup
+          ? await bridge.groupDetails(conversationId)
+          : null;
+      if (!mounted || conversationId != widget.conversation.id) return;
+      final permissions = details?['permissions'] as Map? ?? {};
+      final pinned = (details?['pinned'] as List? ?? []).contains(message.id);
+      final action = await showModalBottomSheet<String>(
+        context: context,
+        builder: (context) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.reply),
+                title: const Text('Rispondi'),
+                onTap: () => Navigator.pop(context, 'reply'),
+              ),
+              if (permissions['pin_messages'] == true)
+                ListTile(
+                  leading: const Icon(Icons.push_pin_outlined),
+                  title: Text(
+                    pinned ? 'Rimuovi dai fissati' : 'Fissa per tutti',
+                  ),
+                  onTap: () => Navigator.pop(context, 'pin'),
+                ),
+              if (permissions['delete_messages'] == true)
+                ListTile(
+                  leading: const Icon(Icons.delete_outline),
+                  title: const Text('Elimina messaggio per tutti'),
+                  onTap: () => Navigator.pop(context, 'delete'),
+                ),
+            ],
+          ),
+        ),
+      );
+      if (!mounted ||
+          conversationId != widget.conversation.id ||
+          action == null) {
+        return;
+      }
+      if (action == 'reply') {
+        setState(() => _replyTo = message);
+        return;
+      }
+      if (action == 'delete') {
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Elimina messaggio per tutti?'),
+            content: const Text(
+              'Il comando sarà consegnato anche ai membri offline quando torneranno online.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Annulla'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Elimina'),
+              ),
+            ],
+          ),
+        );
+        if (confirmed != true) return;
+      }
+      final result = await bridge.groupAction(conversationId, {
+        'kind': action == 'pin' ? 'pin' : 'delete_message',
+        'message_id': message.id,
+        if (action == 'pin') 'pinned': !pinned,
+      });
+      if (!mounted) return;
+      if (result == 'pending_owner') {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Richiesta inviata al proprietario del gruppo.'),
+          ),
+        );
+      }
+      widget.onChanged();
+      await _reloadMessagesAsync(force: true);
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(groupError(error))));
+      }
+    }
+  }
+
   final TextEditingController _composerController = TextEditingController();
   final ScrollController _messageScrollController = ScrollController();
   Timer? _messageTimer;
@@ -1221,10 +1444,23 @@ class _ChatPaneState extends State<_ChatPane> {
   int _messageLoadGeneration = 0;
   int _conversationGeneration = 0;
   ValueListenable<int>? _inboxChanges;
+  ModalRoute<dynamic>? _chatRoute;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _chatRoute = ModalRoute.of(context);
+  }
 
   @override
   void initState() {
     super.initState();
+    MessageNotifications.trackConversation(
+      this,
+      () => mounted && _chatRoute?.isCurrent == true
+          ? widget.conversation.id
+          : null,
+    );
     final bridge = widget.bridge;
     if (bridge is CachedMessagingBridge) {
       final cached = bridge.cachedMessages(widget.conversation.id);
@@ -1286,6 +1522,7 @@ class _ChatPaneState extends State<_ChatPane> {
       _messageLoadGeneration++;
       _conversationGeneration++;
       _composerController.clear();
+      _replyTo = null;
       _optimisticMessages.clear();
       _lastAcknowledgedIncomingId = null;
       _isLoadingOlder = false;
@@ -1343,6 +1580,7 @@ class _ChatPaneState extends State<_ChatPane> {
 
   @override
   void dispose() {
+    MessageNotifications.untrackConversation(this);
     _messageTimer?.cancel();
     _inboxChanges?.removeListener(_onInboxRevisionChanged);
     _messageScrollController.dispose();
@@ -1485,16 +1723,20 @@ class _ChatPaneState extends State<_ChatPane> {
   }
 
   Future<void> _sendMessage() async {
+    if (!widget.conversation.canSendMessages) return;
     final text = _composerController.text.trim();
     if (text.isEmpty) {
       return;
     }
     final conversationId = widget.conversation.id;
+    final reply = _replyTo;
+    setState(() => _replyTo = null);
     _composerController.clear();
     final optimistic = ChatMessage(
       id: 'pending-${DateTime.now().microsecondsSinceEpoch}',
       authorId: 'me',
       body: text,
+      replyTo: reply?.id,
       sentAt: DateTime.now(),
       isOutgoing: true,
       deliveryState: DeliveryState.queued,
@@ -1507,10 +1749,14 @@ class _ChatPaneState extends State<_ChatPane> {
       verbose: true,
     );
     try {
-      await widget.bridge.sendText(
-        conversationId: conversationId,
-        plaintext: text,
-      );
+      if (reply != null && _management != null) {
+        await _management!.sendReply(conversationId, text, reply.id);
+      } else {
+        await widget.bridge.sendText(
+          conversationId: conversationId,
+          plaintext: text,
+        );
+      }
     } on Object catch (error) {
       final code = error is SecureMessagingException
           ? error.code
@@ -1527,6 +1773,7 @@ class _ChatPaneState extends State<_ChatPane> {
         if (widget.conversation.id == conversationId &&
             _composerController.text.isEmpty) {
           _composerController.text = text;
+          setState(() => _replyTo = reply);
           _composerController.selection = TextSelection.collapsed(
             offset: _composerController.text.length,
           );
@@ -1534,6 +1781,10 @@ class _ChatPaneState extends State<_ChatPane> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(switch (code) {
+              'group_permission_denied' ||
+              'group_closed' ||
+              'slow_mode_active' ||
+              'spam_rejected' => groupError(error),
               'network_attach_failed' || 'network_startup_failed' =>
                 'Invio non riuscito: il destinatario non è raggiungibile.',
               'feature_unavailable' =>
@@ -1660,6 +1911,62 @@ class _ChatPaneState extends State<_ChatPane> {
               bridge: widget.bridge,
               onChanged: widget.onChanged,
             ),
+          if (_management != null)
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                if (widget.conversation.isGroup) ...[
+                  IconButton(
+                    key: const ValueKey('group-settings'),
+                    tooltip: 'Gestisci gruppo',
+                    onPressed: _manageGroup,
+                    icon: const Icon(Icons.tune),
+                  ),
+                  IconButton(
+                    tooltip: 'Menziona un membro',
+                    onPressed: widget.conversation.canSendMessages
+                        ? _mentionMember
+                        : null,
+                    icon: const Icon(Icons.alternate_email),
+                  ),
+                ],
+                IconButton(
+                  key: const ValueKey('search-chat'),
+                  tooltip: 'Cerca nella chat',
+                  onPressed: () => _searchChat(),
+                  icon: const Icon(Icons.search),
+                ),
+              ],
+            ),
+          if (widget.conversation.pinnedMessageIds.isNotEmpty)
+            SizedBox(
+              height: 54,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                children: [
+                  for (final id in widget.conversation.pinnedMessageIds)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: ActionChip(
+                        avatar: const Icon(Icons.push_pin, size: 16),
+                        label: SizedBox(
+                          width: 220,
+                          child: Text(
+                            visibleMessages
+                                    .where((message) => message.id == id)
+                                    .firstOrNull
+                                    ?.body ??
+                                'Messaggio fissato',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        onPressed: () => _searchChat('id:$id'),
+                      ),
+                    ),
+                ],
+              ),
+            ),
           Expanded(
             child: _isLoadingMessages && _messages.isEmpty
                 ? const Center(child: CircularProgressIndicator())
@@ -1684,31 +1991,88 @@ class _ChatPaneState extends State<_ChatPane> {
                         return Column(
                           children: [
                             if (startsDay) _DaySeparator(date: message.sentAt),
-                            _MessageBubble(
-                              message: message,
-                              onRestoreDraft:
-                                  message.deliveryState ==
-                                          DeliveryState.notRestored &&
-                                      message.attachmentName == null
-                                  ? () {
-                                      if (_composerController.text.isEmpty) {
-                                        _composerController.text = message.body;
-                                      } else {
-                                        ScaffoldMessenger.of(
-                                          context,
-                                        ).showSnackBar(
-                                          const SnackBar(
-                                            content: Text(
-                                              'Completa la bozza attuale prima di recuperare questo messaggio.',
+                            if (message.replyTo != null)
+                              Align(
+                                alignment: message.isOutgoing
+                                    ? Alignment.centerRight
+                                    : Alignment.centerLeft,
+                                child: TextButton.icon(
+                                  onPressed: () =>
+                                      _searchChat('id:${message.replyTo}'),
+                                  icon: const Icon(Icons.reply, size: 16),
+                                  label: Text(
+                                    visibleMessages
+                                            .where(
+                                              (original) =>
+                                                  original.id ==
+                                                  message.replyTo,
+                                            )
+                                            .firstOrNull
+                                            ?.body ??
+                                        'Visualizza messaggio originale',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ),
+                            GestureDetector(
+                              onLongPress: () => _messageActions(message),
+                              onSecondaryTap: () => _messageActions(message),
+                              child: _MessageBubble(
+                                message: message,
+                                showAuthor: widget.conversation.isGroup,
+                                onRestoreDraft:
+                                    message.deliveryState ==
+                                            DeliveryState.notRestored &&
+                                        message.attachmentName == null
+                                    ? () {
+                                        if (_composerController.text.isEmpty) {
+                                          _composerController.text =
+                                              message.body;
+                                        } else {
+                                          ScaffoldMessenger.of(
+                                            context,
+                                          ).showSnackBar(
+                                            const SnackBar(
+                                              content: Text(
+                                                'Completa la bozza attuale prima di recuperare questo messaggio.',
+                                              ),
                                             ),
-                                          ),
-                                        );
+                                          );
+                                        }
                                       }
-                                    }
-                                  : null,
-                              showReceipt:
-                                  widget.privacySettings.value.showReadReceipts,
+                                    : null,
+                                showReceipt: widget
+                                    .privacySettings
+                                    .value
+                                    .showReadReceipts,
+                              ),
                             ),
+                            if (_management != null)
+                              Align(
+                                alignment: message.isOutgoing
+                                    ? Alignment.centerRight
+                                    : Alignment.centerLeft,
+                                child: Wrap(
+                                  spacing: 6,
+                                  children: [
+                                    for (final tag
+                                        in RegExp(
+                                              r'[@#][\p{L}\p{N}_]+',
+                                              unicode: true,
+                                            )
+                                            .allMatches(message.body)
+                                            .map((match) => match.group(0)!)
+                                            .toSet()
+                                            .take(12))
+                                      ActionChip(
+                                        label: Text(tag),
+                                        visualDensity: VisualDensity.compact,
+                                        onPressed: () => _searchChat(tag),
+                                      ),
+                                  ],
+                                ),
+                              ),
                           ],
                         );
                       }
@@ -1734,12 +2098,39 @@ class _ChatPaneState extends State<_ChatPane> {
                     },
                   ),
           ),
-          _Composer(
-            controller: _composerController,
-            onSend: _sendMessage,
-            isSendingAttachment: _isSendingAttachment,
-            onAttachmentPressed: _pickAndSendAttachment,
-          ),
+          if (_replyTo != null)
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.reply),
+              title: const Text('Risposta a un messaggio'),
+              subtitle: Text(
+                _replyTo!.body,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: IconButton(
+                tooltip: 'Annulla risposta',
+                onPressed: () => setState(() => _replyTo = null),
+                icon: const Icon(Icons.close),
+              ),
+            ),
+          if (!widget.conversation.canSendMessages)
+            const SafeArea(
+              top: false,
+              child: Padding(
+                padding: EdgeInsets.all(18),
+                child: Text(
+                  'Non puoi scrivere in questo gruppo con i permessi attuali.',
+                ),
+              ),
+            )
+          else
+            _Composer(
+              controller: _composerController,
+              onSend: _sendMessage,
+              isSendingAttachment: _isSendingAttachment,
+              onAttachmentPressed: _pickAndSendAttachment,
+            ),
         ],
       ),
     );
@@ -2408,9 +2799,11 @@ class _MessageBubble extends StatelessWidget {
     required this.message,
     required this.showReceipt,
     this.onRestoreDraft,
+    this.showAuthor = false,
   });
 
   final ChatMessage message;
+  final bool showAuthor;
   final bool showReceipt;
   final VoidCallback? onRestoreDraft;
 
@@ -2518,8 +2911,26 @@ class _MessageBubble extends StatelessWidget {
           ),
         ),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.end,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            if (showAuthor) ...[
+              Text(
+                message.isOutgoing
+                    ? 'Tu'
+                    : (message.authorName?.trim().isNotEmpty == true
+                          ? message.authorName!
+                          : 'Membro ${message.authorId}'),
+                key: ValueKey('message-author-${message.id}'),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: foreground,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 4),
+            ],
             if (message.attachmentName case final fileName?)
               Container(
                 constraints: const BoxConstraints(minWidth: 210),
@@ -2842,12 +3253,14 @@ class _GroupDraft {
     required this.invitationCodes,
     required this.professional,
     required this.description,
+    this.joinLink,
   });
 
   final String name;
   final List<String> invitationCodes;
   final bool professional;
   final String description;
+  final String? joinLink;
 }
 
 class _CreateGroupDialog extends StatefulWidget {
@@ -2858,6 +3271,44 @@ class _CreateGroupDialog extends StatefulWidget {
 }
 
 class _CreateGroupDialogState extends State<_CreateGroupDialog> {
+  Future<void> _joinViaLink() async {
+    final controller = TextEditingController();
+    final code = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Entra tramite link'),
+        content: TextField(
+          controller: controller,
+          minLines: 2,
+          maxLines: 4,
+          decoration: const InputDecoration(labelText: 'Link di invito Sylphy'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Annulla'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Entra'),
+          ),
+        ],
+      ),
+    );
+    if (mounted && code != null && code.isNotEmpty) {
+      Navigator.pop(
+        context,
+        _GroupDraft(
+          name: '',
+          invitationCodes: const [],
+          professional: false,
+          description: '',
+          joinLink: code,
+        ),
+      );
+    }
+  }
+
   final _formKey = GlobalKey<FormState>();
   final _nameController = TextEditingController();
   final _descriptionController = TextEditingController();
@@ -2902,7 +3353,7 @@ class _CreateGroupDialogState extends State<_CreateGroupDialog> {
         children: [
           Icon(Icons.groups_2_outlined),
           SizedBox(width: 12),
-          Flexible(child: Text('Crea gruppo o canale')),
+          Flexible(child: Text('Crea gruppo')),
         ],
       ),
       content: SizedBox(
@@ -2936,9 +3387,9 @@ class _CreateGroupDialogState extends State<_CreateGroupDialog> {
                 const SizedBox(height: 12),
                 SwitchListTile.adaptive(
                   contentPadding: EdgeInsets.zero,
-                  title: const Text('Modalità professionale a canale'),
+                  title: const Text('Gruppo aziendale'),
                   subtitle: const Text(
-                    'Pensata per team e comunicazioni aziendali',
+                    'Tutti possono scrivere. I permessi si modificano nelle impostazioni del gruppo.',
                   ),
                   value: _professional,
                   onChanged: (value) => setState(() => _professional = value),
@@ -2969,6 +3420,10 @@ class _CreateGroupDialogState extends State<_CreateGroupDialog> {
         ),
       ),
       actions: [
+        TextButton(
+          onPressed: _joinViaLink,
+          child: const Text('Entra tramite link'),
+        ),
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Annulla'),
@@ -3752,13 +4207,13 @@ String _signatureForConversations(
 ) => conversations
     .map(
       (item) =>
-          '${item.id}|${item.name}|${item.initials}|${item.accentValue}|${Object.hashAll(item.avatarBytes ?? const <int>[])}|${item.description}|${item.fingerprint}|${item.isAdmin}|${item.lastActivity.microsecondsSinceEpoch}|${item.lastMessage}|${item.unreadCount}|${item.safety.name}|${item.isOnline}|${item.type.name}|${item.memberCount}',
+          '${item.id}|${item.name}|${item.initials}|${item.accentValue}|${Object.hashAll(item.avatarBytes ?? const <int>[])}|${item.description}|${item.fingerprint}|${item.isAdmin}|${item.lastActivity.microsecondsSinceEpoch}|${item.lastMessage}|${item.unreadCount}|${item.safety.name}|${item.isOnline}|${item.type.name}|${item.memberCount}|${item.canSendMessages}|${item.groupRevision}|${item.pinnedMessageIds.join(",")}',
     )
     .join('\n');
 
 String _signatureForMessages(List<ChatMessage> messages) => messages
     .map(
       (item) =>
-          '${item.id}|${item.sentAt.microsecondsSinceEpoch}|${item.deliveryState.name}',
+          '${item.id}|${item.authorName}|${item.sentAt.microsecondsSinceEpoch}|${item.deliveryState.name}',
     )
     .join('\n');

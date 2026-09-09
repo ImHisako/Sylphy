@@ -28,27 +28,33 @@ class ChatMessage {
     this.deliveryState = DeliveryState.sent,
     this.attachmentName,
     this.attachmentBytes,
+    this.replyTo,
+    this.authorName,
   });
 
   final String id;
   final String authorId;
+  final String? authorName;
   final String body;
   final DateTime sentAt;
   final bool isOutgoing;
   final DeliveryState deliveryState;
   final String? attachmentName;
   final Uint8List? attachmentBytes;
+  final String? replyTo;
 
   ChatMessage copyWith({DeliveryState? deliveryState}) {
     return ChatMessage(
       id: id,
       authorId: authorId,
+      authorName: authorName,
       body: body,
       sentAt: sentAt,
       isOutgoing: isOutgoing,
       deliveryState: deliveryState ?? this.deliveryState,
       attachmentName: attachmentName,
       attachmentBytes: attachmentBytes,
+      replyTo: replyTo,
     );
   }
 }
@@ -71,6 +77,9 @@ class Conversation {
     this.isAdmin = false,
     this.description = '',
     this.avatarBytes,
+    this.canSendMessages = true,
+    this.pinnedMessageIds = const [],
+    this.groupRevision = 0,
   });
 
   final String id;
@@ -87,6 +96,9 @@ class Conversation {
   final bool isAdmin;
   final String description;
   final Uint8List? avatarBytes;
+  final bool canSendMessages;
+  final List<String> pinnedMessageIds;
+  final int groupRevision;
   final ContactSafety safety;
   final String fingerprint;
 
@@ -114,6 +126,9 @@ class Conversation {
       safety: safety ?? this.safety,
       fingerprint: fingerprint,
       avatarBytes: avatarBytes,
+      canSendMessages: canSendMessages,
+      pinnedMessageIds: pinnedMessageIds,
+      groupRevision: groupRevision,
     );
   }
 }

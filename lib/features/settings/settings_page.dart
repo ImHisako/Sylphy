@@ -114,7 +114,7 @@ class _SettingsPageState extends State<SettingsPage> {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text(
-          'Trasferimento non disponibile: installa la build Sylphy ABI 10 più recente.',
+          'Trasferimento non disponibile: installa la versione Sylphy più recente.',
         ),
       ),
     );

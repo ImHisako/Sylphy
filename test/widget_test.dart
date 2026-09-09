@@ -7,9 +7,131 @@ import 'package:sylphy/core/diagnostics/app_log.dart';
 import 'package:sylphy/core/messaging/models.dart';
 import 'package:sylphy/core/messaging/secure_messaging_bridge.dart';
 import 'package:sylphy/core/profile/user_profile.dart';
+import 'package:sylphy/core/platform/message_notifications.dart';
 import 'package:sylphy/main.dart';
 
 void main() {
+  testWidgets(
+    'notification visibility follows mobile routes and app lifecycle',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(390, 844));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final bridge = _TestMessagingBridge();
+      await tester.pumpWidget(
+        SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        MessageNotifications.isConversationVisible('test-contact'),
+        isFalse,
+      );
+      await tester.tap(find.text('Contatto di test'));
+      await tester.pumpAndSettle();
+      expect(
+        MessageNotifications.isConversationVisible('test-contact'),
+        isTrue,
+      );
+      expect(
+        MessageNotifications.isConversationVisible('another-chat'),
+        isFalse,
+      );
+      final context = tester.element(
+        find.byKey(const ValueKey('chat-message-list')),
+      );
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: Text('Altra pagina')),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        MessageNotifications.isConversationVisible('test-contact'),
+        isFalse,
+      );
+      Navigator.of(context).pop();
+      await tester.pumpAndSettle();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      expect(
+        MessageNotifications.isConversationVisible('test-contact'),
+        isFalse,
+      );
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+      expect(
+        MessageNotifications.isConversationVisible('test-contact'),
+        isTrue,
+      );
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(
+        MessageNotifications.isConversationVisible('test-contact'),
+        isFalse,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'group text and attachments show their sender on desktop and mobile',
+    (tester) async {
+      for (final size in [const Size(1280, 800), const Size(390, 844)]) {
+        await tester.binding.setSurfaceSize(size);
+        final bridge = _TestMessagingBridge(isGroup: true);
+        bridge._messages.addAll([
+          ChatMessage(
+            id: 'alice',
+            authorId: 'id-alice',
+            authorName: 'Alice Rossi',
+            body: 'Ciao gruppo',
+            sentAt: DateTime(2026),
+            isOutgoing: false,
+          ),
+          ChatMessage(
+            id: 'bob',
+            authorId: 'id-bob',
+            authorName: 'Bob',
+            body: 'File',
+            attachmentName: 'documento.txt',
+            sentAt: DateTime(2026),
+            isOutgoing: false,
+          ),
+          ChatMessage(
+            id: 'mine',
+            authorId: 'me',
+            body: 'Ciao',
+            sentAt: DateTime(2026),
+            isOutgoing: true,
+          ),
+        ]);
+        await tester.pumpWidget(
+          SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+        );
+        await tester.pumpAndSettle();
+        if (size.width < 900) {
+          await tester.tap(find.text('Contatto di test'));
+          await tester.pumpAndSettle();
+        }
+        expect(find.text('Alice Rossi'), findsOneWidget);
+        expect(find.text('Bob'), findsOneWidget);
+        expect(find.text('Tu'), findsOneWidget);
+        expect(
+          MessageNotifications.isConversationVisible('test-contact'),
+          isTrue,
+        );
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        expect(
+          MessageNotifications.isConversationVisible('test-contact'),
+          isFalse,
+        );
+      }
+      await tester.binding.setSurfaceSize(null);
+    },
+  );
   testWidgets(
     'mobile chat shares the home inbox poll and still receives messages',
     (tester) async {
@@ -535,12 +657,14 @@ class _NotifyingTestMessagingBridge extends _TestMessagingBridge
 class _TestMessagingBridge
     implements SecureMessagingBridge, InboxRefreshingBridge {
   _TestMessagingBridge({
+    bool isGroup = false,
     bool initiallyVerified = true,
     this.sendGate,
     this.markReadGate,
     this.hiddenUntilFirstRefresh = false,
   }) : _conversation = Conversation(
          id: 'test-contact',
+         isGroup: isGroup,
          name: 'Contatto di test',
          initials: 'CT',
          accentValue: 0xFFA5E5D3,

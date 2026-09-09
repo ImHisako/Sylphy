@@ -20,8 +20,10 @@ class MessagingService : Service() {
     private val poll = object : Runnable {
         override fun run() {
             try {
+                // Flutter owns foreground polling and knows which chat is visible.
+                if (uiResumed) return
                 val received = syncInbound()
-                if (received > 0) showIncomingNotification()
+                if (received > 0 && !uiResumed) showIncomingNotification((received and 0x40000000) != 0)
             } catch (error: Throwable) {
                 Log.w("Sylphy", "Background inbox poll unavailable", error)
             } finally {
@@ -96,7 +98,7 @@ class MessagingService : Service() {
         super.onDestroy()
     }
 
-    private fun showIncomingNotification() {
+    private fun showIncomingNotification(pinned: Boolean = false) {
         val launchIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
@@ -108,8 +110,8 @@ class MessagingService : Service() {
         )
         val notification = NotificationCompat.Builder(this, MESSAGE_CHANNEL_ID)
             .setSmallIcon(R.drawable.sylphy_notification)
-            .setContentTitle("Nuovo messaggio")
-            .setContentText("Apri Sylphy per leggerlo")
+            .setContentTitle(if (pinned) "Messaggio fissato" else "Nuovo messaggio")
+            .setContentText(if (pinned) "Un messaggio è stato fissato in un gruppo Sylphy" else "Apri Sylphy per leggerlo")
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
@@ -119,7 +121,8 @@ class MessagingService : Service() {
             .notify(INCOMING_NOTIFICATION_ID, notification)
     }
 
-    private companion object {
+    companion object {
+        @Volatile internal var uiResumed = false
         const val CHANNEL_ID = "sylphy_background_messaging"
         const val MESSAGE_CHANNEL_ID = "sylphy_messages"
         const val NOTIFICATION_ID = 4104

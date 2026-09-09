@@ -53,9 +53,30 @@ enum CoreRequest {
         #[serde(default)]
         description: String,
     },
+    GroupDetails {
+        conversation_id: String,
+    },
+    JoinGroup {
+        invitation_code: String,
+    },
+    GroupAction {
+        conversation_id: String,
+        action: messaging_adapter::groups::Action,
+    },
+    SearchMessages {
+        conversation_id: String,
+        query: String,
+        #[serde(default)]
+        offset: usize,
+    },
     SendText {
         conversation_id: String,
         plaintext: String,
+    },
+    SendReply {
+        conversation_id: String,
+        plaintext: String,
+        reply_to: String,
     },
     SendAttachment {
         conversation_id: String,
@@ -174,6 +195,42 @@ pub unsafe extern "C" fn sylphy_core_free_string(value: *mut c_char) {
 fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
     let request: CoreRequest = serde_json::from_str(body).map_err(|_| CoreError::InvalidInput)?;
     match request {
+        CoreRequest::JoinGroup { invitation_code } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::groups::join(&invitation_code)?,
+        }),
+        CoreRequest::GroupDetails { conversation_id } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::groups::details(&conversation_id)?,
+        }),
+        CoreRequest::GroupAction {
+            conversation_id,
+            action,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::groups::act(&conversation_id, action)?,
+        }),
+        CoreRequest::SearchMessages {
+            conversation_id,
+            query,
+            offset,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::groups::search(&conversation_id, &query, offset)?,
+        }),
+        CoreRequest::SendReply {
+            conversation_id,
+            plaintext,
+            reply_to,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::send_reply(&conversation_id, &plaintext, &reply_to)?,
+        }),
         CoreRequest::Status => Ok(CoreResponse {
             ok: true,
             code: "ok",
@@ -433,6 +490,10 @@ fn error_response(error: CoreError) -> CoreResponse {
         CoreError::InvalidInput => "invalid_input",
         CoreError::UnsupportedVersion => "unsupported_version",
         CoreError::AuthenticationFailed => "authentication_failed",
+        CoreError::GroupPermissionDenied => "group_permission_denied",
+        CoreError::SlowModeActive => "slow_mode_active",
+        CoreError::SpamRejected => "spam_rejected",
+        CoreError::GroupClosed => "group_closed",
         CoreError::VerificationFailed => "verification_failed",
         CoreError::LimitExceeded => "limit_exceeded",
         CoreError::StorageFull => "storage_full",

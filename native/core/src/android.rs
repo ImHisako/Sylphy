@@ -21,8 +21,21 @@ pub extern "system" fn Java_com_example_sylphy_MessagingService_syncInbound(
     };
     crate::messaging_adapter::sync_inbound_messages()
         .ok()
-        .and_then(|value| value.get("persisted").and_then(serde_json::Value::as_u64))
-        .and_then(|value| jint::try_from(value).ok())
+        .and_then(|value| {
+            let count = value.get("persisted")?.as_u64()?.min(0x3fffffff) as jint;
+            Some(
+                count
+                    | if value
+                        .get("pin_notification")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    {
+                        0x40000000
+                    } else {
+                        0
+                    },
+            )
+        })
         .unwrap_or(-1)
 }
 

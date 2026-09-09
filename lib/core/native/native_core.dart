@@ -9,7 +9,7 @@ import 'package:ffi/ffi.dart';
 
 import '../diagnostics/app_log.dart';
 
-const _expectedAbiVersion = 10;
+const _expectedAbiVersion = 11;
 
 typedef _NativeAbiVersion = Uint32 Function();
 typedef _DartAbiVersion = int Function();
@@ -292,6 +292,10 @@ class NativeCoreClient
     'professional': professional,
     'description': description,
   });
+
+  Future<NativeCoreResponse> groupCommandInBackground(
+    Map<String, dynamic> request,
+  ) => _callInBackground(Map<String, Object>.from(request));
 
   @override
   NativeCoreResponse sendText({

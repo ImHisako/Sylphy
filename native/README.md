@@ -80,9 +80,13 @@ installs in `bundle/lib`.
 
 ## Native API and persistence
 
-ABI v10 includes `ensure_identity`, `start_veilid`, `veilid_status`,
+ABI v11 includes `ensure_identity`, `start_veilid`, `veilid_status`,
 `stop_veilid`, `list_conversations`, `list_messages`, `sync_inbound`,
-`add_contact`, `create_group` and `ratchet_self_test`.
+`add_contact`, `create_group`, `group_details`, `group_action`, `join_group`,
+`search_messages`, `send_reply` and `ratchet_self_test`.
+
+See [group management](../specs/group-management.md) for authenticated role
+delegation, group permissions and upgrade requirements.
 
 `ensure_identity` keeps keys and seeds in an encrypted native record and
 returns only the public ID and invitation. `add_contact` decodes and validates

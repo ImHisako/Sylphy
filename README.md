@@ -91,7 +91,7 @@ flowchart TB
         UI --> DS --> BG
     end
 
-    BG -->|"JSON FFI · ABI 10"| FFI["C/Rust boundary"]
+    BG -->|"JSON FFI · ABI 11"| FFI["C/Rust boundary"]
 
     subgraph Core["Native Rust core"]
         FFI --> ID["Identity and vault"]
@@ -260,6 +260,10 @@ cargo check --locked --manifest-path native/core/Cargo.toml --features veilid,si
 ```
 
 ## Known limitations
+
+Group permissions, membership, administration, pins, replies and indexed search
+are described in [Group management](specs/group-management.md), including client
+upgrade requirements and the current archive capacity of 100,000 messages / 64 MiB.
 
 See [September reliability fixes](specs/reliability.md) for backup recovery,
 linked-device synchronization, chat pagination, and Android signing setup.

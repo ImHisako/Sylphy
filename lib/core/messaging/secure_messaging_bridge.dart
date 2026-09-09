@@ -60,6 +60,25 @@ abstract interface class GroupMessagingBridge {
   });
 }
 
+abstract interface class GroupManagementBridge {
+  Future<String> joinGroup(String invitationCode);
+  Future<Map<String, dynamic>> groupDetails(String conversationId);
+  Future<String> groupAction(
+    String conversationId,
+    Map<String, dynamic> action,
+  );
+  Future<Map<String, dynamic>> searchMessages(
+    String conversationId,
+    String query, {
+    int offset = 0,
+  });
+  Future<void> sendReply(
+    String conversationId,
+    String plaintext,
+    String replyTo,
+  );
+}
+
 /// Convenience API for callers that only hold the original direct bridge
 /// type. Capability detection remains explicit at runtime for older fakes and
 /// integrations.

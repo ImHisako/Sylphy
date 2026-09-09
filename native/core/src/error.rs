@@ -10,6 +10,14 @@ pub enum CoreError {
     UnsupportedVersion,
     #[error("authentication failed")]
     AuthenticationFailed,
+    #[error("group permission denied")]
+    GroupPermissionDenied,
+    #[error("group slow mode active")]
+    SlowModeActive,
+    #[error("group spam filter rejected message")]
+    SpamRejected,
+    #[error("group is closed or membership revoked")]
+    GroupClosed,
     #[error("verification failed")]
     VerificationFailed,
     #[error("message limit exceeded")]

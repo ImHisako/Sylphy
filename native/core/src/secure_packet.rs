@@ -71,10 +71,22 @@ pub fn seal_for_all(
     recipient.validate()?;
     let mut message_id = vec![0_u8; 16];
     OsRng.fill_bytes(&mut message_id);
+    seal_for_all_with_id(recipient, plaintext, &message_id)
+}
+
+pub(crate) fn seal_for_all_with_id(
+    recipient: &PublishedIdentity,
+    plaintext: &str,
+    message_id: &[u8],
+) -> CoreResult<(Vec<SealedDelivery>, String)> {
+    recipient.validate()?;
+    if message_id.len() != 16 {
+        return Err(CoreError::InvalidInput);
+    }
     let id = compact_hex(&message_id);
     let mut deliveries = Vec::new();
     for device in recipient.delivery_devices()? {
-        let (payload, _) = seal_for_device(&device, plaintext, message_id.clone())?;
+        let (payload, _) = seal_for_device(&device, plaintext, message_id.to_vec())?;
         deliveries.push(SealedDelivery {
             payload,
             offline_keys: outgoing_mailbox_keys(&device)?,
@@ -141,6 +153,15 @@ pub(crate) fn seal_for_test(
     plaintext: &str,
 ) -> CoreResult<(Vec<u8>, String)> {
     seal_for_device_with_route(recipient, plaintext, vec![23; 16], vec![1; 512])
+}
+
+#[cfg(all(test, feature = "signal-ratchet"))]
+pub(crate) fn seal_for_test_with_id(
+    recipient: &PublishedDevice,
+    plaintext: &str,
+    id: &[u8],
+) -> CoreResult<(Vec<u8>, String)> {
+    seal_for_device_with_route(recipient, plaintext, id.to_vec(), vec![1; 512])
 }
 
 fn seal_for_device_with_route(

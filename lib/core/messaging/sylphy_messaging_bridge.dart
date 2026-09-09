@@ -12,6 +12,7 @@ class SylphyMessagingBridge
     implements
         SecureMessagingBridge,
         GroupMessagingBridge,
+        GroupManagementBridge,
         InboxRefreshingBridge,
         InboxRevisionNotifications,
         InboxStorageStatus,
@@ -19,6 +20,79 @@ class SylphyMessagingBridge
   SylphyMessagingBridge({required NativeCoreApi core}) : _core = core;
 
   final NativeCoreApi _core;
+  final Map<String, int> _groupRevisions = {};
+
+  @override
+  Future<String> joinGroup(String invitationCode) async {
+    final response = await _groupCommand({
+      'command': 'join_group',
+      'invitation_code': invitationCode,
+    });
+    _conversationCache = null;
+    return _requiredString(response.data, 'group_id');
+  }
+
+  Future<NativeCoreResponse> _groupCommand(Map<String, dynamic> request) async {
+    await _waitUntilCoreIsAvailable();
+    final core = _core;
+    if (core is! NativeCoreClient) {
+      throw const SecureMessagingException('unsupported');
+    }
+    final response = await core.groupCommandInBackground(request);
+    _requireSuccess(response);
+    return response;
+  }
+
+  @override
+  Future<Map<String, dynamic>> groupDetails(String conversationId) async =>
+      (await _groupCommand({
+        'command': 'group_details',
+        'conversation_id': conversationId,
+      })).data;
+
+  @override
+  Future<String> groupAction(
+    String conversationId,
+    Map<String, dynamic> action,
+  ) async {
+    final response = await _groupCommand({
+      'command': 'group_action',
+      'conversation_id': conversationId,
+      'action': action,
+    });
+    _conversationCache = null;
+    _expandedHistories.remove(conversationId);
+    _messageListCache.remove(conversationId);
+    return response.data['state'] as String? ?? 'applied';
+  }
+
+  @override
+  Future<Map<String, dynamic>> searchMessages(
+    String conversationId,
+    String query, {
+    int offset = 0,
+  }) async => (await _groupCommand({
+    'command': 'search_messages',
+    'conversation_id': conversationId,
+    'query': query,
+    'offset': offset,
+  })).data;
+
+  @override
+  Future<void> sendReply(
+    String conversationId,
+    String plaintext,
+    String replyTo,
+  ) async {
+    await _groupCommand({
+      'command': 'send_reply',
+      'conversation_id': conversationId,
+      'plaintext': plaintext,
+      'reply_to': replyTo,
+    });
+    _conversationCache = null;
+  }
+
   final Map<String, ChatMessage> _messageCache = {};
   final Map<String, List<ChatMessage>> _messageListCache = {};
   final Map<String, Future<List<ChatMessage>>> _messageRefreshes = {};
@@ -42,6 +116,7 @@ class SylphyMessagingBridge
     inboxStorageFull = false;
     _conversationCache = null;
     _messageCache.clear();
+    _groupRevisions.clear();
     _messageListCache.clear();
     _messageRefreshes.clear();
     _hasOlderMessages.clear();
@@ -130,6 +205,15 @@ class SylphyMessagingBridge
     final conversations = List<Conversation>.unmodifiable(
       records.map(_parseConversation),
     );
+    for (final conversation in conversations.where((item) => item.isGroup)) {
+      final known = _groupRevisions[conversation.id];
+      if (known != null && conversation.groupRevision < known) continue;
+      if (known != conversation.groupRevision) {
+        _expandedHistories.remove(conversation.id);
+        _messageListCache.remove(conversation.id);
+      }
+      _groupRevisions[conversation.id] = conversation.groupRevision;
+    }
     _conversationCache = conversations;
     return conversations;
   }
@@ -200,6 +284,7 @@ class SylphyMessagingBridge
 
   Future<List<ChatMessage>> _loadOlderMessages(String conversationId) async {
     final generation = _cacheGeneration;
+    final groupRevision = _groupRevisions[conversationId];
     final current = cachedMessages(conversationId) ?? const <ChatMessage>[];
     if (current.isEmpty || !hasOlderMessages(conversationId)) return current;
     final core = _core;
@@ -212,8 +297,21 @@ class SylphyMessagingBridge
           beforeId: current.first.id,
         );
     _requireSuccess(response);
-    if (generation != _cacheGeneration) {
+    if (generation != _cacheGeneration ||
+        groupRevision != _groupRevisions[conversationId]) {
       return cachedMessages(conversationId) ?? const <ChatMessage>[];
+    }
+    final responseRevision = response.data['group_revision'];
+    if (responseRevision is int && responseRevision != groupRevision) {
+      if (responseRevision < (groupRevision ?? 0)) {
+        return cachedMessages(conversationId) ?? const <ChatMessage>[];
+      }
+      // Moderation may have happened before this page was read, even when the
+      // conversation refresh has not yet delivered the new revision to Dart.
+      _groupRevisions[conversationId] = responseRevision;
+      _expandedHistories.remove(conversationId);
+      _messageListCache.remove(conversationId);
+      return refreshMessages(conversationId, priority: true);
     }
     final records = response.data['messages'];
     if (records is! List) {
@@ -238,6 +336,16 @@ class SylphyMessagingBridge
     NativeCoreResponse response,
   ) {
     _requireSuccess(response);
+    final revision = response.data['group_revision'];
+    if (revision is int) {
+      final known = _groupRevisions[conversationId] ?? 0;
+      if (revision < known) return cachedMessages(conversationId) ?? const [];
+      if (revision > known) {
+        _expandedHistories.remove(conversationId);
+        _messageListCache.remove(conversationId);
+      }
+      _groupRevisions[conversationId] = revision;
+    }
     final records = response.data['messages'];
     if (records is! List) {
       throw const SecureMessagingException('invalid_native_response');
@@ -479,6 +587,10 @@ Conversation _parseConversation(Object? value) {
     memberCount: _optionalInt(value, 'member_count', 2),
     isAdmin: value['is_admin'] == true,
     description: _optionalString(value, 'description', ''),
+    canSendMessages: value['can_send_messages'] != false,
+    pinnedMessageIds:
+        (value['pinned_message_ids'] as List?)?.cast<String>() ?? const [],
+    groupRevision: (value['group_revision'] as num?)?.toInt() ?? 0,
     safety: switch (_requiredString(value, 'safety')) {
       'verified' => ContactSafety.verified,
       'pending' => ContactSafety.pending,
@@ -538,6 +650,7 @@ ChatMessage _parseMessage(Object? value, {ChatMessage? cached}) {
   }
   final id = _requiredString(value, 'id');
   final authorId = _requiredString(value, 'author_id');
+  final authorName = value['author_name'] as String?;
   final body = _requiredString(value, 'body');
   final sentAt = DateTime.fromMillisecondsSinceEpoch(
     _requiredInt(value, 'sent_at_ms'),
@@ -556,7 +669,9 @@ ChatMessage _parseMessage(Object? value, {ChatMessage? cached}) {
   if (cached != null &&
       cached.id == id &&
       cached.authorId == authorId &&
+      cached.authorName == authorName &&
       cached.body == body &&
+      cached.replyTo == value['reply_to'] &&
       cached.sentAt == sentAt &&
       cached.isOutgoing == isOutgoing &&
       cached.attachmentName == attachmentName &&
@@ -570,7 +685,9 @@ ChatMessage _parseMessage(Object? value, {ChatMessage? cached}) {
   return ChatMessage(
     id: id,
     authorId: authorId,
+    authorName: authorName,
     body: body,
+    replyTo: value['reply_to'] as String?,
     sentAt: sentAt,
     isOutgoing: isOutgoing,
     deliveryState: deliveryState,
