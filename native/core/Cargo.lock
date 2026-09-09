@@ -63,16 +63,16 @@ dependencies = [
 
 [[package]]
 name = "aes-gcm-siv"
-version = "0.11.1"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae0784134ba9375416d469ec31e7c5f9fa94405049cf08c5ce5b4698be673e0d"
+checksum = "4c32325128cb24de2a2d14d92da7569dae7073f9e47334521d494747fa94d902"
 dependencies = [
- "aead 0.5.2",
- "aes 0.8.4",
- "cipher 0.4.4",
- "ctr 0.9.2",
- "polyval 0.6.2",
- "subtle",
+ "aead 0.6.1",
+ "aes 0.9.2",
+ "cipher 0.5.2",
+ "ctr",
+ "ctutils",
+ "polyval",
  "zeroize",
 ]
 
@@ -907,15 +907,6 @@ dependencies = [
 
 [[package]]
 name = "ctr"
-version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0369ee1ad671834580515889b80f2ea915f23b8be8d0daa4bbaf2ac5c7590835"
-dependencies = [
- "cipher 0.4.4",
-]
-
-[[package]]
-name = "ctr"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baaca1c4b237092596f64d571e9db6ce4109c4ef9742e27590f1709594461f21"
@@ -1325,7 +1316,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1643,7 +1634,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2eecf2d5dc9b66b732b97707a0210906b1d30523eb773193ab777c0c84b3e8d5"
 dependencies = [
- "polyval 0.7.3",
+ "polyval",
  "zeroize",
 ]
 
@@ -2433,7 +2424,7 @@ dependencies = [
 [[package]]
 name = "libsignal-core"
 version = "0.1.0"
-source = "git+https://github.com/signalapp/libsignal.git?rev=857c4dca03537dc5e395a5e1eda6bf18f59c3601#857c4dca03537dc5e395a5e1eda6bf18f59c3601"
+source = "git+https://github.com/signalapp/libsignal.git?rev=ea42ed0ed3e2ae119282d98253c35a28cce02414#ea42ed0ed3e2ae119282d98253c35a28cce02414"
 dependencies = [
  "curve25519-dalek 5.0.0",
  "derive_more",
@@ -2451,8 +2442,8 @@ dependencies = [
 
 [[package]]
 name = "libsignal-debug"
-version = "0.100.0"
-source = "git+https://github.com/signalapp/libsignal.git?rev=857c4dca03537dc5e395a5e1eda6bf18f59c3601#857c4dca03537dc5e395a5e1eda6bf18f59c3601"
+version = "0.102.1"
+source = "git+https://github.com/signalapp/libsignal.git?rev=ea42ed0ed3e2ae119282d98253c35a28cce02414#ea42ed0ed3e2ae119282d98253c35a28cce02414"
 dependencies = [
  "cfg-if",
 ]
@@ -2460,7 +2451,7 @@ dependencies = [
 [[package]]
 name = "libsignal-protocol"
 version = "0.1.0"
-source = "git+https://github.com/signalapp/libsignal.git?rev=857c4dca03537dc5e395a5e1eda6bf18f59c3601#857c4dca03537dc5e395a5e1eda6bf18f59c3601"
+source = "git+https://github.com/signalapp/libsignal.git?rev=ea42ed0ed3e2ae119282d98253c35a28cce02414#ea42ed0ed3e2ae119282d98253c35a28cce02414"
 dependencies = [
  "aes 0.9.2",
  "aes-gcm-siv",
@@ -2468,7 +2459,7 @@ dependencies = [
  "async-trait",
  "bitflags",
  "const-str",
- "ctr 0.10.1",
+ "ctr",
  "data-encoding-macro",
  "derive-where",
  "derive_more",
@@ -3136,18 +3127,6 @@ dependencies = [
 
 [[package]]
 name = "polyval"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d1fe60d06143b2430aa532c94cfe9e29783047f06c0d7fd359a9a51b729fa25"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "opaque-debug",
- "universal-hash 0.5.1",
-]
-
-[[package]]
-name = "polyval"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0fa31d631f2b2cb2a544d0aa321ce847a94764d701ca2becc411138b93d49cd"
@@ -3594,7 +3573,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3860,11 +3839,11 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 [[package]]
 name = "signal-crypto"
 version = "0.1.0"
-source = "git+https://github.com/signalapp/libsignal.git?rev=857c4dca03537dc5e395a5e1eda6bf18f59c3601#857c4dca03537dc5e395a5e1eda6bf18f59c3601"
+source = "git+https://github.com/signalapp/libsignal.git?rev=ea42ed0ed3e2ae119282d98253c35a28cce02414#ea42ed0ed3e2ae119282d98253c35a28cce02414"
 dependencies = [
  "aes 0.9.2",
  "cbc 0.2.1",
- "ctr 0.10.1",
+ "ctr",
  "derive_more",
  "displaydoc",
  "ghash",
@@ -4115,7 +4094,7 @@ dependencies = [
  "fastrand",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4758,7 +4737,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

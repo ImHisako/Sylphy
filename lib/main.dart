@@ -164,11 +164,12 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _publishProfile() async {
+  Future<void> _publishProfile({bool forceRefresh = false}) async {
     await _identityService.initialize(
       profile: _profile,
       shareDisplayName: _privacySettings.value.shareDisplayName,
       shareProfilePhoto: _privacySettings.value.shareProfilePhoto,
+      forceRefresh: forceRefresh,
     );
     _scheduleShortInvitationRefresh();
   }
@@ -355,7 +356,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   Future<void> _resumeNativeServices() async {
     await _veilidService.start();
     if (_profile != null) {
-      await _publishProfile();
+      await _publishProfile(forceRefresh: true);
     }
     if (mounted) {
       setState(() => _nativeServicesGeneration++);

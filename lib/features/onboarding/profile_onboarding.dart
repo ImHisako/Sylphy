@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
+import '../../core/branding/sylphy_logo.dart';
 import '../../core/profile/user_profile.dart';
 
 typedef ProfilePhotoPicker = Future<Uint8List?> Function();
@@ -113,11 +114,7 @@ class _ProfileOnboardingState extends State<ProfileOnboarding> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Icon(
-                      Icons.auto_awesome_rounded,
-                      size: 42,
-                      color: Theme.of(context).colorScheme.primary,
-                    ),
+                    const Center(child: SylphyLogo(size: 88)),
                     const SizedBox(height: 20),
                     Text(
                       _isEditing

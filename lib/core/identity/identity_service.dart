@@ -119,6 +119,7 @@ class IdentityService extends ChangeNotifier {
     UserProfile? profile,
     bool shareDisplayName = true,
     bool shareProfilePhoto = true,
+    bool forceRefresh = false,
   }) {
     if (profile != null) _publicProfile = profile;
     _shareDisplayName = shareDisplayName;
@@ -126,8 +127,10 @@ class IdentityService extends ChangeNotifier {
     if (_nativeCore == null || _disposed) {
       return Future.value();
     }
-    if (_snapshot.phase == IdentityPhase.ready &&
+    if (!forceRefresh &&
+        _snapshot.phase == IdentityPhase.ready &&
         _snapshot.hasShortInvitation &&
+        (_snapshot.expiresAt?.isAfter(DateTime.now()) ?? false) &&
         _samePublishedConfiguration()) {
       return Future.value();
     }

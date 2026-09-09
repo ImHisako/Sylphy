@@ -38,6 +38,7 @@ $buildArguments = @(
     '-t', 'x86_64',
     '-o', $jniLibrariesPath,
     'build',
+    '--locked',
     '--features', 'veilid,signal-ratchet'
 )
 
@@ -67,7 +68,7 @@ try {
     }
     $metadata = @(
         'abi=10'
-        'libsignal=signalapp/libsignal@v0.100.0'
+        'libsignal=signalapp/libsignal@v0.102.1'
         "profile=$Profile"
     )
     $sourceFiles = @(
@@ -95,7 +96,11 @@ try {
         $hash = (Get-FileHash -LiteralPath $library -Algorithm SHA256).Hash.ToLowerInvariant()
         $metadata += "$abi.sha256=$hash"
     }
-    Set-Content -LiteralPath (Join-Path $jniLibrariesPath 'sylphy-core.properties') -Value $metadata -Encoding ascii
+    [System.IO.File]::WriteAllText(
+        (Join-Path $jniLibrariesPath 'sylphy-core.properties'),
+        (($metadata -join "`n") + "`n"),
+        [System.Text.Encoding]::ASCII
+    )
 }
 finally {
     Pop-Location

@@ -16,11 +16,11 @@ I comandi ABI `start_veilid`, `veilid_status` e `stop_veilid` sono sincroni risp
 
 `create_group` aggiunge una directory `groups-v1.vault` cifrata nel vault locale. La modalità `group` rappresenta una chat classica; `channel` rappresenta un canale professionale in cui solo l'amministratore pubblica. Ogni invito contiene il gruppo, gli endpoint pubblici firmati dei membri e l'identità dell'amministratore, ed è trasportato come payload E2EE individuale. I messaggi di gruppo vengono cifrati separatamente per ogni membro e validati contro la membership prima della persistenza; gli inviti fuori ordine non vengono scartati.
 
-Il layer di trasporto riceve esclusivamente `MessageEnvelope` già autenticati e cifrati. I bundle pubblici firmati non includono una chiave di scrittura mailbox condivisa: i messaggi tra contatti usano la route diretta, mentre la mailbox cifrata resta privata ai dispositivi dello stesso account. Identità firmate e riferimenti ad allegati cifrati sono gli altri record pubblicabili.
+Il layer di trasporto riceve esclusivamente pacchetti già autenticati e cifrati. I bundle pubblici firmati non includono una chiave di scrittura mailbox condivisa. La capability `offline-mailbox-v1` abilita mailbox per coppia di contatti, direzione e dispositivo, oltre alla route diretta. Il journal di sincronizzazione account conserva la propria capability privata. Il protocollo, i limiti e le conferme sono descritti in [offline-delivery.md](offline-delivery.md).
 
 ## Ratchet
 
-La feature `signal-ratchet` integra `signalapp/libsignal` v0.100.0 tramite commit immutabile. Il percorso di produzione invoca direttamente `process_prekey_bundle`, `message_encrypt` e `message_decrypt`; il bundle pubblico contiene identity key, signed prekey EC e Kyber prekey Signal, tutte legate al fingerprint Sylphy dalla firma Ed25519. Root key, chain key, contatori e skipped-message keys non attraversano mai FFI.
+La feature `signal-ratchet` integra `signalapp/libsignal` v0.102.1 tramite commit immutabile. Il percorso di produzione invoca direttamente `process_prekey_bundle`, `message_encrypt` e `message_decrypt`; il bundle pubblico contiene identity key, signed prekey EC e Kyber prekey Signal, tutte legate al fingerprint Sylphy dalla firma Ed25519. Root key, chain key, contatori e skipped-message keys non attraversano mai FFI.
 
 Il ciphertext opaco Signal/PreKey viene inserito in un envelope Sylphy ibrido e autenticato. Il self-test ABI usa lo stesso provider ufficiale e verifica un round trip PreKey completo.
 

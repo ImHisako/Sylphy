@@ -22,6 +22,19 @@ pub(crate) struct InboundPayload {
     pub(crate) payload: Vec<u8>,
     #[cfg_attr(not(feature = "veilid"), allow(dead_code))]
     mailbox_subkey: Option<u32>,
+    #[cfg_attr(not(feature = "veilid"), allow(dead_code))]
+    offline_digest: Option<[u8; 32]>,
+    #[cfg(feature = "veilid")]
+    offline_receipt: Option<OfflineReceipt>,
+}
+
+#[cfg(feature = "veilid")]
+struct OfflineReceipt {
+    keys: crate::offline_mailbox::MailboxKeys,
+    record: veilid_core::RecordKey,
+    slot: u32,
+    first_hash: [u8; 32],
+    acknowledgement: Vec<u8>,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,6 +93,9 @@ pub struct VeilidNode {
     seen_mailbox_slots: Arc<Mutex<HashMap<u32, Vec<u8>>>>,
     private_route: Option<veilid_core::RouteBlob>,
     mailbox_task: Option<tokio::task::JoinHandle<()>>,
+    offline_task: Option<tokio::task::JoinHandle<()>>,
+    offline_targets: Arc<Mutex<Vec<crate::offline_mailbox::MailboxKeys>>>,
+    offline_seen: Arc<Mutex<HashMap<[u8; 32], bool>>>,
 }
 
 #[cfg(feature = "veilid")]
@@ -103,12 +119,23 @@ impl VeilidNode {
             api.shutdown().await;
             return Err(classify_attach_error(&error));
         }
+        let offline_targets = Arc::new(Mutex::new(Vec::new()));
+        let offline_seen = Arc::new(Mutex::new(HashMap::new()));
+        let offline_task = tokio::spawn(poll_offline_mailboxes(
+            api.clone(),
+            Arc::clone(&inbound_envelopes),
+            Arc::clone(&offline_targets),
+            Arc::clone(&offline_seen),
+        ));
         Ok(Self {
             api,
             inbound_envelopes,
             seen_mailbox_slots,
             private_route: None,
             mailbox_task: None,
+            offline_task: Some(offline_task),
+            offline_targets,
+            offline_seen,
         })
     }
 
@@ -119,6 +146,9 @@ impl VeilidNode {
             seen_mailbox_slots: Arc::new(Mutex::new(HashMap::new())),
             private_route: None,
             mailbox_task: None,
+            offline_task: None,
+            offline_targets: Arc::new(Mutex::new(Vec::new())),
+            offline_seen: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -186,6 +216,10 @@ impl VeilidNode {
     }
 
     pub async fn shutdown(mut self) {
+        if let Some(task) = self.offline_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
         if let Some(task) = self.mailbox_task.take() {
             task.abort();
             let _ = task.await;
@@ -647,7 +681,7 @@ pub fn fetch_attachment_blob(record_key: &str, chunk_count: u16) -> CoreResult<V
             let value = runtime
                 .block_on(routing.get_dht_value(key.clone(), subkey, true))
                 .map_err(|_| CoreError::NetworkStartupFailed)?
-                .ok_or(CoreError::VerificationFailed)?;
+                .ok_or(CoreError::NetworkAttachFailed)?;
             data.extend_from_slice(value.data());
             if data.len() > MAX_ATTACHMENT_BLOB_BYTES {
                 return Err(CoreError::LimitExceeded);
@@ -690,10 +724,8 @@ pub fn send_payload(_route_blob: &[u8], _payload: Vec<u8>) -> CoreResult<()> {
     Err(CoreError::FeatureUnavailable)
 }
 
-/// Remote mailbox write capabilities are deliberately not accepted here: a
-/// capability embedded in a public profile lets any contact overwrite every
-/// recipient slot. Offline delivery will be re-enabled only with peer-specific
-/// capabilities; the current path fails closed when the private route is down.
+/// Legacy public mailbox capabilities remain forbidden. Pair-scoped offline
+/// delivery is handled separately and never reads a public writer key.
 pub fn deliver_payload(
     route_blob: &[u8],
     _mailbox: Option<&MailboxAddress>,
@@ -723,12 +755,412 @@ pub(crate) fn acknowledge_inbound_payload(payload: InboundPayload) -> CoreResult
     // Mailbox slots form a short-lived journal shared by every linked device.
     // A consumer must not erase an entry before the other devices have seen it.
     let _ = payload.mailbox_subkey;
+    if let Some(digest) = payload.offline_digest {
+        let state = lock_runtime()?;
+        if let Some(node) = &state.node {
+            let mut seen = node.offline_seen.lock().map_err(|_| CoreError::Internal)?;
+            if seen.len() >= 8192 {
+                seen.retain(|_, acknowledged| !*acknowledged);
+            }
+            seen.insert(digest, true);
+            if let Some(receipt) = payload.offline_receipt {
+                let api = node.api.clone();
+                let seen = Arc::clone(&node.offline_seen);
+                state.runtime.spawn(async move {
+                    if acknowledge_offline_slot(&api, receipt).await.is_err() {
+                        // Retry by re-reading and deduplicating the saved packet.
+                        if let Ok(mut seen) = seen.lock() {
+                            seen.remove(&digest);
+                        }
+                    }
+                });
+            }
+        }
+    }
     Ok(())
 }
 
 #[cfg(not(feature = "veilid"))]
 pub(crate) fn acknowledge_inbound_payload(_payload: InboundPayload) -> CoreResult<()> {
     Ok(())
+}
+
+/// A fetch is not an acknowledgement. On transient failures release its
+/// in-flight marker so a subsequent poll can fetch the same ciphertext again.
+#[cfg(feature = "veilid")]
+pub(crate) fn retry_inbound_payload(payload: InboundPayload) {
+    let Ok(state) = lock_runtime() else { return };
+    let Some(node) = &state.node else { return };
+    if let Some(digest) = payload.offline_digest {
+        if let Ok(mut seen) = node.offline_seen.lock() {
+            seen.remove(&digest);
+        }
+    } else if let Some(subkey) = payload.mailbox_subkey {
+        if let Ok(mut seen) = node.seen_mailbox_slots.lock() {
+            seen.remove(&subkey);
+        }
+    } else if let Ok(mut inbox) = node.inbound_envelopes.lock() {
+        if inbox.len() < MAX_PENDING_INBOUND_ENVELOPES {
+            inbox.push_back(payload);
+        }
+    }
+}
+
+#[cfg(not(feature = "veilid"))]
+pub(crate) fn retry_inbound_payload(_payload: InboundPayload) {}
+
+#[cfg(feature = "veilid")]
+pub(crate) fn set_offline_targets(
+    targets: Vec<crate::offline_mailbox::MailboxKeys>,
+) -> CoreResult<()> {
+    let state = lock_runtime()?;
+    let node = state.node.as_ref().ok_or(CoreError::NetworkStartupFailed)?;
+    *node
+        .offline_targets
+        .lock()
+        .map_err(|_| CoreError::Internal)? = targets;
+    Ok(())
+}
+
+#[cfg(not(feature = "veilid"))]
+pub(crate) fn set_offline_targets(
+    _targets: Vec<crate::offline_mailbox::MailboxKeys>,
+) -> CoreResult<()> {
+    Ok(())
+}
+
+#[cfg(feature = "veilid")]
+pub(crate) fn store_offline_payload(
+    keys: &crate::offline_mailbox::MailboxKeys,
+    payload: &[u8],
+) -> CoreResult<()> {
+    let (runtime, api) = network_executor()?;
+    runtime.block_on(store_offline_payload_async(&api, keys, payload))
+}
+
+#[cfg(feature = "veilid")]
+type OfflineRecordLocks = HashMap<[u8; 32], std::sync::Weak<tokio::sync::Mutex<()>>>;
+#[cfg(feature = "veilid")]
+static OFFLINE_RECORD_LOCKS: OnceLock<Mutex<OfflineRecordLocks>> = OnceLock::new();
+
+#[cfg(feature = "veilid")]
+fn offline_record_lock(id: [u8; 32]) -> CoreResult<Arc<tokio::sync::Mutex<()>>> {
+    let mut locks = OFFLINE_RECORD_LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| CoreError::Internal)?;
+    if let Some(lock) = locks.get(&id).and_then(std::sync::Weak::upgrade) {
+        return Ok(lock);
+    }
+    locks.retain(|_, value| value.strong_count() != 0);
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(id, Arc::downgrade(&lock));
+    Ok(lock)
+}
+
+#[cfg(not(feature = "veilid"))]
+pub(crate) fn store_offline_payload(
+    _keys: &crate::offline_mailbox::MailboxKeys,
+    _payload: &[u8],
+) -> CoreResult<()> {
+    Err(CoreError::FeatureUnavailable)
+}
+
+#[cfg(feature = "veilid")]
+async fn store_offline_payload_async(
+    api: &veilid_core::VeilidAPI,
+    keys: &crate::offline_mailbox::MailboxKeys,
+    payload: &[u8],
+) -> CoreResult<()> {
+    let record_lock = offline_record_lock(keys.id())?;
+    let _guard = record_lock.lock().await;
+    use crate::offline_mailbox::{SLOT_COUNT, frame_length};
+    use veilid_core::{AllowOffline, CRYPTO_KIND_VLD0, DHTSchema, SetDHTValueOptions};
+    let routing = api
+        .routing_context()
+        .map_err(|_| CoreError::NetworkStartupFailed)?;
+    let schema = DHTSchema::dflt((SLOT_COUNT * 3) as u16).map_err(|_| CoreError::Internal)?;
+    let owner = keys.owner();
+    let key = api
+        .get_dht_record_key(schema.clone(), owner.key(), None)
+        .await
+        .map_err(|_| CoreError::Internal)?;
+    // Deterministic creation is local. If this record already exists, reopen
+    // it; never create a different mailbox on a transient network error.
+    let _ = routing
+        .create_dht_record(CRYPTO_KIND_VLD0, schema, Some(owner.clone()))
+        .await;
+    // Veilid 0.5.7 creates a random record encryption key even with a
+    // deterministic owner. Reopen with the derived opaque key on both peers;
+    // our application-level wrapper already encrypts the complete packet.
+    let _ = routing
+        .open_dht_record(key.clone(), Some(owner.clone()))
+        .await
+        .map_err(|_| CoreError::NetworkAttachFailed)?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let now = unix_time_ms()?;
+        let (first, second) = keys.seal(payload, now)?;
+        let start = u32::from(Sha256::digest(payload)[0]) % SLOT_COUNT;
+        for offset in 0..SLOT_COUNT {
+            let slot = (start + offset) % SLOT_COUNT;
+            let current = routing
+                .get_dht_value(key.clone(), slot * 3, true)
+                .await
+                .map_err(|_| CoreError::NetworkAttachFailed)?;
+            if let Some(value) = current.as_ref() {
+                if frame_length(value.data(), now).is_ok() {
+                    if let Ok(existing) =
+                        read_offline_frame(&routing, &key, keys, slot, value.data(), now).await
+                    {
+                        if existing.as_slice() == payload {
+                            return Ok(());
+                        }
+                    }
+                    let ack = routing
+                        .get_dht_value(key.clone(), slot * 3 + 2, true)
+                        .await
+                        .map_err(|_| CoreError::NetworkAttachFailed)?;
+                    if !ack.as_ref().is_some_and(|ack| {
+                        crate::offline_mailbox::acknowledges(ack.data(), value.data())
+                    }) {
+                        continue; // Never overwrite an unacknowledged, unexpired entry.
+                    }
+                }
+            }
+            let options = || {
+                Some(SetDHTValueOptions {
+                    writer: Some(owner.clone()),
+                    allow_offline: Some(AllowOffline(false)),
+                })
+            };
+            // Publish the continuation first and the authenticated commit last.
+            if !second.is_empty() {
+                routing
+                    .set_dht_value(key.clone(), slot * 3 + 1, second.clone(), options())
+                    .await
+                    .map_err(|_| CoreError::NetworkAttachFailed)?;
+            }
+            routing
+                .set_dht_value(key.clone(), slot * 3, first.clone(), options())
+                .await
+                .map_err(|_| CoreError::NetworkAttachFailed)?;
+            let confirmed = routing
+                .get_dht_value(key.clone(), slot * 3, true)
+                .await
+                .map_err(|_| CoreError::NetworkAttachFailed)?
+                .ok_or(CoreError::NetworkAttachFailed)?;
+            if read_offline_frame(&routing, &key, keys, slot, confirmed.data(), now)
+                .await?
+                .as_slice()
+                == payload
+            {
+                return Ok(());
+            }
+        }
+        Err(CoreError::LimitExceeded)
+    })
+    .await
+    .unwrap_or(Err(CoreError::NetworkAttachFailed));
+    let _ = routing.close_dht_record(key).await;
+    result
+}
+
+#[cfg(feature = "veilid")]
+async fn read_offline_frame(
+    routing: &veilid_core::RoutingContext,
+    key: &veilid_core::RecordKey,
+    keys: &crate::offline_mailbox::MailboxKeys,
+    slot: u32,
+    first: &[u8],
+    now: u64,
+) -> CoreResult<zeroize::Zeroizing<Vec<u8>>> {
+    let length = crate::offline_mailbox::frame_length(first, now)?;
+    let second = if length > crate::offline_mailbox::CHUNK_BYTES {
+        routing
+            .get_dht_value(key.clone(), slot * 3 + 1, true)
+            .await
+            .map_err(|_| CoreError::NetworkAttachFailed)?
+            .ok_or(CoreError::NetworkAttachFailed)?
+            .data()
+            .to_vec()
+    } else {
+        Vec::new()
+    };
+    keys.open(first, &second, now)
+}
+
+#[cfg(feature = "veilid")]
+async fn poll_offline_mailboxes(
+    api: veilid_core::VeilidAPI,
+    inbox: Arc<Mutex<VecDeque<InboundPayload>>>,
+    targets: Arc<Mutex<Vec<crate::offline_mailbox::MailboxKeys>>>,
+    seen: Arc<Mutex<HashMap<[u8; 32], bool>>>,
+) {
+    loop {
+        let snapshot = targets
+            .lock()
+            .map(|targets| targets.clone())
+            .unwrap_or_default();
+        for keys in snapshot {
+            let _ = poll_offline_mailbox_once(&api, &inbox, &seen, &keys).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    }
+}
+
+#[cfg(feature = "veilid")]
+async fn poll_offline_mailbox_once(
+    api: &veilid_core::VeilidAPI,
+    inbox: &Mutex<VecDeque<InboundPayload>>,
+    seen: &Mutex<HashMap<[u8; 32], bool>>,
+    keys: &crate::offline_mailbox::MailboxKeys,
+) -> CoreResult<()> {
+    let record_lock = offline_record_lock(keys.id())?;
+    let _guard = record_lock.lock().await;
+    use crate::offline_mailbox::{SLOT_COUNT, frame_length};
+    let routing = api
+        .routing_context()
+        .map_err(|_| CoreError::NetworkStartupFailed)?;
+    let schema =
+        veilid_core::DHTSchema::dflt((SLOT_COUNT * 3) as u16).map_err(|_| CoreError::Internal)?;
+    let key = api
+        .get_dht_record_key(schema, keys.owner().key(), None)
+        .await
+        .map_err(|_| CoreError::Internal)?;
+    let _ = routing
+        .open_dht_record(key.clone(), None)
+        .await
+        .map_err(|_| CoreError::NetworkAttachFailed)?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let start = ((unix_time_ms()? / 10_000) % u64::from(SLOT_COUNT)) as u32;
+        // One sequence report replaces a network lookup for every empty or
+        // unchanged slot. Retryable local failures still use the cached frame.
+        let report = routing
+            .inspect_dht_record(key.clone(), None, veilid_core::DHTReportScope::SyncGet)
+            .await
+            .map_err(|_| CoreError::NetworkAttachFailed)?;
+        let newer = report.newer_online_subkeys();
+        for offset in 0..SLOT_COUNT {
+            let slot = (start + offset) % SLOT_COUNT;
+            let subkey = slot * 3;
+            let exists = report
+                .local_seqs()
+                .get(subkey as usize)
+                .is_some_and(|seq| !seq.is_none())
+                || report
+                    .network_seqs()
+                    .get(subkey as usize)
+                    .is_some_and(|seq| !seq.is_none());
+            if !exists {
+                continue;
+            }
+            if inbox.lock().map_err(|_| CoreError::Internal)?.len() >= MAX_PENDING_INBOUND_ENVELOPES
+            {
+                break;
+            }
+            let Some(first) = routing
+                .get_dht_value(key.clone(), subkey, newer.contains(subkey))
+                .await
+                .map_err(|_| CoreError::NetworkAttachFailed)?
+            else {
+                continue;
+            };
+            let now = unix_time_ms()?;
+            if frame_length(first.data(), now).is_err() {
+                continue;
+            }
+            let mut hash = Sha256::new();
+            hash.update(keys.id());
+            hash.update(first.data());
+            let digest: [u8; 32] = hash.finalize().into();
+            if seen
+                .lock()
+                .map_err(|_| CoreError::Internal)?
+                .contains_key(&digest)
+            {
+                continue;
+            }
+            let Ok(payload) =
+                read_offline_frame(&routing, &key, keys, slot, first.data(), now).await
+            else {
+                continue;
+            };
+            // Mark in-flight while holding the inbox lock. A consumer can only
+            // acknowledge after this insertion has completed.
+            let mut queue = inbox.lock().map_err(|_| CoreError::Internal)?;
+            if queue.len() >= MAX_PENDING_INBOUND_ENVELOPES {
+                break;
+            }
+            seen.lock()
+                .map_err(|_| CoreError::Internal)?
+                .insert(digest, false);
+            let receipt = OfflineReceipt {
+                keys: keys.clone(),
+                record: key.clone(),
+                slot,
+                first_hash: Sha256::digest(first.data()).into(),
+                acknowledgement: crate::offline_mailbox::acknowledgement(first.data()),
+            };
+            queue.push_back(InboundPayload {
+                payload: payload.to_vec(),
+                mailbox_subkey: None,
+                offline_digest: Some(digest),
+                offline_receipt: Some(receipt),
+            });
+        }
+        Ok(())
+    })
+    .await
+    .unwrap_or(Err(CoreError::NetworkAttachFailed));
+    let _ = routing.close_dht_record(key).await;
+    result
+}
+
+#[cfg(feature = "veilid")]
+async fn acknowledge_offline_slot(
+    api: &veilid_core::VeilidAPI,
+    receipt: OfflineReceipt,
+) -> CoreResult<()> {
+    let record_lock = offline_record_lock(receipt.keys.id())?;
+    let _guard = record_lock.lock().await;
+    let routing = api
+        .routing_context()
+        .map_err(|_| CoreError::NetworkStartupFailed)?;
+    let owner = receipt.keys.owner();
+    let _ = routing
+        .open_dht_record(receipt.record.clone(), Some(owner.clone()))
+        .await
+        .map_err(|_| CoreError::NetworkAttachFailed)?;
+    let result = async {
+        let current = routing
+            .get_dht_value(receipt.record.clone(), receipt.slot * 3, true)
+            .await
+            .map_err(|_| CoreError::NetworkAttachFailed)?;
+        if let Some(value) = current {
+            let hash: [u8; 32] = Sha256::digest(value.data()).into();
+            if hash == receipt.first_hash {
+                let result = routing
+                    .set_dht_value(
+                        receipt.record.clone(),
+                        receipt.slot * 3 + 2,
+                        receipt.acknowledgement.clone(),
+                        Some(veilid_core::SetDHTValueOptions {
+                            writer: Some(owner),
+                            allow_offline: Some(veilid_core::AllowOffline(false)),
+                        }),
+                    )
+                    .await
+                    .map_err(|_| CoreError::NetworkAttachFailed)?;
+                if result.is_some_and(|value| value.data() != receipt.acknowledgement) {
+                    return Err(CoreError::NetworkAttachFailed);
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    let _ = routing.close_dht_record(receipt.record).await;
+    result
 }
 
 #[cfg(feature = "veilid")]
@@ -871,6 +1303,8 @@ fn enqueue_inbound_envelope(
         inbox.push_back(InboundPayload {
             payload: payload.to_vec(),
             mailbox_subkey,
+            offline_digest: None,
+            offline_receipt: None,
         });
         return true;
     }

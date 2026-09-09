@@ -31,6 +31,16 @@ L'implementazione di produzione di `SecureMessagingBridge` deve essere un adapte
 
 `main.dart` non seleziona alcun bridge dimostrativo. Senza core usa `UnavailableMessagingBridge`, che restituisce un inbox vuoto e rifiuta import e invio; con il core usa `SylphyMessagingBridge`, che accetta soltanto read model nativi validi. Il refresh scambia prima una revisione numerica e rilegge conversazioni o messaggi soltanto quando il core segnala una mutazione, eliminando il polling della cronologia completa ogni 700 ms. L'invio appare subito nella conversazione come elemento ottimistico; un errore lo rimuove e ripristina il testo nel composer. I fake restano confinati ai test widget.
 
+## Consegna e ripresa della connessione
+
+Gli invii vengono confermati al composer appena registrati nell'outbox cifrato.
+Il trasporto lavora in un worker nativo e aggiorna successivamente `queued` o
+`sent`, anche dopo un riavvio; il log deve applicare gli aggiornamenti delle
+righe esistenti. Il tooltip delle spunte distingue attesa, invio, consegna e
+lettura. La ricezione duplicata non genera nuove notifiche. Il ritorno in primo
+piano forza la ripubblicazione dell'endpoint, anche quando il profilo non cambia.
+Per requisiti e limiti della consegna offline vedere [offline-delivery.md](offline-delivery.md).
+
 ## Gruppi e canali
 
 `GroupMessagingBridge.createGroup` crea due modalità di conversazione: `group` per una chat classica e `channel` per uno spazio professionale a canale. I codici invito vengono passati opachi al core Rust, che verifica le identità firmate, cifra la directory locale e invia un invito E2EE a ogni membro. I messaggi successivi sono cifrati tramite la sessione individuale di ciascun membro e contengono soltanto un identificatore casuale di gruppo e il testo autenticato; la rete non riceve una rubrica o un plaintext di gruppo.

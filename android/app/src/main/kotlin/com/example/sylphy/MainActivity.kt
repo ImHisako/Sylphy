@@ -187,7 +187,7 @@ class MainActivity : FlutterActivity() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val notification = NotificationCompat.Builder(this, MESSAGE_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.sylphy_notification)
             .setContentTitle("Nuovo messaggio")
             .setContentText("Hai ricevuto un nuovo messaggio su Sylphy")
             .setPriority(NotificationCompat.PRIORITY_HIGH)

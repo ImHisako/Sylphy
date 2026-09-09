@@ -2,6 +2,15 @@ import 'dart:typed_data';
 
 enum DeliveryState { queued, sent, delivered, read }
 
+extension DeliveryStateLabel on DeliveryState {
+  String get label => switch (this) {
+    DeliveryState.queued => 'In attesa di invio · nuovo tentativo automatico',
+    DeliveryState.sent => 'Inviato · in attesa del destinatario',
+    DeliveryState.delivered => 'Consegnato',
+    DeliveryState.read => 'Letto',
+  };
+}
+
 enum ContactSafety { verified, pending, refreshRequired }
 
 /// The two supported multi-person conversation styles.

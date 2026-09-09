@@ -63,7 +63,7 @@ class MessagingService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.sylphy_notification)
             .setContentTitle("Sylphy è attivo")
             .setContentText("Ricezione privata dei messaggi in background")
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -107,7 +107,7 @@ class MessagingService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val notification = NotificationCompat.Builder(this, MESSAGE_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.sylphy_notification)
             .setContentTitle("Nuovo messaggio")
             .setContentText("Apri Sylphy per leggerlo")
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)

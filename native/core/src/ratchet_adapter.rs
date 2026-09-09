@@ -17,7 +17,7 @@ pub fn capability_status() -> RatchetCapabilityStatus {
     RatchetCapabilityStatus {
         compiled: cfg!(feature = "signal-ratchet"),
         provider: if cfg!(feature = "signal-ratchet") {
-            "signalapp/libsignal@v0.100.0"
+            "signalapp/libsignal@v0.102.1"
         } else {
             "not-compiled"
         },
@@ -550,7 +550,7 @@ mod signal {
             global, sessions, ..
         } = &mut *runtime;
         let global = global.as_mut().ok_or(CoreError::Internal)?;
-        let plaintext = protocol(futures_executor::block_on(message_decrypt(
+        let decrypted = protocol(futures_executor::block_on(message_decrypt(
             &ciphertext,
             &address,
             &local_address,
@@ -560,7 +560,14 @@ mod signal {
             &global.signed_pre_keys,
             &mut global.kyber_pre_keys,
             &mut OsRng.unwrap_err(),
-        )))?;
+        )));
+        let plaintext = match decrypted {
+            Ok(plaintext) => plaintext,
+            Err(error) => {
+                *runtime = before;
+                return Err(error);
+            }
+        };
         Ok((
             plaintext,
             PendingDecrypt {

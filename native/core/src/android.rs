@@ -16,6 +16,9 @@ pub extern "system" fn Java_com_example_sylphy_MessagingService_syncInbound(
     if !is_context_ready() {
         return -1;
     }
+    let Ok(_command_guard) = crate::ffi::COMMAND_LOCK.try_lock() else {
+        return 0;
+    };
     crate::messaging_adapter::sync_inbound_messages()
         .ok()
         .and_then(|value| value.get("persisted").and_then(serde_json::Value::as_u64))

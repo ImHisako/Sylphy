@@ -162,6 +162,8 @@ void main() {
       await service.initialize(profile: profile);
 
       expect(core.ensureIdentityCalls, 1);
+      await service.initialize(profile: profile, forceRefresh: true);
+      expect(core.ensureIdentityCalls, 2);
     },
   );
 }

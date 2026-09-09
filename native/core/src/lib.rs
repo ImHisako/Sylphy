@@ -9,6 +9,7 @@ pub mod ffi;
 pub mod hybrid;
 pub mod identity;
 pub mod messaging_adapter;
+mod offline_mailbox;
 pub mod peer_identity;
 pub mod ratchet_adapter;
 pub mod secure_packet;

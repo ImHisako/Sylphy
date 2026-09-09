@@ -61,6 +61,7 @@ pub struct InspectedPacket {
 pub struct SealedDelivery {
     pub payload: Vec<u8>,
     pub route_blob: Vec<u8>,
+    pub(crate) offline_keys: Option<crate::offline_mailbox::MailboxKeys>,
 }
 
 pub fn seal_for_all(
@@ -76,10 +77,40 @@ pub fn seal_for_all(
         let (payload, _) = seal_for_device(&device, plaintext, message_id.clone())?;
         deliveries.push(SealedDelivery {
             payload,
+            offline_keys: outgoing_mailbox_keys(&device)?,
             route_blob: device.route_blob,
         });
     }
     Ok((deliveries, id))
+}
+
+fn outgoing_mailbox_keys(
+    recipient: &PublishedDevice,
+) -> CoreResult<Option<crate::offline_mailbox::MailboxKeys>> {
+    if !recipient
+        .bundle
+        .capabilities
+        .iter()
+        .any(|value| value == "offline-mailbox-v1")
+    {
+        return Ok(None);
+    }
+    let local = identity::active_identity()?;
+    let device = ratchet_adapter::public_pre_key_bundle()?.ok_or(CoreError::FeatureUnavailable)?;
+    let remote = recipient
+        .bundle
+        .signal_pre_key
+        .as_ref()
+        .ok_or(CoreError::UnsupportedVersion)?;
+    crate::offline_mailbox::MailboxKeys::derive(
+        &local.x25519_secret()?,
+        &recipient.bundle.signed_prekey_x25519,
+        &local.identity_public_key()?,
+        &recipient.bundle.identity_ed25519,
+        device.device_id,
+        remote.device_id,
+    )
+    .map(Some)
 }
 
 pub fn seal_for(recipient: &PublishedIdentity, plaintext: &str) -> CoreResult<(Vec<u8>, String)> {
@@ -96,6 +127,20 @@ fn seal_for_device(
     plaintext: &str,
     message_id: Vec<u8>,
 ) -> CoreResult<(Vec<u8>, String)> {
+    seal_for_device_with_route(
+        recipient,
+        plaintext,
+        message_id,
+        crate::veilid_adapter::local_route_blob()?,
+    )
+}
+
+fn seal_for_device_with_route(
+    recipient: &PublishedDevice,
+    plaintext: &str,
+    message_id: Vec<u8>,
+    route_blob: Vec<u8>,
+) -> CoreResult<(Vec<u8>, String)> {
     recipient.bundle.validate()?;
     let plaintext = plaintext.trim();
     if plaintext.is_empty() || plaintext.len() > MAX_MESSAGE_BYTES {
@@ -104,10 +149,9 @@ fn seal_for_device(
     let local = identity::active_identity()?;
     let signing_key = local.signing_key()?;
     let local_bundle = local.public_bundle(ratchet_adapter::public_pre_key_bundle()?)?;
-    let route_blob = crate::veilid_adapter::local_route_blob()?;
     // Never disclose the owner/member write capability in a public identity.
-    // Until a peer-specific capability exchange exists, delivery is direct
-    // and fail-closed instead of sharing a mailbox key with every contact.
+    // Offline capabilities are derived per pair inside the native core and
+    // must never be embedded in this publicly authenticated sender profile.
     let mailbox = None;
     let sender = PublishedIdentity::new(
         &signing_key,
@@ -240,13 +284,8 @@ pub fn open(payload: &[u8]) -> CoreResult<OpenedPacket> {
         .as_slice()
         .try_into()
         .map_err(|_| CoreError::InvalidInput)?;
-    let classical = local
-        .x25519_secret()?
-        .diffie_hellman(&PublicKey::from(ephemeral));
     let ciphertext = Ciphertext::try_from(packet.mlkem_ciphertext.as_slice())
         .map_err(|_| CoreError::InvalidInput)?;
-    let decapsulation_key = <MlKem768 as Kem>::DecapsulationKey::from_seed(local.mlkem_seed()?);
-    let pq_shared = decapsulation_key.decapsulate(&ciphertext);
     let transcript = transcript_hash(
         &packet.sender.bundle.identity_ed25519,
         &packet.recipient_identity,
@@ -254,12 +293,25 @@ pub fn open(payload: &[u8]) -> CoreResult<OpenedPacket> {
         &packet.mlkem_ciphertext,
         &packet.message_id,
     );
-    let root_key = hybrid::derive_root_key(
-        classical.as_bytes(),
-        pq_shared.as_slice(),
-        transcript.as_slice(),
-    )?;
-    let protected_plaintext = envelope::open(&root_key, &packet.envelope)?;
+    let mut protected_plaintext = None;
+    for (secret, seed) in local.receiving_key_pairs()? {
+        let classical = secret.diffie_hellman(&PublicKey::from(ephemeral));
+        if !classical.was_contributory() {
+            return Err(CoreError::VerificationFailed);
+        }
+        let decapsulation_key = <MlKem768 as Kem>::DecapsulationKey::from_seed(seed);
+        let pq_shared = decapsulation_key.decapsulate(&ciphertext);
+        let root_key = hybrid::derive_root_key(
+            classical.as_bytes(),
+            pq_shared.as_slice(),
+            transcript.as_slice(),
+        )?;
+        if let Ok(plaintext) = envelope::open(&root_key, &packet.envelope) {
+            protected_plaintext = Some(plaintext);
+            break;
+        }
+    }
+    let protected_plaintext = protected_plaintext.ok_or(CoreError::AuthenticationFailed)?;
     let (plaintext, pending_ratchet) = match packet.envelope.metadata.ratchet_header.as_slice() {
         b"signal-libsignal-v1" => ratchet_adapter::decrypt_message(
             &packet.sender.bundle.identity_ed25519,
@@ -421,5 +473,81 @@ mod tests {
 
         assert_eq!(compact.display_name.as_deref(), Some("Sylphy User"));
         assert!(compact.avatar_base64.is_none());
+    }
+
+    #[cfg(feature = "signal-ratchet")]
+    #[test]
+    fn hybrid_offline_message_survives_restart_and_duplicate_delivery() {
+        use super::*;
+        let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "sylphy-offline-{}-{}",
+            std::process::id(),
+            current_time_ms().unwrap()
+        ));
+        let alice = directory.join("alice").to_string_lossy().into_owned();
+        let bob = directory.join("bob").to_string_lossy().into_owned();
+        identity::ensure_identity(&bob, "test-bob-vault", None, None).unwrap();
+        let bob_record = identity::active_identity().unwrap();
+        let bob_bundle = bob_record
+            .public_bundle(ratchet_adapter::public_pre_key_bundle().unwrap())
+            .unwrap();
+        let device = PublishedDevice {
+            bundle: bob_bundle.clone(),
+            route_blob: vec![1],
+        };
+        identity::ensure_identity(&alice, "test-alice-vault", None, None).unwrap();
+        let alice_record = identity::active_identity().unwrap();
+        let alice_bundle = alice_record
+            .public_bundle(ratchet_adapter::public_pre_key_bundle().unwrap())
+            .unwrap();
+        let (packet, _) = seal_for_device_with_route(
+            &device,
+            "Messaggio mentre sei offline",
+            vec![17; 16],
+            vec![2],
+        )
+        .unwrap();
+        let sender_keys = outgoing_mailbox_keys(&device).unwrap().unwrap();
+        let (first, second) = sender_keys
+            .seal(&packet, current_time_ms().unwrap())
+            .unwrap();
+        // Simulate an app restart: restore Bob's vault and libsignal state.
+        identity::activate_from_storage(&bob, "test-bob-vault").unwrap();
+        crate::messaging_adapter::configure_storage(&bob).unwrap();
+        let receiver_keys = crate::offline_mailbox::MailboxKeys::derive(
+            &bob_record.x25519_secret().unwrap(),
+            &alice_bundle.signed_prekey_x25519,
+            &alice_bundle.identity_ed25519,
+            &bob_bundle.identity_ed25519,
+            alice_bundle.signal_pre_key.as_ref().unwrap().device_id,
+            bob_bundle.signal_pre_key.as_ref().unwrap().device_id,
+        )
+        .unwrap();
+        let recovered = receiver_keys
+            .open(&first, &second, current_time_ms().unwrap())
+            .unwrap();
+        crate::messaging_adapter::receive_for_test(&recovered).unwrap();
+        crate::messaging_adapter::receive_for_test(&recovered).unwrap();
+        let conversations = crate::messaging_adapter::list_conversations().unwrap();
+        let id = conversations["conversations"][0]["id"].as_str().unwrap();
+        let messages = crate::messaging_adapter::list_messages(id, None, None, None).unwrap();
+        assert_eq!(messages["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            messages["messages"][0]["body"],
+            "Messaggio mentre sei offline"
+        );
+        // Reload the log and ratchet, then replay the same network deposit.
+        identity::activate_from_storage(&bob, "test-bob-vault").unwrap();
+        crate::messaging_adapter::configure_storage(&bob).unwrap();
+        crate::messaging_adapter::receive_for_test(&recovered).unwrap();
+        assert_eq!(
+            crate::messaging_adapter::list_messages(id, None, None, None).unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -1,199 +1,220 @@
 # Sylphy
 
-Sylphy è un messenger peer-to-peer privato per Android, Windows e Linux. Integra
-[Veilid](https://veilid.com/) direttamente nell'applicazione e mantiene identità,
-crittografia e cronologia sensibile nel core nativo Rust: la rete riceve soltanto
-record pubblici firmati o dati cifrati opachi.
+Sylphy is a private peer-to-peer messenger for Android, Windows and Linux. It
+embeds [Veilid](https://veilid.com/) directly in the application and keeps
+identity, cryptography and sensitive history in a native Rust core. The network
+receives only signed public records or opaque encrypted data.
 
-Il progetto punta a offrire un'esperienza da messenger tradizionale senza un
-server centrale che custodisca account, contatti e conversazioni.
+The project aims to provide a familiar messaging experience without a central
+server holding accounts, contacts and conversations.
 
 > [!WARNING]
-> Sylphy è software in sviluppo e non è stato sottoposto a un audit di sicurezza
-> indipendente. Non deve essere considerato, allo stato attuale, uno strumento
-> verificato per scenari ad alto rischio.
+> Sylphy is under development and has not undergone an independent security
+> audit. It should not currently be treated as a verified tool for high-risk
+> situations.
 
-## Funzionalità
+## Features
 
-- identità Sylphy firmata, condivisibile tramite ID o invito `sylphy:`;
-- contatti peer-to-peer con nome, foto profilo e fingerprint verificabile;
-- messaggi end-to-end encrypted e consegna diretta quando il destinatario è
-  raggiungibile, senza distribuire ai contatti capability di scrittura condivise;
-- mailbox DHT cifrata riservata alla sincronizzazione tra dispositivi dello
-  stesso account; ogni elemento viene confermato solo dopo il salvataggio locale;
-- servizio foreground Android e notifiche senza anteprima del testo quando
-  l'interfaccia dell'app è chiusa;
-- allegati cifrati, pulsante di download e anteprima delle immagini direttamente
-  nella conversazione;
-- collegamento cifrato tra computer e telefono tramite file account protetto da
-  password, con identità, contatti e cronologia; ogni dispositivo genera una
-  propria identità e proprie sessioni Signal per evitare la clonazione del ratchet;
-- sincronizzazione multi-dispositivo dei nuovi contatti e messaggi tramite
-  consegna diretta e journal cifrato Veilid come fallback;
-- UI Flutter adattiva per telefono e desktop;
-- core Rust fail-closed: in assenza dell'ABI nativa l'app non simula contatti,
-  messaggi o stato di rete.
+- Signed Sylphy identities shared through an ID or a `sylphy:` invitation.
+- Peer-to-peer contacts with names, profile pictures and verifiable fingerprints.
+- End-to-end encrypted messages with direct delivery and encrypted offline
+  storage on Veilid, using separate capabilities for each contact, direction and
+  device.
+- An encrypted DHT journal for devices belonging to the same account, with
+  acknowledgements issued only after local persistence.
+- An Android foreground service and notifications without message previews when
+  the app interface is closed.
+- Encrypted attachments, download controls and inline image previews.
+- Encrypted computer-to-phone account linking through a password-protected
+  account file containing identity, contacts and history. Each device creates
+  its own device identity and Signal sessions to avoid cloning ratchet state.
+- Synchronization of new contacts and messages across linked devices through
+  direct delivery, with an encrypted Veilid journal as a fallback.
+- Adaptive Flutter UI for phones and desktops.
+- A Rust core that fails closed: when the native ABI is unavailable, the app
+  does not simulate contacts, messages or network status.
 
-## Cos'è Veilid
+## What is Veilid?
 
-[Veilid](https://veilid.com/how-it-works/) è un framework open source per creare
-applicazioni completamente distribuite. Può essere incorporato direttamente in
-un'app oppure eseguito come nodo headless e non richiede blockchain, token o un
-livello transazionale.
+[Veilid](https://veilid.com/how-it-works/) is an open-source framework for fully
+distributed applications. It can be embedded in an app or run as a headless node
+and does not require a blockchain, tokens or a transaction layer.
 
-Per Sylphy fornisce tre primitive principali:
+Sylphy uses three main primitives:
 
-1. **Private routing.** Il mittente sceglie una *Safety Route* e il destinatario
-   pubblica una *Private Route*; le due parti vengono combinate e ciascun hop
-   conosce soltanto quello successivo. La documentazione ufficiale descrive il
-   meccanismo come simile all'onion routing.
-2. **DHT.** Record distribuiti, subkey indirizzabili e scrittori autorizzati
-   consentono di pubblicare identità firmate, journal multi-dispositivo e chunk
-   cifrati senza un database centrale. I record sono eventualmente consistenti.
-3. **Messaggi applicativi.** Quando un peer è raggiungibile, Sylphy tenta anche
-   una consegna diretta tramite `AppMessage`. La consegna offline tra account
-   distinti resta disabilitata finché non esisteranno mailbox con capability
-   specifiche per singolo peer.
+1. **Private routing.** The sender selects a *Safety Route* and the recipient
+   publishes a *Private Route*. Combining them hides the complete path from
+   individual relays. The official documentation describes a mechanism similar
+   to onion routing.
+2. **DHT.** Distributed records, addressable subkeys and authorized writers
+   provide storage for signed identities, device journals and encrypted chunks
+   without a central database. Records are eventually consistent.
+3. **Application messages.** Sylphy attempts direct delivery through
+   `AppMessage` when a peer is reachable. Updated clients also deposit encrypted
+   packets in a mailbox specific to the contact pair so recipients can retrieve
+   them when they return online.
 
-Approfondimenti ufficiali:
+Official documentation:
 [private routing](https://veilid.com/how-it-works/private-routing/),
-[RPC e DHT](https://veilid.com/how-it-works/rpc/) e
+[RPC and DHT](https://veilid.com/how-it-works/rpc/), and
 [networking](https://veilid.com/how-it-works/networking/).
 
-## Perché Veilid invece di un'architettura basata su Tor
+## Why Veilid for this architecture?
 
-Sylphy non sostiene che Veilid sia universalmente “migliore di Tor”. Per un
-messenger mobile-first e completamente distribuito, tuttavia, Veilid offre
-vantaggi architetturali concreti:
+Veilid provides routing and distributed storage in one embedded framework,
+which suits a fully distributed mobile messenger. A design using Tor Onion
+Services would need its own discovery, mailbox and data-storage components.
 
-| Aspetto | Sylphy con Veilid | Alternativa con Tor Onion Services |
+| Aspect | Sylphy with Veilid | Design using Tor Onion Services |
 | --- | --- | --- |
-| Integrazione | `veilid-core` è una libreria incorporata nel processo dell'app | normalmente occorre gestire un client/daemon Tor e il ciclo di vita di un Onion Service |
-| Primitive applicative | private routing, RPC, DHT e messaggi peer-to-peer fanno parte dello stesso framework | Tor fornisce il trasporto anonimo e l'endpoint onion; discovery, mailbox offline e modello dati restano a carico dell'app |
-| Consegna offline | primitive DHT disponibili; Sylphy le usa oggi soltanto tra dispositivi dello stesso account | richiede un servizio sempre raggiungibile o uno storage/protocollo aggiuntivo |
-| Operatività | ogni app è anche un nodo; non serve amministrare un backend onion dedicato | un Onion Service deve pubblicare descrittori e mantenere circuiti verso gli introduction point |
-| Percorso predefinito | la route compilata Veilid usa attualmente tre hop; l'app può richiederne di più | una connessione Onion Service completa usa normalmente sei relay, tre per lato |
-| Uso mobile | integrazione nativa e percorso più corto possono ridurre overhead e latenza; Sylphy sposta le operazioni native fuori dall'isolate UI | circuiti più lunghi e un componente Tor separato possono avere un costo maggiore di avvio, memoria e rete |
+| Integration | `veilid-core` runs inside the application process | Requires managing a Tor client and an Onion Service lifecycle |
+| Application primitives | Private routing, RPC, DHT and peer-to-peer messages share one framework | Tor provides transport and an onion endpoint; discovery and storage belong to the application |
+| Offline delivery | Sylphy uses DHT mailboxes for contacts and encrypted journals for linked devices | Requires reachable storage or an additional storage protocol |
+| Operations | Each app is a node; no dedicated onion backend is required | Services manage descriptors and introduction-point connections |
 
-La superiorità, quindi, riguarda **l'integrazione di un messenger distribuito**:
-meno componenti da orchestrare e DHT/offline delivery disponibili nello stesso
-framework di rete. Non è un'affermazione di superiorità assoluta in termini di
-anonimato. Tor è un progetto più maturo, con una rete di relay più ampia e un
-modello molto studiato; per navigazione anonima, resistenza alla censura e scenari
-ad alto rischio rimane un riferimento. Anche Veilid presenta esplicitamente il
-numero di hop come un compromesso tra prestazioni e sicurezza.
+This choice reduces the number of components Sylphy needs to integrate. It is
+not a claim that Veilid provides stronger anonymity than Tor. Routing choices
+involve security and performance tradeoffs; this project has no comparative
+anonymity or performance audit.
 
-Il funzionamento degli Onion Services e del rendezvous a sei relay è documentato
-dal [Tor Project](https://community.torproject.org/onion-services/overview/index.html).
+For the Onion Service connection model, see the
+[Tor Project documentation](https://community.torproject.org/onion-services/overview/index.html).
 
-## Architettura corrente
+## Current architecture
 
 ```mermaid
 flowchart TB
-    subgraph Client["Client Sylphy"]
-        UI["Flutter UI\nchat, contatti, profilo, allegati"]
-        DS["Servizi Dart\nIdentity · Messaging · Veilid"]
-        BG["Worker nativo persistente\ncoda con priorità agli invii"]
+    subgraph Client["Sylphy client"]
+        UI["Flutter UI\nchats, contacts, profile, attachments"]
+        DS["Dart services\nIdentity · Messaging · Veilid"]
+        BG["Persistent native worker\nprioritized outgoing queue"]
         UI --> DS --> BG
     end
 
-    BG -->|"JSON FFI · ABI 10"| FFI["Boundary C/Rust"]
+    BG -->|"JSON FFI · ABI 10"| FFI["C/Rust boundary"]
 
-    subgraph Core["Core nativo Rust"]
-        FFI --> ID["Identità e vault"]
+    subgraph Core["Native Rust core"]
+        FFI --> ID["Identity and vault"]
         FFI --> MSG["Messaging adapter"]
         MSG --> CRYPTO["Secure packet\nlibsignal · X25519 · ML-KEM-768 · XChaCha20"]
         MSG --> VA["Veilid adapter"]
-        ID --> LOCAL["Storage locale cifrato\nidentità · sessioni · log messaggi"]
+        ID --> LOCAL["Encrypted local storage\nidentity · sessions · message log · outbox"]
     end
 
-    subgraph Network["Rete Veilid"]
-        VA --> ROUTE["Private route e AppMessage"]
-        VA --> DHTID["DHT: identità e profilo firmati"]
-        VA --> MAIL["DHT: journal account\nsync multi-dispositivo cifrato"]
-        VA --> FILES["DHT: chunk allegati cifrati"]
+    subgraph Network["Veilid network"]
+        VA --> ROUTE["Private routes and AppMessage"]
+        VA --> DHTID["DHT: signed identities and profiles"]
+        VA --> PEERMAIL["DHT: encrypted contact mailboxes\noffline delivery"]
+        VA --> MAIL["DHT: encrypted account journal\nlinked-device synchronization"]
+        VA --> FILES["DHT: encrypted attachment chunks"]
     end
 
-    ANDROID["Integrazione Android\nFlutterEngine persistente · foreground service\nnotifiche private · selettore download"]
+    ANDROID["Android integration\npersistent FlutterEngine · foreground service\nprivate notifications · download picker"]
     ANDROID -.-> UI
     ANDROID -.-> VA
 ```
 
-### Invio di un messaggio
+### Sending a message
 
-1. Flutter valida l'input e lo accoda al worker nativo persistente; gli invii
-   hanno priorità rispetto alla manutenzione periodica dell'inbox.
-2. Il core Rust carica contatto e chiavi dal vault cifrato.
-3. `libsignal` aggiorna la sessione Double Ratchet e produce un ciphertext
-   Signal/PreKey; l'envelope esterno applica anche il bootstrap ibrido X25519 +
-   ML-KEM-768 e l'autenticazione Sylphy.
-4. Viene tentata la private route; se il peer non è raggiungibile l'invio fallisce
-   in modo esplicito e può essere ritentato senza usare capability condivise.
-5. Sessione e copia locale vengono persistite prima della conferma alla UI.
+1. Flutter validates input and queues the command on its persistent native
+   worker, prioritizing sends over periodic inbox maintenance.
+2. The Rust core loads the contact and keys from the encrypted vault.
+3. Official `libsignal` advances the Signal session and produces a Signal/PreKey
+   ciphertext. The outer envelope also applies Sylphy authentication and the
+   hybrid X25519 + ML-KEM-768 scheme.
+4. The core persists the session, local message and encrypted outgoing packet.
+5. Background network work attempts direct delivery and, for peers advertising
+   `offline-mailbox-v1`, deposits the encrypted packet in their contact mailbox.
+   Failed attempts remain queued and retry automatically, including after a
+   restart. Older peers retain the direct-delivery path.
 
-### Ricezione e consegna offline
+### Receiving messages
 
-1. Il nodo controlla periodicamente gli `AppMessage` e il journal cifrato dei
-   dispositivi appartenenti allo stesso account.
-2. Il core verifica firma, destinatario, limiti e chiavi prima della decifratura.
-3. Il messaggio viene salvato nel vault locale.
-4. Solo dopo la persistenza lo slot DHT viene svuotato; un arresto intermedio non
-   conferma il messaggio e consente un tentativo successivo.
-5. Su Android il servizio foreground mantiene il motore attivo e genera una
-   notifica priva di plaintext. Un *force stop* esplicito dell'app da parte
-   dell'utente o del sistema impedisce comunque qualsiasi elaborazione in
-   background fino alla riapertura.
+1. The node periodically processes `AppMessage` events, contact mailboxes and
+   the encrypted journal shared by devices on the same account.
+2. The core verifies signatures, recipient, bounds and keys before accepting
+   decrypted content, and deduplicates repeated deliveries.
+3. It saves the message and commits the Signal session locally.
+4. Only after persistence does it acknowledge the DHT entry. Contact mailboxes
+   use a separate acknowledgement subkey; the account journal clears processed
+   slots. An interrupted receive can therefore be retried.
+5. On Android, the foreground service keeps the engine active and produces
+   notifications without message plaintext. A force stop prevents background
+   processing until the app is reopened; system power policies can also suspend
+   the process.
 
-## Modello di sicurezza
+## Security model
 
-| Livello | Implementazione corrente |
+| Layer | Current implementation |
 | --- | --- |
-| Identità e autenticità | Ed25519, bundle pubblico firmato e fingerprint verificabile |
-| Accordo delle chiavi | schema ibrido one-shot X25519 + ML-KEM-768 |
-| Cifratura messaggi | Signal Double Ratchet ufficiale dentro envelope XChaCha20-Poly1305 autenticati |
-| Dati locali | identità Argon2id; sessioni per contatto e log incrementale cifrati XChaCha20-Poly1305 |
-| Allegati | chiave casuale per file, XChaCha20-Poly1305 e chunk DHT cifrati; limite applicativo 700 KiB |
-| Metadati pubblici | identità, prekey, route e profilo firmati; mai la cronologia in chiaro |
-| Trasporto | private routing Veilid diretto; journal DHT per i soli dispositivi dello stesso account |
+| Identity and authenticity | Ed25519, signed public bundles and verifiable fingerprints |
+| Key agreement | Hybrid one-shot X25519 + ML-KEM-768 |
+| Message encryption | Official Signal ratchet inside authenticated XChaCha20-Poly1305 envelopes |
+| Local data | Argon2id identity protection; encrypted per-contact sessions and incremental XChaCha20-Poly1305 message logs |
+| Attachments | Random per-file keys, XChaCha20-Poly1305 and encrypted DHT chunks; application limit of 700 KiB |
+| Public metadata | Signed identities, prekeys, routes and profiles; no plaintext message history |
+| Transport | Veilid private routing, contact-pair DHT mailboxes and a private journal for devices belonging to the same account |
 
-I nuovi bundle pubblicano prekey EC e Kyber di `signalapp/libsignal`, legate
-all'identità Sylphy tramite firma Ed25519. Due client aggiornati usano sempre il
-ciphertext Signal; un contatto precedente senza il nuovo bundle viene rifiutato
-esplicitamente e deve ripubblicare il proprio ID.
+Public bundles include EC and Kyber prekeys from `signalapp/libsignal`, bound to
+the Sylphy identity by an Ed25519 signature. Updated clients use Signal
+ciphertexts. Contacts without the required Signal bundle are explicitly
+rejected and must republish their ID.
 
-To-Do >>
+## Messages to offline recipients
 
-## Struttura del repository
+Two updated clients that have already added each other's IDs can exchange
+messages without being online at the same time. The sender first saves the
+message in its encrypted local outbox. A worker attempts direct delivery and
+stores the encrypted packet in the Veilid mailbox. Once the deposit is
+confirmed, the sender can close Sylphy. The recipient retrieves messages on
+returning online within the **7-day retention window**, subject to the records
+remaining available in the DHT.
+
+Each mailbox holds **32 unacknowledged messages per device pair and direction**.
+The recipient acknowledges only after saving locally, allowing slots to be
+reused without overwriting pending messages. When the network or mailbox is
+unavailable, messages remain in the local queue and retry automatically, even
+after a restart. A clock indicates a pending send; a single check mark means
+handoff to the network, not that the recipient has read the message.
+
+Update and reopen Sylphy on both devices to publish the new capability. A first
+message from an unknown sender still requires direct delivery or mutual ID
+imports. Implementation details and a verification procedure are available in
+[`specs/offline-delivery.md`](specs/offline-delivery.md).
+
+## Repository layout
 
 ```text
-lib/                     UI Flutter e servizi applicativi
-native/core/             core Rust, crittografia, persistenza e Veilid
-android/                 host Android, servizio e notifiche
-linux/                   runner desktop Linux
-windows/                 runner desktop Windows
-specs/                   contratti Flutter/native e note architetturali
-test/                    test Dart e widget
-.github/workflows/       analisi, test e packaging CI
+lib/                     Flutter UI and application services
+native/core/             Rust core, cryptography, persistence and Veilid
+android/                 Android host, service and notifications
+linux/                   Linux desktop runner
+windows/                 Windows desktop runner
+specs/                   Flutter/native contracts and architecture notes
+test/                    Dart and widget tests
+.github/workflows/       CI analysis, tests and packaging
 ```
 
-## Sviluppo
+## Development
 
-### Prerequisiti
+### Prerequisites
 
-- Flutter compatibile con Dart `^3.9.2`;
-- Rust `1.89` o successivo;
-- `protoc` per le dipendenze native;
-- Android: Java 17, Android SDK/NDK `28.2.13676358`, target Rust e `cargo-ndk`;
-- Windows: Visual Studio Build Tools con workload C++;
-- Linux: Clang, CMake, Ninja, GTK 3 e liblzma.
+- Flutter compatible with Dart `^3.9.2` (CI uses Flutter `3.35.5`).
+- Rust `1.93.1` or later, as required by the pinned libsignal dependencies.
+- `protoc` on `PATH`, or its executable path in `PROTOC`.
+- Android: Java 17, Android SDK/NDK `28.2.13676358`, Rust targets and `cargo-ndk`.
+- Windows: Visual Studio 2022 Build Tools with the C++ workload for Flutter
+  `3.35.5` and the MSVC Rust target.
+- Linux: Clang, CMake, Ninja, GTK 3, liblzma, libsecret and libjsoncpp development
+  packages.
 
-### Dipendenze Flutter
+### Flutter dependencies
 
 ```bash
 flutter pub get
 ```
 
-### Core nativo
+### Native core
 
 Windows:
 
@@ -213,43 +234,50 @@ Linux:
 bash ./native/build-linux.sh release
 ```
 
-Gli script compilano il core con le feature `veilid,signal-ratchet` e copiano la
-libreria nella destinazione prevista dal runner. Ulteriori dettagli sono in
-[`native/README.md`](native/README.md),
-[`specs/native-core.md`](specs/native-core.md) e
-[`specs/flutter-client.md`](specs/flutter-client.md).
+These scripts compile with `veilid,signal-ratchet` and copy the native library
+to the location expected by the platform runner. Rebuild the native libraries
+after changing Rust dependencies: existing binaries do not acquire a libsignal
+upgrade from `flutter pub get` alone.
 
-### Avvio
+See [`native/README.md`](native/README.md),
+[`specs/native-core.md`](specs/native-core.md), and
+[`specs/flutter-client.md`](specs/flutter-client.md) for further details.
+
+### Run
 
 ```bash
 flutter run -d <device-id>
 ```
 
-### Controlli di qualità
+### Quality checks
 
 ```bash
 flutter analyze
 flutter test
-cargo test --manifest-path native/core/Cargo.toml --features veilid,signal-ratchet
+cargo fmt --manifest-path native/core/Cargo.toml -- --check
+cargo test --locked --manifest-path native/core/Cargo.toml --features veilid,signal-ratchet
+cargo check --locked --manifest-path native/core/Cargo.toml --features veilid,signal-ratchet
 ```
 
-## Limiti noti
+## Known limitations
 
-- nessun audit indipendente del protocollo o dell'implementazione;
-- gli allegati sono limitati a 700 KiB;
-- la consegna offline tra account distinti è disabilitata: pubblicare la stessa
-  chiave di scrittura mailbox a tutti i contatti permetterebbe a un contatto di
-  saturare o alterare la coda; serve una capability distinta per peer;
-- il journal multi-dispositivo ha capacità finita e consistenza eventuale;
-- le notifiche persistenti in background sono implementate specificamente per
-  Android; le politiche energetiche del produttore possono comunque sospendere
-  il processo;
-- la verifica manuale del fingerprint è un indicatore di fiducia e non sostituisce
-  un audit del dispositivo o del software.
+- The protocol and implementation have not undergone an independent audit.
+- Attachments are limited to 700 KiB.
+- Offline mailboxes have bounded retention and capacity. Availability depends
+  on the DHT; they are not permanent storage.
+- The linked-device journal has finite capacity and eventual consistency.
+- Persistent background notifications are implemented specifically for Android;
+  manufacturer power policies may still suspend the process.
+- Manual fingerprint verification is a trust signal, not a substitute for an
+  audit of the device or software.
 
-## Dipendenze e licenze
+## Dependencies and licenses
 
-Il core usa `veilid-core 0.5.7` e include `signalapp/libsignal` fissato a una
-revisione specifica. `libsignal` è distribuito con licenza AGPL-3.0-only: prima
-di distribuire binari combinati è necessario verificare gli obblighi indicati in
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+The core uses `veilid-core 0.5.7` and official
+[`signalapp/libsignal v0.102.1`](https://github.com/signalapp/libsignal/releases/tag/v0.102.1),
+pinned to commit `ea42ed0ed3e2ae119282d98253c35a28cce02414`. The native
+`Cargo.lock` records the resolved dependencies for reproducible builds.
+
+Libsignal is licensed under AGPL-3.0-only. Review the obligations documented in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) before distributing combined
+binaries.

@@ -46,6 +46,22 @@ pub(crate) struct IdentityRecord {
     dht_descriptor_json: Option<String>,
     #[serde(default)]
     mailbox_descriptor_json: Option<String>,
+    #[serde(default)]
+    retired_prekeys: Vec<RetiredPrekeys>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RetiredPrekeys {
+    x25519_secret: Vec<u8>,
+    mlkem_seed: Vec<u8>,
+    retain_until_ms: u64,
+}
+
+impl Drop for RetiredPrekeys {
+    fn drop(&mut self) {
+        self.x25519_secret.zeroize();
+        self.mlkem_seed.zeroize();
+    }
 }
 
 impl Drop for IdentityRecord {
@@ -74,10 +90,18 @@ impl IdentityRecord {
             message_storage_secret,
             dht_descriptor_json: None,
             mailbox_descriptor_json: None,
+            retired_prekeys: Vec::new(),
         }
     }
 
     fn rotate_prekeys(&mut self, expires_at_ms: u64) {
+        self.retired_prekeys.push(RetiredPrekeys {
+            x25519_secret: self.x25519_secret.clone(),
+            mlkem_seed: self.mlkem_seed.clone(),
+            retain_until_ms: self
+                .expires_at_ms
+                .saturating_add(crate::offline_mailbox::RETENTION_MS),
+        });
         let x25519_secret = StaticSecret::random_from_rng(OsRng);
         self.x25519_secret.zeroize();
         self.x25519_secret = x25519_secret.to_bytes().to_vec();
@@ -93,6 +117,11 @@ impl IdentityRecord {
             || self.x25519_secret.len() != X25519_SECRET_LENGTH
             || self.mlkem_seed.len() != ML_KEM_SEED_LENGTH
             || self.message_storage_secret.len() != 32
+            || self.retired_prekeys.len() > 2
+            || self
+                .retired_prekeys
+                .iter()
+                .any(|keys| keys.x25519_secret.len() != 32 || keys.mlkem_seed.len() != 64)
         {
             return Err(CoreError::VerificationFailed);
         }
@@ -134,6 +163,8 @@ impl IdentityRecord {
 }
 
 static ACTIVE_IDENTITY: OnceLock<Mutex<Option<IdentityRecord>>> = OnceLock::new();
+#[cfg(test)]
+pub(crate) static TEST_IDENTITY_LOCK: Mutex<()> = Mutex::new(());
 
 fn active_identity_store() -> &'static Mutex<Option<IdentityRecord>> {
     ACTIVE_IDENTITY.get_or_init(|| Mutex::new(None))
@@ -196,6 +227,33 @@ pub(crate) fn activate_from_storage(
 }
 
 impl IdentityRecord {
+    pub(crate) fn receiving_key_pairs(&self) -> CoreResult<Vec<(StaticSecret, Seed)>> {
+        let mut pairs = vec![(self.x25519_secret()?, self.mlkem_seed()?)];
+        let now = current_time_ms()?;
+        for keys in &self.retired_prekeys {
+            if keys.retain_until_ms <= now {
+                continue;
+            }
+            let secret: [u8; 32] = keys
+                .x25519_secret
+                .as_slice()
+                .try_into()
+                .map_err(|_| CoreError::VerificationFailed)?;
+            let seed = Seed::try_from(keys.mlkem_seed.as_slice())
+                .map_err(|_| CoreError::VerificationFailed)?;
+            pairs.push((StaticSecret::from(secret), seed));
+        }
+        Ok(pairs)
+    }
+
+    pub(crate) fn receiving_x25519_secrets(&self) -> CoreResult<Vec<StaticSecret>> {
+        Ok(self
+            .receiving_key_pairs()?
+            .into_iter()
+            .map(|(secret, _)| secret)
+            .collect())
+    }
+
     pub(crate) fn signing_key(&self) -> CoreResult<SigningKey> {
         let bytes: [u8; ED25519_LENGTH] = self
             .signing_secret
@@ -266,6 +324,11 @@ pub fn ensure_identity(
     if record.expires_at_ms <= now_ms {
         record.rotate_prekeys(next_expiration);
     }
+    let previous_count = record.retired_prekeys.len();
+    record
+        .retired_prekeys
+        .retain(|keys| keys.retain_until_ms > now_ms);
+    should_persist |= previous_count != record.retired_prekeys.len();
     record.validate()?;
     // Private key material must be durable before a matching public bundle is
     // made observable through Veilid. Descriptor changes are persisted again
@@ -408,6 +471,7 @@ mod tests {
 
     #[test]
     fn identity_is_stable_and_the_private_record_is_encrypted() {
+        let _guard = TEST_IDENTITY_LOCK.lock().unwrap();
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -442,5 +506,22 @@ mod tests {
             Err(CoreError::AuthenticationFailed)
         ));
         fs::remove_dir_all(&directory).expect("remove isolated test directory");
+    }
+
+    #[test]
+    fn rotation_keeps_receiving_keys_for_offline_retention_only() {
+        let now = current_time_ms().unwrap();
+        let mut record = IdentityRecord::generate(now + 1000);
+        let before = record.x25519_secret().unwrap().to_bytes();
+        record.rotate_prekeys(now + INVITATION_LIFETIME_MS);
+        record.validate().unwrap();
+        let encoded = serde_json::to_vec(&record).unwrap();
+        let restored: IdentityRecord = serde_json::from_slice(&encoded).unwrap();
+        let keys = restored.receiving_x25519_secrets().unwrap();
+        assert_eq!(keys.len(), 2);
+        assert_ne!(keys[0].to_bytes(), before);
+        assert_eq!(keys[1].to_bytes(), before);
+        record.retired_prekeys[0].retain_until_ms = now - 1;
+        assert_eq!(record.receiving_x25519_secrets().unwrap().len(), 1);
     }
 }

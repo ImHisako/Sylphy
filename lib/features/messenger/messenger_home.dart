@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:emojis/emoji.dart';
 
+import '../../core/branding/sylphy_logo.dart';
 import '../../core/diagnostics/app_log.dart';
 import '../../core/messaging/models.dart';
 import '../../core/messaging/secure_messaging_bridge.dart';
@@ -2530,17 +2531,20 @@ class _MessageBubble extends StatelessWidget {
                 ),
                 if (outgoing && showReceipt) ...[
                   const SizedBox(width: 4),
-                  Icon(
-                    switch (message.deliveryState) {
-                      DeliveryState.queued => Icons.schedule_rounded,
-                      DeliveryState.sent => Icons.done_rounded,
-                      DeliveryState.delivered ||
-                      DeliveryState.read => Icons.done_all_rounded,
-                    },
-                    size: 14,
-                    color: message.deliveryState == DeliveryState.read
-                        ? const Color(0xFF2F6FED)
-                        : foreground.withValues(alpha: 0.72),
+                  Tooltip(
+                    message: message.deliveryState.label,
+                    child: Icon(
+                      switch (message.deliveryState) {
+                        DeliveryState.queued => Icons.schedule_rounded,
+                        DeliveryState.sent => Icons.done_rounded,
+                        DeliveryState.delivered ||
+                        DeliveryState.read => Icons.done_all_rounded,
+                      },
+                      size: 14,
+                      color: message.deliveryState == DeliveryState.read
+                          ? const Color(0xFF2F6FED)
+                          : foreground.withValues(alpha: 0.72),
+                    ),
                   ),
                 ],
               ],
@@ -2668,19 +2672,7 @@ class _BrandMark extends StatelessWidget {
     return Row(
       mainAxisSize: compact ? MainAxisSize.min : MainAxisSize.max,
       children: [
-        Container(
-          width: compact ? 32 : 36,
-          height: compact ? 32 : 36,
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.primary,
-            borderRadius: BorderRadius.circular(11),
-          ),
-          child: Icon(
-            Icons.auto_awesome_rounded,
-            size: compact ? 19 : 22,
-            color: Theme.of(context).colorScheme.onPrimary,
-          ),
-        ),
+        SylphyLogo(size: compact ? 36 : 42, excludeFromSemantics: true),
         const SizedBox(width: 10),
         const Text(
           'Sylphy',

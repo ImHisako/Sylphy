@@ -12,6 +12,11 @@ use crate::{
     hybrid, identity, messaging_adapter, ratchet_adapter, vault, veilid_adapter,
 };
 
+// Flutter and Android's background service share one vault and ratchet. A
+// receive transaction may roll back until persisted, so it must not overlap
+// another command that changes sessions or activates a different account.
+pub(crate) static COMMAND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum CoreRequest {
@@ -130,6 +135,10 @@ pub unsafe extern "C" fn sylphy_core_abi_version() -> u32 {
 /// once with [`sylphy_core_free_string`].
 pub unsafe extern "C" fn sylphy_core_call(request: *const c_char) -> *mut c_char {
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let _command_guard = match COMMAND_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(_) => return serialize_response(error_response(CoreError::Internal)),
+        };
         let request_text = if request.is_null() {
             Err(CoreError::InvalidInput)
         } else {

@@ -71,6 +71,62 @@ struct StoredContact {
     verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     invitation_code: Option<String>,
+    #[serde(default)]
+    previous_bundles: Vec<PublicBundle>,
+}
+
+fn validate_previous_bundles(contact: &StoredContact) -> CoreResult<()> {
+    if contact.previous_bundles.len() > 8 {
+        return Err(CoreError::LimitExceeded);
+    }
+    for bundle in &contact.previous_bundles {
+        bundle.validate()?;
+        if bundle.identity_ed25519 != contact.bundle.identity_ed25519 {
+            return Err(CoreError::VerificationFailed);
+        }
+    }
+    Ok(())
+}
+
+fn update_contact_identity(
+    contact: &mut StoredContact,
+    refreshed: PublishedIdentity,
+) -> CoreResult<()> {
+    if refreshed.bundle.identity_ed25519 != contact.bundle.identity_ed25519 {
+        return Err(CoreError::VerificationFailed);
+    }
+    let now = current_time_ms()?;
+    if let Some(previous) = &contact.published_identity {
+        for device in previous.delivery_devices()? {
+            if device.bundle.signed_prekey_x25519 != refreshed.bundle.signed_prekey_x25519
+                && !contact.previous_bundles.iter().any(|bundle| {
+                    bundle.signed_prekey_x25519 == device.bundle.signed_prekey_x25519
+                        && bundle.signal_pre_key.as_ref().map(|key| key.device_id)
+                            == device
+                                .bundle
+                                .signal_pre_key
+                                .as_ref()
+                                .map(|key| key.device_id)
+                })
+            {
+                contact.previous_bundles.push(device.bundle);
+            }
+        }
+    }
+    contact.previous_bundles.retain(|bundle| {
+        bundle
+            .expires_at_ms
+            .saturating_add(crate::offline_mailbox::RETENTION_MS)
+            > now
+    });
+    if contact.previous_bundles.len() > 8 {
+        contact
+            .previous_bundles
+            .drain(..contact.previous_bundles.len() - 8);
+    }
+    contact.bundle = refreshed.bundle.clone();
+    contact.published_identity = Some(refreshed);
+    Ok(())
 }
 
 /// A group keeps the authenticated public identity of every member. The
@@ -178,6 +234,12 @@ struct PendingDelivery {
     route_blob: Vec<u8>,
     payload: Vec<u8>,
     created_at_ms: u64,
+    #[serde(default)]
+    offline_keys: Option<crate::offline_mailbox::MailboxKeys>,
+    #[serde(default)]
+    attempts: u32,
+    #[serde(default)]
+    next_attempt_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -211,10 +273,23 @@ struct ContactStore {
     attachment_leases: Vec<AttachmentLease>,
     device_sync_outbox: Vec<PendingDeviceSync>,
     revision: u64,
+    generation: u64,
 }
 
 static CONTACT_STORE: OnceLock<Mutex<ContactStore>> = OnceLock::new();
 static ALLOW_UNKNOWN_CONTACTS: OnceLock<Mutex<bool>> = OnceLock::new();
+static SYNC_LOCK: Mutex<()> = Mutex::new(());
+#[derive(Default)]
+struct PeerRefresh {
+    generation: u64,
+    cursor: usize,
+    next_attempt_ms: u64,
+    receiver: Option<std::sync::mpsc::Receiver<(String, CoreResult<PublishedIdentity>)>>,
+}
+static PEER_REFRESH: OnceLock<Mutex<PeerRefresh>> = OnceLock::new();
+type TransportResults = Vec<(PendingDelivery, bool)>;
+static OUTBOX_TRANSPORT: Mutex<Option<(u64, std::sync::mpsc::Receiver<TransportResults>)>> =
+    Mutex::new(None);
 
 fn contact_store() -> &'static Mutex<ContactStore> {
     CONTACT_STORE.get_or_init(|| Mutex::new(ContactStore::default()))
@@ -257,6 +332,7 @@ pub fn configure_storage(storage_directory: &str) -> CoreResult<()> {
     let groups_path = directory.join(GROUP_STORE_FILE);
     let groups = load_groups(&groups_path)?;
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    store.generation = store.generation.wrapping_add(1);
     store.path = Some(path);
     store.message_path = Some(directory.join(MESSAGE_LOG_FILE));
     store.legacy_message_path = Some(directory.join(MESSAGE_STORE_FILE));
@@ -341,6 +417,7 @@ pub(crate) fn validate_account_backup(value: &Value) -> CoreResult<()> {
         validate_conversation_id(&contact.id)?;
         validate_display_name(&contact.display_name)?;
         contact.bundle.validate()?;
+        validate_previous_bundles(contact)?;
         if contact.id != contact_id(&contact.bundle.identity_ed25519)
             || contact.fingerprint != fingerprint(&contact.bundle.identity_ed25519)
         {
@@ -607,6 +684,7 @@ pub fn add_contact(_legacy_display_name: &str, invitation_code: &str) -> CoreRes
         published_identity: Some(published_identity),
         verified: false,
         invitation_code: Some(invitation_code.trim().to_owned()),
+        previous_bundles: Vec::new(),
     };
     let mut updated = store.contacts.clone();
     updated.push(contact);
@@ -775,7 +853,6 @@ pub fn create_group(
     queue_device_sync(&DeviceSyncEvent::UpsertGroup {
         group: group.clone(),
     });
-    let _ = flush_outbox(Some(&group_id));
     Ok(
         json!({"group_id": group_id, "conversation_type": group.mode, "member_count": members.len() + 1}),
     )
@@ -832,10 +909,7 @@ pub fn send_text(conversation_id: &str, plaintext: &str) -> CoreResult<Value> {
             attachment_base64: None,
         };
         queue_outgoing(&message_path, message, deliveries)?;
-        let delivered = flush_outbox(Some(&message_id));
-        return Ok(
-            json!({"message_id": message_id, "delivery_state": if delivered { "sent" } else { "queued" }}),
-        );
+        return Ok(json!({"message_id": message_id, "delivery_state": "queued"}));
     }
     let message_path = {
         let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
@@ -865,10 +939,9 @@ pub fn send_text(conversation_id: &str, plaintext: &str) -> CoreResult<Value> {
         attachment_base64: None,
     };
     queue_outgoing(&message_path, message.clone(), deliveries)?;
-    let delivered = flush_outbox(Some(&message_id));
     Ok(json!({
         "message_id": message_id,
-        "delivery_state": if delivered { "sent" } else { "queued" }
+        "delivery_state": "queued"
     }))
 }
 
@@ -964,10 +1037,9 @@ pub fn send_attachment(
             remove_attachment_lease(&record_key);
             return Err(error);
         }
-        let delivered = flush_outbox(Some(&message_id));
         return Ok(json!({
             "message_id": message_id,
-            "delivery_state": if delivered { "sent" } else { "queued" }
+            "delivery_state": "queued"
         }));
     }
     let message_path = {
@@ -1035,10 +1107,9 @@ pub fn send_attachment(
         remove_attachment_lease(&record_key);
         return Err(error);
     }
-    let delivered = flush_outbox(Some(&message_id));
     Ok(json!({
         "message_id": message_id,
-        "delivery_state": if delivered { "sent" } else { "queued" }
+        "delivery_state": "queued"
     }))
 }
 
@@ -1091,6 +1162,7 @@ pub fn delete_conversation(conversation_id: &str) -> CoreResult<Value> {
             .clone()
             .ok_or(CoreError::FeatureUnavailable)?;
         ensure_messages_loaded(&mut store)?;
+        cancel_pending_conversation(&mut store, conversation_id)?;
         let messages = store
             .messages
             .iter()
@@ -1127,6 +1199,7 @@ pub fn delete_conversation(conversation_id: &str) -> CoreResult<Value> {
         .clone()
         .ok_or(CoreError::FeatureUnavailable)?;
     ensure_messages_loaded(&mut store)?;
+    cancel_pending_conversation(&mut store, conversation_id)?;
     let messages = store
         .messages
         .iter()
@@ -1146,6 +1219,32 @@ pub fn delete_conversation(conversation_id: &str) -> CoreResult<Value> {
     store.revision = store.revision.wrapping_add(1);
     compact_message_log_if_needed(&mut store)?;
     Ok(json!({"conversation_id": conversation_id, "deleted": true}))
+}
+
+fn cancel_pending_conversation(store: &mut ContactStore, conversation_id: &str) -> CoreResult<()> {
+    let message_ids = store
+        .messages
+        .iter()
+        .filter(|message| message.conversation_id == conversation_id)
+        .map(|message| message.id.as_str())
+        .collect::<HashSet<_>>();
+    let retained = store
+        .outbox
+        .iter()
+        .filter(|entry| !message_ids.contains(entry.message_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if retained.len() != store.outbox.len() {
+        persist_outbox(
+            store
+                .outbox_path
+                .as_deref()
+                .ok_or(CoreError::FeatureUnavailable)?,
+            &retained,
+        )?;
+        store.outbox = retained;
+    }
+    Ok(())
 }
 
 pub fn set_contact_verified(conversation_id: &str, verified: bool) -> CoreResult<Value> {
@@ -1170,6 +1269,13 @@ pub fn set_contact_verified(conversation_id: &str, verified: bool) -> CoreResult
 }
 
 pub fn sync_inbound_messages() -> CoreResult<Value> {
+    let Ok(_sync_guard) = SYNC_LOCK.try_lock() else {
+        let revision = contact_store()
+            .lock()
+            .map_err(|_| CoreError::Internal)?
+            .revision;
+        return Ok(json!({"persisted": 0, "discarded": 0, "revision": revision}));
+    };
     // Loading/decrypting a large vault can be expensive. This command is
     // always invoked on the Dart background executor, so warm it here before
     // synchronous UI reads access the in-memory message index.
@@ -1177,7 +1283,8 @@ pub fn sync_inbound_messages() -> CoreResult<Value> {
         let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
         ensure_messages_loaded(&mut store)?;
     }
-    let _ = flush_outbox(None);
+    refresh_contact_directory();
+    let _ = configure_offline_receivers();
     flush_device_sync_outbox();
     cleanup_expired_attachments();
     let payloads = veilid_adapter::take_inbound_payloads()?;
@@ -1185,8 +1292,8 @@ pub fn sync_inbound_messages() -> CoreResult<Value> {
     let mut discarded = 0_usize;
     for payload in payloads {
         match persist_inbound_payload(&payload.payload) {
-            Ok(()) => {
-                persisted += 1;
+            Ok(is_new) => {
+                persisted += usize::from(is_new);
                 veilid_adapter::acknowledge_inbound_payload(payload)?;
             }
             Err(error) if should_discard_inbound(&error) => {
@@ -1196,14 +1303,158 @@ pub fn sync_inbound_messages() -> CoreResult<Value> {
                 discarded += 1;
                 let _ = veilid_adapter::acknowledge_inbound_payload(payload);
             }
-            Err(_) => {}
+            Err(_) => veilid_adapter::retry_inbound_payload(payload),
         }
     }
+    // Receive first: a slow or unavailable recipient must not delay messages
+    // that have already arrived for us.
+    let _ = flush_outbox(None);
     let revision = contact_store()
         .lock()
         .map_err(|_| CoreError::Internal)?
         .revision;
     Ok(json!({"persisted": persisted, "discarded": discarded, "revision": revision}))
+}
+
+fn configure_offline_receivers() -> CoreResult<()> {
+    let local = identity::active_identity()?;
+    let local_id = local.identity_public_key()?;
+    let local_device = ratchet_adapter::public_pre_key_bundle()?
+        .ok_or(CoreError::FeatureUnavailable)?
+        .device_id;
+    let bundles =
+        {
+            let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+            let peers =
+                store
+                    .contacts
+                    .iter()
+                    .filter_map(|contact| contact.published_identity.clone())
+                    .chain(store.groups.iter().flat_map(|group| {
+                        group.members.iter().map(|member| member.identity.clone())
+                    }))
+                    .collect::<Vec<_>>();
+            let mut bundles = store
+                .contacts
+                .iter()
+                .flat_map(|contact| contact.previous_bundles.clone())
+                .collect::<Vec<_>>();
+            for peer in peers {
+                bundles.extend(
+                    peer.delivery_devices()?
+                        .into_iter()
+                        .map(|device| device.bundle),
+                );
+            }
+            bundles
+        };
+    let mut seen = HashSet::new();
+    let mut targets = Vec::new();
+    for bundle in bundles {
+        if bundle.identity_ed25519 == local_id {
+            continue;
+        }
+        let remote_device = bundle
+            .signal_pre_key
+            .as_ref()
+            .ok_or(CoreError::UnsupportedVersion)?
+            .device_id;
+        for secret in local.receiving_x25519_secrets()? {
+            let keys = crate::offline_mailbox::MailboxKeys::derive(
+                &secret,
+                &bundle.signed_prekey_x25519,
+                &bundle.identity_ed25519,
+                &local_id,
+                remote_device,
+                local_device,
+            )?;
+            if seen.insert(keys.id()) {
+                targets.push(keys);
+            }
+        }
+    }
+    veilid_adapter::set_offline_targets(targets)
+}
+
+// Resolve one known short invitation at a time off the FFI thread. A contact
+// can rotate prekeys while we are offline; refreshing only when sending would
+// leave a receive-only user polling the old mailbox forever.
+fn refresh_contact_directory() {
+    use std::sync::mpsc::{self, TryRecvError};
+    let Ok(mut refresh) = PEER_REFRESH
+        .get_or_init(|| Mutex::new(PeerRefresh::default()))
+        .lock()
+    else {
+        return;
+    };
+    let Ok(mut store) = contact_store().lock() else {
+        return;
+    };
+    if refresh.generation != store.generation {
+        *refresh = PeerRefresh {
+            generation: store.generation,
+            ..Default::default()
+        };
+    }
+    if let Some(receiver) = &refresh.receiver {
+        match receiver.try_recv() {
+            Ok((id, Ok(published))) => {
+                let mut contacts = store.contacts.clone();
+                if let Some(contact) = contacts.iter_mut().find(|contact| contact.id == id) {
+                    let changed = contact
+                        .published_identity
+                        .as_ref()
+                        .and_then(|value| serde_json::to_vec(value).ok())
+                        != serde_json::to_vec(&published).ok();
+                    if changed
+                        && published.bundle.expires_at_ms > current_time_ms().unwrap_or(u64::MAX)
+                        && update_contact_identity(contact, published).is_ok()
+                    {
+                        if let Some(path) = &store.path {
+                            if persist_contacts(path, &contacts).is_ok() {
+                                store.contacts = contacts;
+                                store.revision = store.revision.wrapping_add(1);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => return,
+            _ => {}
+        }
+        refresh.receiver = None;
+    }
+    let now = current_time_ms().unwrap_or(0);
+    if now < refresh.next_attempt_ms {
+        return;
+    }
+    let contacts = store
+        .contacts
+        .iter()
+        .filter_map(|contact| {
+            contact
+                .invitation_code
+                .as_ref()
+                .filter(|code| code.starts_with("sylphy:VLD") || code.starts_with("VLD"))
+                .map(|code| (contact.id.clone(), code.clone()))
+        })
+        .collect::<Vec<_>>();
+    if contacts.is_empty() {
+        return;
+    }
+    let (id, invitation) = contacts[refresh.cursor % contacts.len()].clone();
+    refresh.cursor = refresh.cursor.wrapping_add(1);
+    refresh.next_attempt_ms = now.saturating_add(10_000);
+    let (sender, receiver) = mpsc::channel();
+    if std::thread::Builder::new()
+        .name("sylphy-contact-refresh".to_owned())
+        .spawn(move || {
+            let _ = sender.send((id, veilid_adapter::resolve_identity(&invitation)));
+        })
+        .is_ok()
+    {
+        refresh.receiver = Some(receiver);
+    }
 }
 
 fn should_discard_inbound(error: &CoreError) -> bool {
@@ -1217,9 +1468,18 @@ fn should_discard_inbound(error: &CoreError) -> bool {
     )
 }
 
-fn persist_inbound_payload(payload: &[u8]) -> CoreResult<()> {
+fn persist_inbound_payload(payload: &[u8]) -> CoreResult<bool> {
     if let Some(encrypted) = payload.strip_prefix(DEVICE_SYNC_PREFIX) {
-        return apply_device_sync(encrypted);
+        let before = contact_store()
+            .lock()
+            .map_err(|_| CoreError::Internal)?
+            .revision;
+        apply_device_sync(encrypted)?;
+        return Ok(contact_store()
+            .lock()
+            .map_err(|_| CoreError::Internal)?
+            .revision
+            != before);
     }
     let inspected = secure_packet::inspect(payload)?;
     if inspected.sent_at_ms > current_time_ms()?.saturating_add(MAX_CLOCK_SKEW_MS) {
@@ -1234,7 +1494,7 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<()> {
             .iter()
             .any(|message| message.id == inspected.message_id)
         {
-            return Ok(());
+            return Ok(false);
         }
     }
     let mut opened = secure_packet::open(payload)?;
@@ -1263,6 +1523,7 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<()> {
             .groups_path
             .clone()
             .ok_or(CoreError::FeatureUnavailable)?;
+        let is_new = !store.groups.iter().any(|item| item.id == group.id);
         if let Some(existing) = store.groups.iter().find(|item| item.id == group.id) {
             if existing.name != group.name || existing.admin_id != group.admin_id {
                 return Err(CoreError::VerificationFailed);
@@ -1276,7 +1537,7 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<()> {
         }
         drop(store);
         opened.commit_ratchet()?;
-        return Ok(());
+        return Ok(is_new);
     }
     let (conversation_id, plaintext) =
         if let Some((group_id, body)) = decode_group_message(&opened.plaintext)? {
@@ -1292,12 +1553,9 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<()> {
                     return Err(CoreError::AuthenticationFailed);
                 }
                 (group_id, body)
-            } else if store.contacts.iter().any(|contact| contact.id == id) {
-                // A direct message may legitimately begin with the reserved
-                // prefix. Unknown senders retain a possible out-of-order group
-                // envelope until its invitation arrives.
-                (id.clone(), opened.plaintext.clone())
             } else {
+                // DHT delivery is unordered, including for known contacts.
+                // Keep the authenticated packet until its group invitation arrives.
                 return Err(CoreError::FeatureUnavailable);
             }
         } else {
@@ -1333,14 +1591,13 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<()> {
         .ok_or(CoreError::FeatureUnavailable)?;
     ensure_messages_loaded(&mut store)?;
     if store.messages.iter().any(|item| item.id == message.id) {
-        return Ok(());
+        return Ok(false);
     }
     let is_group = store.groups.iter().any(|group| group.id == conversation_id);
     if is_group {
         // Membership was checked against the signed sender above.
     } else if let Some(contact) = store.contacts.iter_mut().find(|contact| contact.id == id) {
-        contact.bundle = opened.sender.bundle.clone();
-        contact.published_identity = Some(opened.sender.clone());
+        update_contact_identity(contact, opened.sender.clone())?;
     } else if allows_unknown_contacts()? && store.contacts.len() < MAX_CONTACTS {
         let contact_fingerprint = fingerprint(&opened.sender.bundle.identity_ed25519);
         let suffix = contact_fingerprint.replace(' ', "");
@@ -1354,6 +1611,7 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<()> {
             published_identity: Some(opened.sender.clone()),
             verified: false,
             invitation_code: None,
+            previous_bundles: Vec::new(),
         });
     } else {
         return Err(CoreError::AuthenticationFailed);
@@ -1392,7 +1650,12 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<()> {
             message: sync_message,
         });
     }
-    Ok(())
+    Ok(true)
+}
+
+#[cfg(test)]
+pub(crate) fn receive_for_test(payload: &[u8]) -> CoreResult<()> {
+    persist_inbound_payload(payload).map(|_| ())
 }
 
 fn rollback_message(message_id: &str) {
@@ -1543,6 +1806,9 @@ fn queue_outgoing(
                 route_blob: delivery.route_blob,
                 payload: delivery.payload,
                 created_at_ms: now_ms,
+                offline_keys: delivery.offline_keys,
+                attempts: 0,
+                next_attempt_ms: 0,
             }
         })
         .collect::<Vec<_>>();
@@ -1577,43 +1843,45 @@ fn queue_outgoing(
     store.message_event_count += 1;
     store.messages.push(message);
     store.revision = store.revision.wrapping_add(1);
-    compact_message_log_if_needed(&mut store)
+    let _ = compact_message_log_if_needed(&mut store);
+    Ok(())
 }
 
 fn flush_outbox(only_message_id: Option<&str>) -> bool {
-    let pending = match contact_store().lock() {
-        Ok(store) => store
-            .outbox
-            .iter()
-            .filter(|item| only_message_id.is_none_or(|id| item.message_id == id))
-            .cloned()
-            .collect::<Vec<_>>(),
+    let now = current_time_ms().unwrap_or(0);
+    let (generation, pending) = match contact_store().lock() {
+        Ok(store) => (
+            store.generation,
+            store
+                .outbox
+                .iter()
+                .filter(|item| only_message_id.is_none_or(|id| item.message_id == id))
+                .filter(|item| item.next_attempt_ms <= now)
+                .take(4)
+                .cloned()
+                .collect::<Vec<_>>(),
+        ),
         Err(_) => return false,
     };
-    if pending.is_empty() {
+    let Some(results) = poll_outbox_transport(generation, pending) else {
         return false;
-    }
+    };
     let mut delivered_ids = HashSet::new();
     let mut delivered_counts: HashMap<String, usize> = HashMap::new();
-    let mut total_counts: HashMap<String, usize> = HashMap::new();
-    for item in pending {
-        *total_counts.entry(item.message_id.clone()).or_default() += 1;
-        if veilid_adapter::deliver_payload(&item.route_blob, None, item.payload).is_ok() {
+    let mut failed_ids = HashSet::new();
+    for (item, delivered) in results {
+        if delivered {
             delivered_ids.insert(item.id);
             *delivered_counts.entry(item.message_id).or_default() += 1;
+        } else {
+            failed_ids.insert(item.id);
         }
     }
-    if delivered_ids.is_empty() {
-        return false;
-    }
-    let delivered_messages = delivered_counts
-        .into_iter()
-        .filter_map(|(message_id, delivered)| {
-            (total_counts.get(&message_id).copied() == Some(delivered)).then_some(message_id)
-        })
-        .collect::<HashSet<_>>();
     let sync_events = (|| -> CoreResult<Vec<DeviceSyncEvent>> {
         let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+        if store.generation != generation {
+            return Err(CoreError::FeatureUnavailable);
+        }
         let outbox_path = store
             .outbox_path
             .clone()
@@ -1622,28 +1890,38 @@ fn flush_outbox(only_message_id: Option<&str>) -> bool {
             .message_path
             .clone()
             .ok_or(CoreError::FeatureUnavailable)?;
-        let retained = store
+        let mut retained = store
             .outbox
             .iter()
             .filter(|item| !delivered_ids.contains(&item.id))
             .cloned()
             .collect::<Vec<_>>();
-        persist_outbox(&outbox_path, &retained)?;
-        store.outbox = retained;
+        for entry in &mut retained {
+            if failed_ids.contains(&entry.id) {
+                entry.attempts = entry.attempts.saturating_add(1);
+                entry.next_attempt_ms = now.saturating_add(retry_delay_ms(entry.attempts));
+            }
+        }
+        let delivered_messages = delivered_counts
+            .keys()
+            .filter(|id| !retained.iter().any(|item| &item.message_id == *id))
+            .cloned()
+            .collect::<HashSet<_>>();
         let mut events = Vec::new();
         for message_id in delivered_messages {
             let Some(index) = store.messages.iter().position(|item| item.id == message_id) else {
                 continue;
             };
             if store.messages[index].delivery_state == "queued" {
-                store.messages[index].delivery_state = "sent".to_owned();
-                let message = store.messages[index].clone();
+                let mut message = store.messages[index].clone();
+                message.delivery_state = "sent".to_owned();
                 append_message_event(
                     &message_path,
                     &MessageEvent::Upsert {
                         message: message.clone(),
                     },
                 )?;
+                store.messages[index] = message.clone();
                 store.message_event_count += 1;
                 if let Some(contact) = store
                     .contacts
@@ -1662,15 +1940,82 @@ fn flush_outbox(only_message_id: Option<&str>) -> bool {
                 }
             }
         }
+        // Save read models before removing durable ciphertext. A crash may
+        // cause a harmless duplicate, never a message stuck queued forever.
+        persist_outbox(&outbox_path, &retained)?;
+        store.outbox = retained;
         store.revision = store.revision.wrapping_add(1);
         compact_message_log_if_needed(&mut store)?;
         Ok(events)
-    })()
-    .unwrap_or_default();
+    })();
+    let Ok(sync_events) = sync_events else {
+        return false;
+    };
     for event in sync_events {
         queue_device_sync(&event);
     }
-    true
+    contact_store().lock().is_ok_and(|store| {
+        !store
+            .outbox
+            .iter()
+            .any(|entry| only_message_id.is_none_or(|id| entry.message_id == id))
+    })
+}
+
+// Only network work runs on this thread. Vault mutations are applied by the
+// next sync command, after checking the account generation. Slow/offline peers
+// therefore cannot monopolize Flutter's native command queue.
+fn poll_outbox_transport(
+    generation: u64,
+    pending: Vec<PendingDelivery>,
+) -> Option<TransportResults> {
+    use std::sync::mpsc::{self, TryRecvError};
+    let mut active = OUTBOX_TRANSPORT.lock().ok()?;
+    if let Some((previous, receiver)) = active.as_ref() {
+        if *previous == generation {
+            match receiver.try_recv() {
+                Ok(results) => {
+                    *active = None;
+                    return Some(results);
+                }
+                Err(TryRecvError::Empty) => return None,
+                Err(TryRecvError::Disconnected) => {}
+            }
+        }
+        *active = None;
+    }
+    if pending.is_empty() {
+        return None;
+    }
+    let (sender, receiver) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("sylphy-outbox".to_owned())
+        .spawn(move || {
+            let results = pending
+                .into_iter()
+                .map(|item| {
+                    let direct = veilid_adapter::deliver_payload(
+                        &item.route_blob,
+                        None,
+                        item.payload.clone(),
+                    );
+                    let delivered = if let Some(keys) = &item.offline_keys {
+                        veilid_adapter::store_offline_payload(keys, &item.payload).is_ok()
+                    } else {
+                        direct.is_ok()
+                    };
+                    (item, delivered)
+                })
+                .collect();
+            let _ = sender.send(results);
+        })
+        .ok()?;
+    *active = Some((generation, receiver));
+    None
+}
+
+fn retry_delay_ms(attempts: u32) -> u64 {
+    (5_000_u64 << attempts.saturating_sub(1).min(6)).min(300_000)
 }
 
 fn refreshed_recipient(conversation_id: &str) -> CoreResult<PublishedIdentity> {
@@ -1707,8 +2052,7 @@ fn refreshed_recipient(conversation_id: &str) -> CoreResult<PublishedIdentity> {
         .iter_mut()
         .find(|contact| contact.id == conversation_id)
     {
-        contact.bundle = refreshed.bundle.clone();
-        contact.published_identity = Some(refreshed.clone());
+        update_contact_identity(contact, refreshed.clone())?;
         persist_contacts(&contact_path, &store.contacts)?;
         store.revision = store.revision.wrapping_add(1);
     }
@@ -1735,6 +2079,7 @@ fn apply_device_sync(encrypted: &[u8]) -> CoreResult<()> {
         DeviceSyncEvent::UpsertContact { contact } => {
             validate_conversation_id(&contact.id)?;
             contact.bundle.validate()?;
+            validate_previous_bundles(&contact)?;
             if let Some(existing) = store.contacts.iter_mut().find(|item| item.id == contact.id) {
                 if !same_contact(existing, &contact) {
                     *existing = contact;
@@ -1749,6 +2094,7 @@ fn apply_device_sync(encrypted: &[u8]) -> CoreResult<()> {
             validate_conversation_id(&contact.id)?;
             validate_stored_message(&message)?;
             contact.bundle.validate()?;
+            validate_previous_bundles(&contact)?;
             if let Some(existing) = store.contacts.iter_mut().find(|item| item.id == contact.id) {
                 if !same_contact(existing, &contact) {
                     *existing = contact;
@@ -1885,6 +2231,7 @@ fn load_contacts(path: &Path, legacy_path: &Path) -> CoreResult<(Vec<StoredConta
         validate_conversation_id(&contact.id)?;
         validate_display_name(&contact.display_name)?;
         contact.bundle.validate()?;
+        validate_previous_bundles(contact)?;
         if let Some(published) = &contact.published_identity {
             published.validate()?;
         }
@@ -2167,6 +2514,9 @@ fn load_legacy_messages(path: &Path) -> CoreResult<Vec<StoredMessage>> {
 }
 
 fn load_message_log(path: &Path) -> CoreResult<(Vec<StoredMessage>, usize)> {
+    if fs::metadata(path).map_err(|_| CoreError::Internal)?.len() > MAX_MESSAGE_STORE_BYTES {
+        return Err(CoreError::LimitExceeded);
+    }
     let bytes = fs::read(path).map_err(|_| CoreError::Internal)?;
     if bytes.len() as u64 > MAX_MESSAGE_STORE_BYTES || !bytes.starts_with(MESSAGE_LOG_MAGIC) {
         return Err(CoreError::VerificationFailed);
@@ -2211,11 +2561,13 @@ fn load_message_log(path: &Path) -> CoreResult<(Vec<StoredMessage>, usize)> {
 fn apply_message_event(messages: &mut Vec<StoredMessage>, event: MessageEvent) -> CoreResult<()> {
     match event {
         MessageEvent::Upsert { message } => {
-            validate_conversation_id(&message.conversation_id)?;
-            if messages.len() >= MAX_MESSAGES {
-                return Err(CoreError::LimitExceeded);
-            }
-            if !messages.iter().any(|item| item.id == message.id) {
+            validate_stored_message(&message)?;
+            if let Some(index) = messages.iter().position(|item| item.id == message.id) {
+                messages[index] = message;
+            } else {
+                if messages.len() >= MAX_MESSAGES {
+                    return Err(CoreError::LimitExceeded);
+                }
                 messages.push(message);
             }
         }
@@ -2465,4 +2817,131 @@ fn grouped_hex(bytes: &[u8]) -> String {
         .map(compact_hex)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partial_delivery_retries_survive_restart_and_cancellation() {
+        let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "sylphy-queue-{}-{}",
+            std::process::id(),
+            current_time_ms().unwrap()
+        ));
+        let root = directory.to_string_lossy().into_owned();
+        identity::ensure_identity(&root, "queue-test-vault", None, None).unwrap();
+        configure_storage(&root).unwrap();
+        let message = StoredMessage {
+            id: "message-one".to_owned(),
+            conversation_id: "contact-one".to_owned(),
+            author_id: "me".to_owned(),
+            body: "Durable text".to_owned(),
+            sent_at_ms: current_time_ms().unwrap(),
+            is_outgoing: true,
+            is_read: true,
+            delivery_state: "queued".to_owned(),
+            attachment_name: None,
+            attachment_base64: None,
+        };
+        let path = contact_store()
+            .lock()
+            .unwrap()
+            .message_path
+            .clone()
+            .unwrap();
+        queue_outgoing(
+            &path,
+            message,
+            vec![
+                secure_packet::SealedDelivery {
+                    payload: vec![7; 32],
+                    route_blob: vec![1],
+                    offline_keys: None,
+                },
+                secure_packet::SealedDelivery {
+                    payload: vec![8; 32],
+                    route_blob: vec![2],
+                    offline_keys: None,
+                },
+            ],
+        )
+        .unwrap();
+        let (generation, pending) = {
+            let store = contact_store().lock().unwrap();
+            (store.generation, store.outbox.clone())
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender
+            .send(vec![
+                (pending[0].clone(), true),
+                (pending[1].clone(), false),
+            ])
+            .unwrap();
+        *OUTBOX_TRANSPORT.lock().unwrap() = Some((generation, receiver));
+        assert!(!flush_outbox(Some("message-one")));
+        {
+            let store = contact_store().lock().unwrap();
+            assert_eq!(store.messages[0].delivery_state, "queued");
+            assert_eq!(store.outbox.len(), 1);
+            assert_eq!(store.outbox[0].attempts, 1);
+            assert!(store.outbox[0].next_attempt_ms > current_time_ms().unwrap());
+            let bytes = fs::read(store.outbox_path.as_ref().unwrap()).unwrap();
+            assert!(!bytes.windows(11).any(|value| value == b"message-one"));
+        }
+        configure_storage(&root).unwrap();
+        let mut store = contact_store().lock().unwrap();
+        ensure_messages_loaded(&mut store).unwrap();
+        assert_eq!(store.outbox.len(), 1);
+        assert_eq!(store.outbox[0].payload, vec![8; 32]);
+        assert_eq!(store.messages[0].delivery_state, "queued");
+        let generation = store.generation;
+        let pending = store.outbox[0].clone();
+        drop(store);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send(vec![(pending, true)]).unwrap();
+        *OUTBOX_TRANSPORT.lock().unwrap() = Some((generation, receiver));
+        assert!(flush_outbox(Some("message-one")));
+        configure_storage(&root).unwrap();
+        let mut store = contact_store().lock().unwrap();
+        ensure_messages_loaded(&mut store).unwrap();
+        assert!(store.outbox.is_empty());
+        assert_eq!(store.messages[0].delivery_state, "sent");
+        // Cancelling a queued conversation is durable too.
+        store.outbox = vec![pending_delivery("message-one")];
+        cancel_pending_conversation(&mut store, "contact-one").unwrap();
+        assert!(
+            load_outbox(store.outbox_path.as_ref().unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        drop(store);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn pending_delivery(message_id: &str) -> PendingDelivery {
+        PendingDelivery {
+            id: "delivery-one".to_owned(),
+            message_id: message_id.to_owned(),
+            route_blob: vec![1],
+            payload: vec![2],
+            created_at_ms: 1,
+            offline_keys: None,
+            attempts: 0,
+            next_attempt_ms: 0,
+        }
+    }
+
+    #[test]
+    fn retry_backoff_is_bounded_and_legacy_outbox_migrates() {
+        assert_eq!(retry_delay_ms(1), 5_000);
+        assert_eq!(retry_delay_ms(2), 10_000);
+        assert_eq!(retry_delay_ms(u32::MAX), 300_000);
+        let entry: PendingDelivery = serde_json::from_value(json!({"id":"old", "message_id":"msg", "route_blob":[1], "payload":[2], "created_at_ms":1})).unwrap();
+        assert!(entry.offline_keys.is_none());
+        assert_eq!(entry.next_attempt_ms, 0);
+        assert_eq!(entry.attempts, 0);
+    }
 }

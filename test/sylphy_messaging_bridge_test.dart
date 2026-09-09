@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sylphy/core/messaging/models.dart';
 import 'package:sylphy/core/messaging/sylphy_messaging_bridge.dart';
 import 'package:sylphy/core/native/native_core.dart';
 
@@ -69,6 +70,30 @@ void main() {
     expect(bridge.cachedConversations, isNotNull);
     expect(bridge.cachedMessages('contact-1'), isNotNull);
   });
+
+  test(
+    'refreshes an offline queued message when the native deposit succeeds',
+    () async {
+      final core = _FakeNativeCore();
+      core.messages.add({
+        'id': 'offline-message',
+        'author_id': 'me',
+        'body': 'Ci sentiamo quando torni online',
+        'sent_at_ms': 1800000000000,
+        'is_outgoing': true,
+        'delivery_state': 'queued',
+      });
+      final bridge = SylphyMessagingBridge(core: core);
+      final queued = bridge.listMessages('contact-1').single;
+      expect(queued.deliveryState, DeliveryState.queued);
+      core.messages.single['delivery_state'] = 'sent';
+      final refreshed = (await bridge.refreshMessages('contact-1')).single;
+      expect(refreshed.deliveryState, DeliveryState.sent);
+      expect(refreshed.id, queued.id);
+      expect(refreshed.body, queued.body);
+      expect(queued.deliveryState, DeliveryState.queued);
+    },
+  );
 }
 
 class _FakeNativeCore implements NativeCoreApi {
@@ -92,6 +117,7 @@ class _FakeNativeCore implements NativeCoreApi {
   String? sentAttachmentBase64;
   int listConversationCalls = 0;
   int listMessageCalls = 0;
+  final messages = <Map<String, Object>>[];
 
   @override
   NativeCoreResponse ensureIdentity({
@@ -159,7 +185,7 @@ class _FakeNativeCore implements NativeCoreApi {
     return NativeCoreResponse(
       ok: true,
       code: 'ok',
-      data: {'conversation_id': conversationId, 'messages': const <Object>[]},
+      data: {'conversation_id': conversationId, 'messages': messages},
     );
   }
 

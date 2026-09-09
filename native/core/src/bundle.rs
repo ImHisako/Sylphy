@@ -102,6 +102,7 @@ impl PublicBundle {
         let mut capabilities = vec!["hybrid-x25519-mlkem768".to_owned()];
         if signal_pre_key.is_some() {
             capabilities.push("signal-libsignal-v1".to_owned());
+            capabilities.push("offline-mailbox-v1".to_owned());
         }
         let bundle = Self {
             version,
