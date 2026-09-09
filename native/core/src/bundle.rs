@@ -12,6 +12,8 @@ pub const SIGNATURE_LENGTH: usize = 64;
 pub const X25519_PUBLIC_KEY_LENGTH: usize = 32;
 pub const ML_KEM_768_PUBLIC_KEY_LENGTH: usize = 1184;
 pub const MAX_CAPABILITIES: usize = 16;
+// libsignal's DeviceId accepts only the inclusive range 1..=127.
+pub(crate) const MAX_SIGNAL_DEVICE_ID: u8 = 127;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignalPreKeyBundle {
@@ -29,7 +31,7 @@ pub struct SignalPreKeyBundle {
 impl SignalPreKeyBundle {
     pub fn validate(&self) -> CoreResult<()> {
         if self.registration_id == 0
-            || self.device_id == 0
+            || !(1..=MAX_SIGNAL_DEVICE_ID).contains(&self.device_id)
             || self.signed_pre_key_public.is_empty()
             || self.signed_pre_key_public.len() > 128
             || self.signed_pre_key_signature.is_empty()

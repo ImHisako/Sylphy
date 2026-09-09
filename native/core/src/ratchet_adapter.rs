@@ -52,7 +52,7 @@ mod signal {
     use zeroize::Zeroizing;
 
     use super::{CoreError, CoreResult, SignalPreKeyBundle};
-    use crate::{atomic_file, identity, vault};
+    use crate::{atomic_file, bundle::MAX_SIGNAL_DEVICE_ID, identity, vault};
 
     const STORE_VERSION: u8 = 2;
     const STORE_FILE: &str = "signal-account-v2.vault";
@@ -465,7 +465,7 @@ mod signal {
             .iter()
             .map(|(device_id, _)| *device_id)
             .collect::<HashSet<_>>();
-        let replacement = (1..=u8::MAX)
+        let replacement = (1..=MAX_SIGNAL_DEVICE_ID)
             .find(|candidate| !used.contains(candidate))
             .ok_or(CoreError::LimitExceeded)?;
         runtime
@@ -633,7 +633,7 @@ mod signal {
         );
         Ok(GlobalStore {
             version: STORE_VERSION,
-            device_id: rng.random::<u8>().max(1),
+            device_id: rng.random_range(1..=MAX_SIGNAL_DEVICE_ID),
             identity: PersistentIdentityStore {
                 key_pair: identity_pair.serialize().to_vec(),
                 registration_id,

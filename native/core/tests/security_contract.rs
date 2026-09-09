@@ -1,5 +1,5 @@
 use sylphy_core::{
-    bundle::generate_bundle_for_test,
+    bundle::{SignalPreKeyBundle, generate_bundle_for_test},
     envelope::{EnvelopeMetadata, EnvelopeType, open, seal},
     hybrid, vault,
 };
@@ -37,6 +37,32 @@ fn public_bundle_detects_tampering() {
     let mut modified = bundle;
     modified.signed_prekey_x25519[0] ^= 1;
     assert!(modified.validate().is_err());
+}
+
+#[test]
+fn signal_bundle_rejects_device_ids_outside_libsignal_range() {
+    let mut bundle = SignalPreKeyBundle {
+        registration_id: 1,
+        device_id: 1,
+        signed_pre_key_id: 1,
+        signed_pre_key_public: vec![1; 33],
+        signed_pre_key_signature: vec![2; 64],
+        kyber_pre_key_id: 1,
+        kyber_pre_key_public: vec![3; 1569],
+        kyber_pre_key_signature: vec![4; 64],
+        identity_key: vec![5; 33],
+    };
+    for device_id in 0..=u8::MAX {
+        bundle.device_id = device_id;
+        let valid = bundle.validate().is_ok();
+        assert_eq!(valid, (1..=127).contains(&device_id), "device {device_id}");
+        #[cfg(feature = "signal-ratchet")]
+        assert_eq!(
+            valid,
+            libsignal_protocol::DeviceId::new(device_id).is_ok(),
+            "libsignal device {device_id}"
+        );
+    }
 }
 
 #[test]
