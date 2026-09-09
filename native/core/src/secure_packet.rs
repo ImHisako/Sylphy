@@ -135,6 +135,14 @@ fn seal_for_device(
     )
 }
 
+#[cfg(all(test, feature = "signal-ratchet"))]
+pub(crate) fn seal_for_test(
+    recipient: &PublishedDevice,
+    plaintext: &str,
+) -> CoreResult<(Vec<u8>, String)> {
+    seal_for_device_with_route(recipient, plaintext, vec![23; 16], vec![1; 512])
+}
+
 fn seal_for_device_with_route(
     recipient: &PublishedDevice,
     plaintext: &str,
@@ -354,6 +362,17 @@ pub fn inspect(payload: &[u8]) -> CoreResult<InspectedPacket> {
         sender: packet.sender,
         sent_at_ms: packet.envelope.metadata.timestamp_logical,
     })
+}
+
+/// Validate a queued, already sealed packet without treating this account as
+/// its recipient. Backup validation runs before activating the imported identity.
+pub(crate) fn validate_stored_delivery(payload: &[u8]) -> CoreResult<()> {
+    if payload.is_empty() || payload.len() > MAX_PACKET_BYTES {
+        return Err(CoreError::LimitExceeded);
+    }
+    let packet: SecurePacket =
+        serde_json::from_slice(payload).map_err(|_| CoreError::InvalidInput)?;
+    packet.validate()
 }
 
 impl SecurePacket {

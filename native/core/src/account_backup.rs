@@ -36,8 +36,83 @@ struct AccountBackup {
 
 struct AccountRollback {
     directory: PathBuf,
+    journal: ImportJournal,
+}
+
+const IMPORT_JOURNAL: &str = ".account-transaction.json";
+
+#[derive(Deserialize, Serialize)]
+struct ImportJournal {
+    version: u8,
+    suffix: u64,
+    committed: bool,
     had_identity: bool,
     had_messaging: bool,
+}
+
+fn save_journal(root: &Path, journal: &ImportJournal) -> CoreResult<()> {
+    crate::atomic_file::replace(
+        &root.join(IMPORT_JOURNAL),
+        &serde_json::to_vec(journal).map_err(|_| CoreError::Internal)?,
+    )
+}
+
+/// Runs before opening or creating an identity. Recovery is idempotent even
+/// if the process stops during rollback itself. The journal stores no secrets
+/// and no caller-controlled paths.
+pub(crate) fn recover_pending_import(root: &Path) -> CoreResult<()> {
+    let path = root.join(IMPORT_JOURNAL);
+    if !path.exists() {
+        return Ok(());
+    }
+    if fs::metadata(&path).map_err(|_| CoreError::Internal)?.len() > 1024 {
+        return Err(CoreError::VerificationFailed);
+    }
+    let journal: ImportJournal =
+        serde_json::from_slice(&fs::read(&path).map_err(|_| CoreError::Internal)?)
+            .map_err(|_| CoreError::VerificationFailed)?;
+    if journal.version != 1 {
+        return Err(CoreError::UnsupportedVersion);
+    }
+    let rollback = root.join(format!(".account-rollback-{}", journal.suffix));
+    let staging = root.join(format!(".account-import-{}", journal.suffix));
+    for (name, had_previous) in [
+        ("identity", journal.had_identity),
+        ("messaging", journal.had_messaging),
+    ] {
+        let current = root.join(name);
+        let previous = rollback.join(name);
+        if journal.committed {
+            if !current.is_dir() {
+                return Err(CoreError::VerificationFailed);
+            }
+        } else if previous.exists() {
+            if current.exists() {
+                fs::remove_dir_all(&current).map_err(|_| CoreError::Internal)?;
+            }
+            durable_rename(&previous, &current)?;
+        } else if had_previous {
+            // Still in place, or already restored by an interrupted recovery.
+            if !current.is_dir() {
+                return Err(CoreError::VerificationFailed);
+            }
+        } else if current.exists() {
+            fs::remove_dir_all(&current).map_err(|_| CoreError::Internal)?;
+        }
+    }
+    for directory in [rollback, staging] {
+        if directory.exists() {
+            fs::remove_dir_all(directory).map_err(|_| CoreError::Internal)?;
+        }
+    }
+    fs::remove_file(path).map_err(|_| CoreError::Internal)?;
+    crate::atomic_file::sync_parent(root)
+}
+
+fn durable_rename(source: &Path, destination: &Path) -> CoreResult<()> {
+    fs::rename(source, destination).map_err(|_| CoreError::Internal)?;
+    crate::atomic_file::sync_parent(source.parent().ok_or(CoreError::Internal)?)?;
+    crate::atomic_file::sync_parent(destination.parent().ok_or(CoreError::Internal)?)
 }
 
 pub fn export(
@@ -109,6 +184,7 @@ pub fn import(
 
     let root = PathBuf::from(storage_directory);
     fs::create_dir_all(&root).map_err(|_| CoreError::Internal)?;
+    recover_pending_import(&root)?;
     let suffix = current_time_ms()?;
     let staging = root.join(format!(".account-import-{suffix}"));
     if staging.exists() {
@@ -127,7 +203,7 @@ pub fn import(
         return Err(error);
     }
 
-    let rollback = match install_staged_account(&root, &staging, suffix) {
+    let mut rollback = match install_staged_account(&root, &staging, suffix) {
         Ok(value) => value,
         Err(error) => {
             let _ = fs::remove_dir_all(&staging);
@@ -140,15 +216,20 @@ pub fn import(
         messaging_adapter::configure_storage(storage_directory)
     })();
     if let Err(error) = activated {
-        let restore_result = restore_account(&root, &rollback);
+        let restore_result = recover_pending_import(&root);
         reactivate_existing_account(storage_directory, vault_password);
         restore_result?;
         return Err(error);
     }
+    rollback.journal.committed = true;
+    if let Err(error) = save_journal(&root, &rollback.journal) {
+        recover_pending_import(&root)?;
+        reactivate_existing_account(storage_directory, vault_password);
+        return Err(error);
+    }
     // The imported account is already active at this point. Cleanup failure
     // must not make the caller believe that the import itself failed.
-    let _ = fs::remove_dir_all(&rollback.directory);
-    let _ = fs::remove_dir_all(&staging);
+    let _ = recover_pending_import(&root);
     Ok(json!({
         "display_name": backup.display_name,
         "avatar_base64": backup.avatar_base64,
@@ -188,74 +269,37 @@ fn install_staged_account(root: &Path, staging: &Path, suffix: u64) -> CoreResul
 
     let rollback_directory = root.join(format!(".account-rollback-{suffix}"));
     fs::create_dir(&rollback_directory).map_err(|_| CoreError::Internal)?;
-    let mut rollback = AccountRollback {
+    let rollback = AccountRollback {
         directory: rollback_directory,
-        had_identity: false,
-        had_messaging: false,
+        journal: ImportJournal {
+            version: 1,
+            suffix,
+            committed: false,
+            had_identity: root.join("identity").exists(),
+            had_messaging: root.join("messaging").exists(),
+        },
     };
+    save_journal(root, &rollback.journal)?;
 
     // Move the complete previous account aside before installing any part of
     // the new one. This prevents a mixed identity/messaging state.
     for name in ["identity", "messaging"] {
         let current = root.join(name);
         if current.exists() {
-            if fs::rename(&current, rollback.directory.join(name)).is_err() {
-                restore_moved_previous(root, &rollback)?;
+            if durable_rename(&current, &rollback.directory.join(name)).is_err() {
+                recover_pending_import(root)?;
                 return Err(CoreError::Internal);
-            }
-            match name {
-                "identity" => rollback.had_identity = true,
-                "messaging" => rollback.had_messaging = true,
-                _ => unreachable!(),
             }
         }
     }
 
     for name in ["identity", "messaging"] {
-        if fs::rename(staging.join(name), root.join(name)).is_err() {
-            restore_account(root, &rollback)?;
+        if durable_rename(&staging.join(name), &root.join(name)).is_err() {
+            recover_pending_import(root)?;
             return Err(CoreError::Internal);
         }
     }
     Ok(rollback)
-}
-
-fn restore_moved_previous(root: &Path, rollback: &AccountRollback) -> CoreResult<()> {
-    for (name, was_moved) in [
-        ("identity", rollback.had_identity),
-        ("messaging", rollback.had_messaging),
-    ] {
-        if was_moved {
-            fs::rename(rollback.directory.join(name), root.join(name))
-                .map_err(|_| CoreError::Internal)?;
-        }
-    }
-    if rollback.directory.exists() {
-        fs::remove_dir_all(&rollback.directory).map_err(|_| CoreError::Internal)?;
-    }
-    Ok(())
-}
-
-fn restore_account(root: &Path, rollback: &AccountRollback) -> CoreResult<()> {
-    for name in ["identity", "messaging"] {
-        let current = root.join(name);
-        if current.exists() {
-            fs::remove_dir_all(&current).map_err(|_| CoreError::Internal)?;
-        }
-        let had_previous = match name {
-            "identity" => rollback.had_identity,
-            "messaging" => rollback.had_messaging,
-            _ => unreachable!(),
-        };
-        let previous = rollback.directory.join(name);
-        if had_previous {
-            fs::rename(previous, current).map_err(|_| CoreError::Internal)?;
-        }
-    }
-    if rollback.directory.exists() {
-        fs::remove_dir_all(&rollback.directory).map_err(|_| CoreError::Internal)?;
-    }
-    Ok(())
 }
 
 fn reactivate_existing_account(storage_directory: &str, vault_password: &str) {
@@ -277,4 +321,102 @@ fn current_time_ms() -> CoreResult<u64> {
         .duration_since(UNIX_EPOCH)
         .map_err(|_| CoreError::Internal)?;
     u64::try_from(elapsed.as_millis()).map_err(|_| CoreError::Internal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_handles_every_install_boundary_and_repeated_startup() {
+        for existing in [false, true] {
+            for boundary in 0..=4 {
+                let root = std::env::temp_dir().join(format!(
+                    "sylphy-import-recovery-{}-{existing}-{boundary}",
+                    std::process::id()
+                ));
+                fs::create_dir_all(&root).unwrap();
+                let staging = root.join(".account-import-1");
+                let rollback = root.join(".account-rollback-1");
+                fs::create_dir_all(&rollback).unwrap();
+                for name in ["identity", "messaging"] {
+                    fs::create_dir_all(staging.join(name)).unwrap();
+                    fs::write(staging.join(name).join("marker"), b"new").unwrap();
+                    if existing {
+                        fs::create_dir_all(root.join(name)).unwrap();
+                        fs::write(root.join(name).join("marker"), b"old").unwrap();
+                    }
+                }
+                save_journal(
+                    &root,
+                    &ImportJournal {
+                        version: 1,
+                        suffix: 1,
+                        committed: false,
+                        had_identity: existing,
+                        had_messaging: existing,
+                    },
+                )
+                .unwrap();
+                for (step, name) in ["identity", "messaging"].iter().enumerate() {
+                    if existing && boundary > step {
+                        durable_rename(&root.join(name), &rollback.join(name)).unwrap();
+                    }
+                    if boundary > step + 2 {
+                        durable_rename(&staging.join(name), &root.join(name)).unwrap();
+                    }
+                }
+                recover_pending_import(&root).unwrap();
+                recover_pending_import(&root).unwrap();
+                for name in ["identity", "messaging"] {
+                    if existing {
+                        assert_eq!(fs::read(root.join(name).join("marker")).unwrap(), b"old");
+                    } else {
+                        assert!(!root.join(name).exists());
+                    }
+                }
+                assert!(!root.join(IMPORT_JOURNAL).exists());
+                fs::remove_dir_all(&root).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn committed_import_keeps_new_account_and_interrupted_rollback_keeps_old() {
+        for committed in [false, true] {
+            let root = std::env::temp_dir().join(format!(
+                "sylphy-import-commit-{}-{committed}",
+                std::process::id()
+            ));
+            let staging = root.join(".account-import-2");
+            for name in ["identity", "messaging"] {
+                fs::create_dir_all(root.join(name)).unwrap();
+                fs::write(root.join(name).join("marker"), b"old").unwrap();
+                fs::create_dir_all(staging.join(name)).unwrap();
+                fs::write(staging.join(name).join("marker"), b"new").unwrap();
+            }
+            let mut transaction = install_staged_account(&root, &staging, 2).unwrap();
+            if committed {
+                transaction.journal.committed = true;
+                save_journal(&root, &transaction.journal).unwrap();
+            } else {
+                // Simulate termination after restoring the first directory.
+                fs::remove_dir_all(root.join("identity")).unwrap();
+                durable_rename(
+                    &transaction.directory.join("identity"),
+                    &root.join("identity"),
+                )
+                .unwrap();
+            }
+            recover_pending_import(&root).unwrap();
+            recover_pending_import(&root).unwrap();
+            for name in ["identity", "messaging"] {
+                assert_eq!(
+                    fs::read(root.join(name).join("marker")).unwrap(),
+                    if committed { b"new" } else { b"old" }
+                );
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
 }

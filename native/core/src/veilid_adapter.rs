@@ -51,6 +51,7 @@ pub struct VeilidNodeStatus {
     pub public_internet_ready: bool,
     pub live_peer_count: String,
     pub pending_inbound_envelopes: usize,
+    pub route_needs_publish: bool,
 }
 
 impl VeilidNodeStatus {
@@ -63,6 +64,7 @@ impl VeilidNodeStatus {
             public_internet_ready: false,
             live_peer_count: "0".to_owned(),
             pending_inbound_envelopes: 0,
+            route_needs_publish: false,
         }
     }
 
@@ -75,6 +77,7 @@ impl VeilidNodeStatus {
             public_internet_ready: false,
             live_peer_count: "0".to_owned(),
             pending_inbound_envelopes: 0,
+            route_needs_publish: false,
         }
     }
 }
@@ -91,7 +94,8 @@ pub struct VeilidNode {
     api: veilid_core::VeilidAPI,
     inbound_envelopes: Arc<Mutex<VecDeque<InboundPayload>>>,
     seen_mailbox_slots: Arc<Mutex<HashMap<u32, Vec<u8>>>>,
-    private_route: Option<veilid_core::RouteBlob>,
+    private_route: Arc<Mutex<Option<veilid_core::RouteBlob>>>,
+    route_needs_publish: Arc<std::sync::atomic::AtomicBool>,
     mailbox_task: Option<tokio::task::JoinHandle<()>>,
     offline_task: Option<tokio::task::JoinHandle<()>>,
     offline_targets: Arc<Mutex<Vec<crate::offline_mailbox::MailboxKeys>>>,
@@ -105,11 +109,27 @@ impl VeilidNode {
         let inbound_envelopes = Arc::new(Mutex::new(VecDeque::new()));
         let seen_mailbox_slots = Arc::new(Mutex::new(HashMap::new()));
         let callback_inbox = Arc::clone(&inbound_envelopes);
+        let private_route: Arc<Mutex<Option<veilid_core::RouteBlob>>> = Arc::new(Mutex::new(None));
+        let callback_route = Arc::clone(&private_route);
+        let route_needs_publish = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_dirty = Arc::clone(&route_needs_publish);
         let api = veilid_core::api_startup(
-            Arc::new(move |update| {
-                if let veilid_core::VeilidUpdate::AppMessage(message) = update {
+            Arc::new(move |update| match update {
+                veilid_core::VeilidUpdate::AppMessage(message) => {
                     enqueue_inbound_envelope(&callback_inbox, message.message(), None);
                 }
+                veilid_core::VeilidUpdate::RouteChange(change) => {
+                    if let Ok(mut route) = callback_route.lock() {
+                        if route
+                            .as_ref()
+                            .is_some_and(|route| change.dead_routes.contains(&route.route_id))
+                        {
+                            *route = None;
+                            callback_dirty.store(true, std::sync::atomic::Ordering::Release);
+                        }
+                    }
+                }
+                _ => {}
             }),
             config,
         )
@@ -131,7 +151,8 @@ impl VeilidNode {
             api,
             inbound_envelopes,
             seen_mailbox_slots,
-            private_route: None,
+            private_route,
+            route_needs_publish,
             mailbox_task: None,
             offline_task: Some(offline_task),
             offline_targets,
@@ -144,7 +165,8 @@ impl VeilidNode {
             api,
             inbound_envelopes: Arc::new(Mutex::new(VecDeque::new())),
             seen_mailbox_slots: Arc::new(Mutex::new(HashMap::new())),
-            private_route: None,
+            private_route: Arc::new(Mutex::new(None)),
+            route_needs_publish: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mailbox_task: None,
             offline_task: None,
             offline_targets: Arc::new(Mutex::new(Vec::new())),
@@ -164,6 +186,9 @@ impl VeilidNode {
             attachment_state: state.attachment.state.to_string(),
             public_internet_ready: state.attachment.public_internet_ready,
             live_peer_count: state.attachment.live_peer_count.to_string(),
+            route_needs_publish: self
+                .route_needs_publish
+                .load(std::sync::atomic::Ordering::Acquire),
             pending_inbound_envelopes: self
                 .inbound_envelopes
                 .lock()
@@ -181,11 +206,11 @@ impl VeilidNode {
     pub async fn create_private_route(
         &mut self,
     ) -> Result<veilid_core::RouteBlob, veilid_core::VeilidAPIError> {
-        if let Some(route) = &self.private_route {
-            return Ok(route.clone());
+        if let Some(route) = self.private_route.lock().expect("route lock").clone() {
+            return Ok(route);
         }
         let route = self.api.new_private_route().await?;
-        self.private_route = Some(route.clone());
+        *self.private_route.lock().expect("route lock") = Some(route.clone());
         Ok(route)
     }
 
@@ -281,6 +306,19 @@ pub fn publish_identity(
         .block_on(routing.close_dht_record(key.clone()))
         .map_err(|_| CoreError::NetworkStartupFailed);
     written.and(closed)?;
+    if let Ok(state) = lock_runtime() {
+        if let Some(node) = &state.node {
+            if let Ok(route) = node.private_route.lock() {
+                if route
+                    .as_ref()
+                    .is_some_and(|route| route.blob == identity.route_blob)
+                {
+                    node.route_needs_publish
+                        .store(false, std::sync::atomic::Ordering::Release);
+                }
+            }
+        }
+    }
     let persisted = serde_json::to_string(&descriptor).map_err(|_| CoreError::Internal)?;
     Ok((format!("sylphy:{key}"), persisted))
 }
@@ -320,6 +358,18 @@ pub fn resolve_identity(code: &str) -> CoreResult<PublishedIdentity> {
         serde_json::from_slice(value.data()).map_err(|_| CoreError::VerificationFailed)?;
     identity.validate()?;
     Ok(identity)
+}
+
+#[cfg(feature = "veilid")]
+pub(crate) fn owned_identity_code(descriptor: &str) -> CoreResult<String> {
+    let descriptor: veilid_core::DHTRecordDescriptor =
+        serde_json::from_str(descriptor).map_err(|_| CoreError::VerificationFailed)?;
+    Ok(format!("sylphy:{}", descriptor.key()))
+}
+
+#[cfg(not(feature = "veilid"))]
+pub(crate) fn owned_identity_code(_descriptor: &str) -> CoreResult<String> {
+    Err(CoreError::FeatureUnavailable)
 }
 
 #[cfg(feature = "veilid")]
@@ -594,9 +644,24 @@ async fn poll_mailbox_once(
 
 #[cfg(feature = "veilid")]
 pub fn publish_attachment_blob(data: &[u8]) -> CoreResult<(String, u16)> {
+    publish_blob_with_limit(data, MAX_ATTACHMENT_BLOB_BYTES)
+}
+
+#[cfg(feature = "veilid")]
+pub(crate) fn publish_sync_blob(data: &[u8]) -> CoreResult<(String, u16)> {
+    publish_blob_with_limit(data, 3 * 1024 * 1024)
+}
+
+#[cfg(not(feature = "veilid"))]
+pub(crate) fn publish_sync_blob(_data: &[u8]) -> CoreResult<(String, u16)> {
+    Err(CoreError::FeatureUnavailable)
+}
+
+#[cfg(feature = "veilid")]
+fn publish_blob_with_limit(data: &[u8], max_bytes: usize) -> CoreResult<(String, u16)> {
     use veilid_core::{CRYPTO_KIND_VLD0, DHTSchema};
 
-    if data.is_empty() || data.len() > MAX_ATTACHMENT_BLOB_BYTES {
+    if data.is_empty() || data.len() > max_bytes {
         return Err(CoreError::LimitExceeded);
     }
     let chunk_count = data.len().div_ceil(ATTACHMENT_CHUNK_BYTES);
@@ -641,7 +706,7 @@ pub fn delete_attachment_blob(record_key: &str, chunk_count: u16) -> CoreResult<
     use std::str::FromStr as _;
     use veilid_core::RecordKey;
 
-    if chunk_count == 0 || chunk_count > MAX_ATTACHMENT_CHUNKS {
+    if chunk_count == 0 || chunk_count > 128 {
         return Err(CoreError::InvalidInput);
     }
     let key = RecordKey::from_str(record_key).map_err(|_| CoreError::InvalidInput)?;
@@ -661,10 +726,35 @@ pub fn delete_attachment_blob(_record_key: &str, _chunk_count: u16) -> CoreResul
 
 #[cfg(feature = "veilid")]
 pub fn fetch_attachment_blob(record_key: &str, chunk_count: u16) -> CoreResult<Vec<u8>> {
+    fetch_blob_with_limit(
+        record_key,
+        chunk_count,
+        MAX_ATTACHMENT_CHUNKS,
+        MAX_ATTACHMENT_BLOB_BYTES,
+    )
+}
+
+#[cfg(feature = "veilid")]
+pub(crate) fn fetch_sync_blob(record_key: &str, chunk_count: u16) -> CoreResult<Vec<u8>> {
+    fetch_blob_with_limit(record_key, chunk_count, 128, 3 * 1024 * 1024)
+}
+
+#[cfg(not(feature = "veilid"))]
+pub(crate) fn fetch_sync_blob(_record_key: &str, _chunk_count: u16) -> CoreResult<Vec<u8>> {
+    Err(CoreError::FeatureUnavailable)
+}
+
+#[cfg(feature = "veilid")]
+fn fetch_blob_with_limit(
+    record_key: &str,
+    chunk_count: u16,
+    max_chunks: u16,
+    max_bytes: usize,
+) -> CoreResult<Vec<u8>> {
     use std::str::FromStr as _;
     use veilid_core::RecordKey;
 
-    if chunk_count == 0 || chunk_count > MAX_ATTACHMENT_CHUNKS {
+    if chunk_count == 0 || chunk_count > max_chunks {
         return Err(CoreError::InvalidInput);
     }
     let key = RecordKey::from_str(record_key).map_err(|_| CoreError::InvalidInput)?;
@@ -683,7 +773,7 @@ pub fn fetch_attachment_blob(record_key: &str, chunk_count: u16) -> CoreResult<V
                 .map_err(|_| CoreError::NetworkStartupFailed)?
                 .ok_or(CoreError::NetworkAttachFailed)?;
             data.extend_from_slice(value.data());
-            if data.len() > MAX_ATTACHMENT_BLOB_BYTES {
+            if data.len() > max_bytes {
                 return Err(CoreError::LimitExceeded);
             }
         }

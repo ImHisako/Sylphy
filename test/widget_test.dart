@@ -10,6 +10,65 @@ import 'package:sylphy/core/profile/user_profile.dart';
 import 'package:sylphy/main.dart';
 
 void main() {
+  testWidgets(
+    'mobile chat shares the home inbox poll and still receives messages',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(390, 844));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final bridge = _NotifyingTestMessagingBridge();
+      await tester.pumpWidget(
+        SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Contatto di test'));
+      await tester.pumpAndSettle();
+      final before = bridge.refreshCount;
+      bridge.injectIncoming('Un solo polling');
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+      expect(bridge.refreshCount - before, 1);
+      expect(find.text('Un solo polling'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+      expect(bridge.inboxChanges.hasSubscribers, isFalse);
+      bridge.inboxChanges.dispose();
+    },
+  );
+
+  testWidgets(
+    'desktop updates delivery state without reloading the conversation preview',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1280, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final bridge = _NotifyingTestMessagingBridge();
+      bridge._messages.add(
+        ChatMessage(
+          id: 'queued-test',
+          authorId: 'me',
+          body: 'In attesa',
+          sentAt: DateTime(2026),
+          isOutgoing: true,
+          deliveryState: DeliveryState.queued,
+        ),
+      );
+      await tester.pumpWidget(
+        SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip(DeliveryState.queued.label), findsOneWidget);
+      bridge._messages[0] = bridge._messages[0].copyWith(
+        deliveryState: DeliveryState.sent,
+      );
+      bridge._inboxRevision++;
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+      expect(find.byTooltip(DeliveryState.sent.label), findsOneWidget);
+      expect(find.byTooltip(DeliveryState.queued.label), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+      expect(bridge.inboxChanges.hasSubscribers, isFalse);
+      bridge.inboxChanges.dispose();
+    },
+  );
+
   testWidgets('uses readable text in floating notifications', (tester) async {
     await tester.pumpWidget(SylphyApp(profileStore: _completedProfileStore()));
     await tester.pumpAndSettle();
@@ -451,6 +510,25 @@ class _MemoryProfileStore implements UserProfileStore {
       displayName: displayName.trim(),
       photoBytes: photoBytes,
     );
+  }
+}
+
+class _TestRevisionNotifier extends ValueNotifier<int> {
+  _TestRevisionNotifier() : super(0);
+
+  bool get hasSubscribers => hasListeners;
+}
+
+class _NotifyingTestMessagingBridge extends _TestMessagingBridge
+    implements InboxRevisionNotifications {
+  @override
+  final _TestRevisionNotifier inboxChanges = _TestRevisionNotifier();
+
+  @override
+  Future<int> refreshInbox() async {
+    final revision = await super.refreshInbox();
+    inboxChanges.value = revision;
+    return revision;
   }
 }
 

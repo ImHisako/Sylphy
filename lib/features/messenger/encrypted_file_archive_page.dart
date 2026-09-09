@@ -78,14 +78,12 @@ class _EncryptedFileArchivePageState extends State<EncryptedFileArchivePage> {
     var messages = await bridge.refreshMessages(conversationId, priority: true);
     // The native bridge pages old records. Load every page so this is an
     // archive, rather than merely a view of the most recent chat page.
-    for (
-      var page = 0;
-      page < 100 && bridge.hasOlderMessages(conversationId);
-      page++
-    ) {
+    while (mounted && bridge.hasOlderMessages(conversationId)) {
       final previousLength = messages.length;
       messages = await bridge.loadOlderMessages(conversationId);
-      if (messages.length <= previousLength) break;
+      if (messages.length <= previousLength) {
+        throw StateError('Archive pagination made no progress');
+      }
     }
     return messages;
   }

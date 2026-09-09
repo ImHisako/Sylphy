@@ -50,7 +50,7 @@ Sylphy uses three main primitives:
    provide storage for signed identities, device journals and encrypted chunks
    without a central database. Records are eventually consistent.
 3. **Application messages.** Sylphy attempts direct delivery through
-   `AppMessage` when a peer is reachable. Updated clients also deposit encrypted
+   `AppMessage` when a peer is reachable. If direct handoff fails, updated clients deposit encrypted
    packets in a mailbox specific to the contact pair so recipients can retrieve
    them when they return online.
 
@@ -123,8 +123,8 @@ flowchart TB
    ciphertext. The outer envelope also applies Sylphy authentication and the
    hybrid X25519 + ML-KEM-768 scheme.
 4. The core persists the session, local message and encrypted outgoing packet.
-5. Background network work attempts direct delivery and, for peers advertising
-   `offline-mailbox-v1`, deposits the encrypted packet in their contact mailbox.
+5. Background network work attempts direct delivery and, if it fails, for peers
+   advertising `offline-mailbox-v1`, deposits the encrypted packet in their contact mailbox.
    Failed attempts remain queued and retry automatically, including after a
    restart. Older peers retain the direct-delivery path.
 
@@ -164,8 +164,8 @@ rejected and must republish their ID.
 
 Two updated clients that have already added each other's IDs can exchange
 messages without being online at the same time. The sender first saves the
-message in its encrypted local outbox. A worker attempts direct delivery and
-stores the encrypted packet in the Veilid mailbox. Once the deposit is
+message in its encrypted local outbox. A worker attempts direct delivery and,
+if it fails, stores the encrypted packet in the Veilid mailbox. Once the deposit is
 confirmed, the sender can close Sylphy. The recipient retrieves messages on
 returning online within the **7-day retention window**, subject to the records
 remaining available in the DHT.
@@ -260,6 +260,9 @@ cargo check --locked --manifest-path native/core/Cargo.toml --features veilid,si
 ```
 
 ## Known limitations
+
+See [September reliability fixes](specs/reliability.md) for backup recovery,
+linked-device synchronization, chat pagination, and Android signing setup.
 
 - The protocol and implementation have not undergone an independent audit.
 - Attachments are limited to 700 KiB.

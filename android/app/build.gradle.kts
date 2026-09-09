@@ -15,6 +15,12 @@ if (releaseSigningFile.exists()) {
 }
 val hasReleaseSigning = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
     .all { !releaseSigningProperties.getProperty(it).isNullOrBlank() }
+val allowDevelopmentSigning = System.getenv("SYLPHY_ALLOW_DEBUG_SIGNING") == "true"
+val buildingRelease = gradle.startParameter.taskNames.any { it.contains("release", ignoreCase = true) }
+check(!buildingRelease || hasReleaseSigning || allowDevelopmentSigning) {
+    "Release signing is missing. Configure android/key.properties with the existing release key. " +
+        "For local development only, explicitly set SYLPHY_ALLOW_DEBUG_SIGNING=true."
+}
 
 fun sha256(file: File): String {
     val digest = MessageDigest.getInstance("SHA-256")
@@ -112,10 +118,12 @@ android {
 
     buildTypes {
         release {
-            // Local development remains installable without secrets. Published
-            // builds must keep key.properties (and its keystore) for every
-            // future version so Android can update in place.
-            signingConfig = signingConfigs.getByName(if (hasReleaseSigning) "release" else "debug")
+            // Debug signing is allowed only by explicit development opt-in.
+            signingConfig = when {
+                hasReleaseSigning -> signingConfigs.getByName("release")
+                allowDevelopmentSigning -> signingConfigs.getByName("debug")
+                else -> null
+            }
             // Veilid's Android protected store reaches AndroidX Security through
             // JNI/reflection, so R8 cannot discover those references itself.
             proguardFiles(

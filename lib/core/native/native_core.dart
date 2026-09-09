@@ -99,7 +99,17 @@ abstract interface class NativeCoreGroupApi {
   });
 }
 
-class NativeCoreClient implements NativeCoreApi, NativeCoreGroupApi {
+abstract interface class NativeCoreMessagePageApi {
+  Future<NativeCoreResponse> listMessagesInBackground(
+    String conversationId, {
+    bool priority = false,
+    int? beforeMs,
+    String? beforeId,
+  });
+}
+
+class NativeCoreClient
+    implements NativeCoreApi, NativeCoreGroupApi, NativeCoreMessagePageApi {
   NativeCoreClient._(this._call, this._freeString, this.abiVersion);
 
   final _DartCall _call;
@@ -225,6 +235,7 @@ class NativeCoreClient implements NativeCoreApi, NativeCoreGroupApi {
     });
   }
 
+  @override
   Future<NativeCoreResponse> listMessagesInBackground(
     String conversationId, {
     bool priority = false,
@@ -532,15 +543,22 @@ class NativeCoreClient implements NativeCoreApi, NativeCoreGroupApi {
       final timeout = command == 'export_account' || command == 'import_account'
           ? const Duration(minutes: 2)
           : const Duration(seconds: 30);
-      final response = await responsePort.first.timeout(timeout);
+      // A timeout cannot cancel a native mutation. Keep its result and its
+      // place in the queue until completion, including during account import.
+      final response = await awaitNativeOperation(
+        responsePort.first,
+        warningAfter: timeout,
+        onSlow: () => AppLog.instance.record(
+          category: 'native_core',
+          action: 'background_call_still_running:$command',
+          level: AppLogLevel.warning,
+          force: true,
+        ),
+      );
       if (response is Map) {
         return NativeCoreResponse.fromJson(response.cast<String, dynamic>());
       }
       throw const NativeCoreException('Risposta non valida dal worker nativo.');
-    } on TimeoutException {
-      throw const NativeCoreException(
-        'Il core nativo sta ancora completando l’operazione. Riprova più tardi.',
-      );
     } on Object {
       worker.isolate.kill(priority: Isolate.immediate);
       _worker = null;
@@ -638,6 +656,21 @@ class NativeCoreClient implements NativeCoreApi, NativeCoreGroupApi {
         _freeString(responsePointer);
       }
     }
+  }
+}
+
+/// A slow operation remains pending: callers must never infer rollback from
+/// elapsed time. Separated from FFI so delayed commits can be regression tested.
+Future<T> awaitNativeOperation<T>(
+  Future<T> operation, {
+  required Duration warningAfter,
+  required void Function() onSlow,
+}) async {
+  final warning = Timer(warningAfter, onSlow);
+  try {
+    return await operation;
+  } finally {
+    warning.cancel();
   }
 }
 

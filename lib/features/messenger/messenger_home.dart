@@ -56,6 +56,7 @@ class _MessengerHomeState extends State<MessengerHome>
   Timer? _inboxTimer;
   List<Conversation> _conversations = const [];
   String _conversationSignature = '';
+  bool _storageWarningShown = false;
   Map<String, int> _unreadCounts = const {};
   bool _isRefreshingInbox = false;
   bool _isLoadingConversations = false;
@@ -196,6 +197,19 @@ class _MessengerHomeState extends State<MessengerHome>
         final revision = await (bridge as InboxRefreshingBridge).refreshInbox();
         revisionChanged = revision != _lastInboxRevision;
         _lastInboxRevision = revision;
+        final storageFull =
+            bridge is InboxStorageStatus &&
+            (bridge as InboxStorageStatus).inboxStorageFull;
+        if (mounted && storageFull && !_storageWarningShown) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Archivio dei messaggi pieno. Libera spazio per riprendere la ricezione; i messaggi in attesa non sono stati scartati.',
+              ),
+            ),
+          );
+        }
+        _storageWarningShown = storageFull;
       }
     } on Object catch (error) {
       AppLog.instance.recordError(
@@ -377,6 +391,10 @@ class _MessengerHomeState extends State<MessengerHome>
       final message = switch (error.code) {
         'feature_unavailable' => 'Lo storage sicuro non è ancora pronto.',
         'limit_exceeded' => 'Troppi membri oppure gruppo troppo grande.',
+        'unsupported_version' =>
+          'Per creare il gruppo, tutti i partecipanti devono aggiornare Sylphy e riaprire l’app sui dispositivi collegati.',
+        'network_attach_failed' || 'network_startup_failed' =>
+          'Impossibile pubblicare l’invito del gruppo. Controlla la connessione e riprova.',
         'verification_failed' =>
           'Uno dei codici invito non è valido o è duplicato.',
         _ => 'Impossibile creare il gruppo.',
@@ -1201,6 +1219,8 @@ class _ChatPaneState extends State<_ChatPane> {
   bool _isLoadingMessages = false;
   bool _isLoadingOlder = false;
   int _messageLoadGeneration = 0;
+  int _conversationGeneration = 0;
+  ValueListenable<int>? _inboxChanges;
 
   @override
   void initState() {
@@ -1224,9 +1244,21 @@ class _ChatPaneState extends State<_ChatPane> {
     } else {
       _reloadMessages(force: true);
     }
+    _configureInboxUpdates();
+  }
+
+  void _configureInboxUpdates() {
+    _messageTimer?.cancel();
+    _messageTimer = null;
+    _inboxChanges?.removeListener(_onInboxRevisionChanged);
+    _inboxChanges = null;
+    final bridge = widget.bridge;
     if (bridge is InboxRefreshingBridge) {
       _lastInboxRevision = (bridge as InboxRefreshingBridge).inboxRevision;
-      if (!widget.showHeader) {
+      if (bridge is InboxRevisionNotifications) {
+        _inboxChanges = (bridge as InboxRevisionNotifications).inboxChanges;
+        _inboxChanges!.addListener(_onInboxRevisionChanged);
+      } else if (!widget.showHeader) {
         _messageTimer = Timer.periodic(
           const Duration(seconds: 3),
           (_) => _refreshMessagesFromNetwork(),
@@ -1235,11 +1267,24 @@ class _ChatPaneState extends State<_ChatPane> {
     }
   }
 
+  void _onInboxRevisionChanged() {
+    final revision = _inboxChanges?.value;
+    if (!mounted || revision == null || revision == _lastInboxRevision) return;
+    _lastInboxRevision = revision;
+    unawaited(_reloadMessagesAsync());
+  }
+
   @override
   void didUpdateWidget(covariant _ChatPane oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.conversation.id != widget.conversation.id) {
+    if (oldWidget.bridge != widget.bridge ||
+        oldWidget.showHeader != widget.showHeader) {
+      _configureInboxUpdates();
+    }
+    if (oldWidget.conversation.id != widget.conversation.id ||
+        oldWidget.bridge != widget.bridge) {
       _messageLoadGeneration++;
+      _conversationGeneration++;
       _composerController.clear();
       _optimisticMessages.clear();
       _lastAcknowledgedIncomingId = null;
@@ -1299,6 +1344,7 @@ class _ChatPaneState extends State<_ChatPane> {
   @override
   void dispose() {
     _messageTimer?.cancel();
+    _inboxChanges?.removeListener(_onInboxRevisionChanged);
     _messageScrollController.dispose();
     _composerController.dispose();
     super.dispose();
@@ -1333,10 +1379,17 @@ class _ChatPaneState extends State<_ChatPane> {
   Future<void> _loadOlderMessages() async {
     final bridge = widget.bridge;
     if (bridge is! CachedMessagingBridge || _isLoadingOlder) return;
+    final conversationId = widget.conversation.id;
+    final generation = _conversationGeneration;
     setState(() => _isLoadingOlder = true);
     try {
-      final messages = await bridge.loadOlderMessages(widget.conversation.id);
-      if (mounted) _applyMessages(messages, force: true);
+      final messages = await bridge.loadOlderMessages(conversationId);
+      if (mounted &&
+          widget.bridge == bridge &&
+          widget.conversation.id == conversationId &&
+          generation == _conversationGeneration) {
+        _applyMessages(messages, force: true);
+      }
     } on Object catch (error) {
       AppLog.instance.recordError(
         category: 'messenger',
@@ -1344,7 +1397,12 @@ class _ChatPaneState extends State<_ChatPane> {
         error: error,
       );
     } finally {
-      if (mounted) setState(() => _isLoadingOlder = false);
+      if (mounted &&
+          widget.bridge == bridge &&
+          widget.conversation.id == conversationId &&
+          generation == _conversationGeneration) {
+        setState(() => _isLoadingOlder = false);
+      }
     }
   }
 
@@ -1466,7 +1524,8 @@ class _ChatPaneState extends State<_ChatPane> {
       );
       if (mounted) {
         setState(() => _optimisticMessages.remove(optimistic));
-        if (widget.conversation.id == conversationId) {
+        if (widget.conversation.id == conversationId &&
+            _composerController.text.isEmpty) {
           _composerController.text = text;
           _composerController.selection = TextSelection.collapsed(
             offset: _composerController.text.length,
@@ -1609,19 +1668,49 @@ class _ChatPaneState extends State<_ChatPane> {
                     controller: _messageScrollController,
                     reverse: true,
                     padding: const EdgeInsets.fromLTRB(22, 20, 22, 12),
-                    itemCount: visibleMessages.length + 1 + (hasOlder ? 1 : 0),
+                    itemCount: visibleMessages.length + (hasOlder ? 1 : 0),
                     itemBuilder: (context, index) {
                       if (index < visibleMessages.length) {
                         final message =
                             visibleMessages[visibleMessages.length - 1 - index];
-                        return _MessageBubble(
-                          message: message,
-                          showReceipt:
-                              widget.privacySettings.value.showReadReceipts,
+                        final previousIndex =
+                            visibleMessages.length - 2 - index;
+                        final startsDay =
+                            previousIndex < 0 ||
+                            !DateUtils.isSameDay(
+                              visibleMessages[previousIndex].sentAt,
+                              message.sentAt,
+                            );
+                        return Column(
+                          children: [
+                            if (startsDay) _DaySeparator(date: message.sentAt),
+                            _MessageBubble(
+                              message: message,
+                              onRestoreDraft:
+                                  message.deliveryState ==
+                                          DeliveryState.notRestored &&
+                                      message.attachmentName == null
+                                  ? () {
+                                      if (_composerController.text.isEmpty) {
+                                        _composerController.text = message.body;
+                                      } else {
+                                        ScaffoldMessenger.of(
+                                          context,
+                                        ).showSnackBar(
+                                          const SnackBar(
+                                            content: Text(
+                                              'Completa la bozza attuale prima di recuperare questo messaggio.',
+                                            ),
+                                          ),
+                                        );
+                                      }
+                                    }
+                                  : null,
+                              showReceipt:
+                                  widget.privacySettings.value.showReadReceipts,
+                            ),
+                          ],
                         );
-                      }
-                      if (index == visibleMessages.length) {
-                        return const _DaySeparator();
                       }
                       if (hasOlder) {
                         return Center(
@@ -2315,10 +2404,15 @@ class _ConversationTile extends StatelessWidget {
 }
 
 class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({required this.message, required this.showReceipt});
+  const _MessageBubble({
+    required this.message,
+    required this.showReceipt,
+    this.onRestoreDraft,
+  });
 
   final ChatMessage message;
   final bool showReceipt;
+  final VoidCallback? onRestoreDraft;
 
   bool get _isImageAttachment {
     final name = message.attachmentName?.toLowerCase();
@@ -2518,6 +2612,17 @@ class _MessageBubble extends StatelessWidget {
                 message.body,
                 style: TextStyle(color: foreground, fontSize: 15, height: 1.3),
               ),
+            if (message.deliveryState == DeliveryState.notRestored) ...[
+              Text(
+                'Da reinviare: invio assente nel vecchio backup.',
+                style: TextStyle(color: foreground, fontSize: 11),
+              ),
+              if (onRestoreDraft != null)
+                TextButton(
+                  onPressed: onRestoreDraft,
+                  child: const Text('Riprendi bozza'),
+                ),
+            ],
             const SizedBox(height: 5),
             Row(
               mainAxisSize: MainAxisSize.min,
@@ -2536,6 +2641,8 @@ class _MessageBubble extends StatelessWidget {
                     child: Icon(
                       switch (message.deliveryState) {
                         DeliveryState.queued => Icons.schedule_rounded,
+                        DeliveryState.notRestored =>
+                          Icons.error_outline_rounded,
                         DeliveryState.sent => Icons.done_rounded,
                         DeliveryState.delivered ||
                         DeliveryState.read => Icons.done_all_rounded,
@@ -3121,7 +3228,9 @@ class _MobileNetworkStatus extends StatelessWidget {
 }
 
 class _DaySeparator extends StatelessWidget {
-  const _DaySeparator();
+  const _DaySeparator({required this.date});
+
+  final DateTime date;
 
   @override
   Widget build(BuildContext context) {
@@ -3133,9 +3242,11 @@ class _DaySeparator extends StatelessWidget {
           color: const Color(0xFF20252E),
           borderRadius: BorderRadius.circular(20),
         ),
-        child: const Text(
-          'OGGI',
-          style: TextStyle(
+        child: Text(
+          DateUtils.isSameDay(date, DateTime.now())
+              ? 'OGGI'
+              : '${date.day}/${date.month}/${date.year}',
+          style: const TextStyle(
             color: Color(0xFFAEB7C3),
             fontSize: 10,
             fontWeight: FontWeight.w800,
@@ -3641,7 +3752,7 @@ String _signatureForConversations(
 ) => conversations
     .map(
       (item) =>
-          '${item.id}|${item.lastActivity.microsecondsSinceEpoch}|${item.lastMessage}|${item.unreadCount}|${item.safety.name}|${item.isOnline}|${item.type.name}|${item.memberCount}',
+          '${item.id}|${item.name}|${item.initials}|${item.accentValue}|${Object.hashAll(item.avatarBytes ?? const <int>[])}|${item.description}|${item.fingerprint}|${item.isAdmin}|${item.lastActivity.microsecondsSinceEpoch}|${item.lastMessage}|${item.unreadCount}|${item.safety.name}|${item.isOnline}|${item.type.name}|${item.memberCount}',
     )
     .join('\n');
 

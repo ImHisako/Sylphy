@@ -1,6 +1,6 @@
 import 'dart:typed_data';
 
-enum DeliveryState { queued, sent, delivered, read }
+enum DeliveryState { queued, sent, delivered, read, notRestored }
 
 extension DeliveryStateLabel on DeliveryState {
   String get label => switch (this) {
@@ -8,6 +8,8 @@ extension DeliveryStateLabel on DeliveryState {
     DeliveryState.sent => 'Inviato · in attesa del destinatario',
     DeliveryState.delivered => 'Consegnato',
     DeliveryState.read => 'Letto',
+    DeliveryState.notRestored =>
+      'Invio non recuperabile da questo vecchio backup. Reinvia il messaggio.',
   };
 }
 

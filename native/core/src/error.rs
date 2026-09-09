@@ -14,6 +14,8 @@ pub enum CoreError {
     VerificationFailed,
     #[error("message limit exceeded")]
     LimitExceeded,
+    #[error("local storage capacity exhausted")]
+    StorageFull,
     #[error("feature unavailable")]
     FeatureUnavailable,
     #[error("platform initialization incomplete")]

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -6,6 +7,79 @@ import 'package:sylphy/core/messaging/sylphy_messaging_bridge.dart';
 import 'package:sylphy/core/native/native_core.dart';
 
 void main() {
+  test(
+    'older pages merge with concurrent refresh and survive later refreshes',
+    () async {
+      final core = _PagedCore();
+      final bridge = SylphyMessagingBridge(core: core);
+      await bridge.refreshMessages('chat');
+      final pending = bridge.loadOlderMessages('chat');
+      final duplicate = bridge.loadOlderMessages('chat');
+      expect(core.olderCalls, 1);
+      core.latest = [_record('new', 3)];
+      await bridge.refreshMessages('chat');
+      core.older.complete(_page([_record('old', 1)], false));
+      expect((await pending).map((m) => m.id), ['old', 'middle', 'new']);
+      await duplicate;
+      expect((await bridge.refreshMessages('chat')).map((m) => m.id), [
+        'old',
+        'middle',
+        'new',
+      ]);
+      expect(bridge.hasOlderMessages('chat'), isFalse);
+    },
+  );
+
+  test(
+    'late pages from a previous account cannot repopulate its cache',
+    () async {
+      final core = _PagedCore();
+      final bridge = SylphyMessagingBridge(core: core);
+      await bridge.refreshMessages('chat');
+      final pending = bridge.loadOlderMessages('chat');
+      bridge.clearCachesAfterAccountImport();
+      core.older.complete(_page([_record('private-old', 1)], false));
+      expect(await pending, isEmpty);
+      expect(bridge.cachedMessages('chat'), isNull);
+    },
+  );
+
+  test(
+    'attachment completion invalidates an earlier cached placeholder',
+    () async {
+      final core = _FakeNativeCore();
+      core.messages.add({..._record('file', 1), 'attachment_name': 'file.bin'});
+      final bridge = SylphyMessagingBridge(core: core);
+      expect(bridge.listMessages('chat').single.attachmentBytes, isNull);
+      core.messages.single['attachment_base64'] = base64Encode([1, 2, 3]);
+      expect((await bridge.refreshMessages('chat')).single.attachmentBytes, [
+        1,
+        2,
+        3,
+      ]);
+    },
+  );
+
+  test('a slow native commit remains pending until its real result', () async {
+    final commit = Completer<int>();
+    var warned = false;
+    var completed = false;
+    final pending =
+        awaitNativeOperation(
+          commit.future,
+          warningAfter: Duration.zero,
+          onSlow: () => warned = true,
+        ).then((result) {
+          completed = true;
+          return result;
+        });
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(warned, isTrue);
+    expect(completed, isFalse);
+    commit.complete(42);
+    expect(await pending, 42);
+  });
+
   test('reads the empty native inbox without creating sample contacts', () {
     final bridge = SylphyMessagingBridge(core: _FakeNativeCore());
 
@@ -94,6 +168,42 @@ void main() {
       expect(queued.deliveryState, DeliveryState.queued);
     },
   );
+}
+
+Map<String, Object> _record(String id, int time) => {
+  'id': id,
+  'author_id': 'me',
+  'body': id,
+  'sent_at_ms': time,
+  'is_outgoing': true,
+  'delivery_state': 'sent',
+};
+
+NativeCoreResponse _page(List<Map<String, Object>> messages, bool hasMore) =>
+    NativeCoreResponse(
+      ok: true,
+      code: 'ok',
+      data: {'messages': messages, 'has_more': hasMore},
+    );
+
+class _PagedCore extends _FakeNativeCore implements NativeCoreMessagePageApi {
+  final older = Completer<NativeCoreResponse>();
+  int olderCalls = 0;
+  List<Map<String, Object>> latest = [_record('middle', 2)];
+
+  @override
+  Future<NativeCoreResponse> listMessagesInBackground(
+    String conversationId, {
+    bool priority = false,
+    int? beforeMs,
+    String? beforeId,
+  }) {
+    if (beforeMs != null) {
+      olderCalls++;
+      return older.future;
+    }
+    return Future.value(_page(latest, true));
+  }
 }
 
 class _FakeNativeCore implements NativeCoreApi {

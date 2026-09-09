@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
+
 import '../native/native_core.dart';
 import 'models.dart';
 import 'secure_messaging_bridge.dart';
@@ -11,6 +13,8 @@ class SylphyMessagingBridge
         SecureMessagingBridge,
         GroupMessagingBridge,
         InboxRefreshingBridge,
+        InboxRevisionNotifications,
+        InboxStorageStatus,
         CachedMessagingBridge {
   SylphyMessagingBridge({required NativeCoreApi core}) : _core = core;
 
@@ -19,22 +23,34 @@ class SylphyMessagingBridge
   final Map<String, List<ChatMessage>> _messageListCache = {};
   final Map<String, Future<List<ChatMessage>>> _messageRefreshes = {};
   final Map<String, bool> _hasOlderMessages = {};
+  final Set<String> _expandedHistories = {};
+  final Map<String, Future<List<ChatMessage>>> _olderLoads = {};
   List<Conversation>? _conversationCache;
   Future<List<Conversation>>? _conversationRefresh;
   Future<int>? _inboxRefresh;
   int _inboxRevision = 0;
   int _cacheGeneration = 0;
+  final ValueNotifier<int> _inboxChanges = ValueNotifier(0);
+  @override
+  bool inboxStorageFull = false;
+
+  @override
+  ValueListenable<int> get inboxChanges => _inboxChanges;
 
   void clearCachesAfterAccountImport() {
     _cacheGeneration++;
+    inboxStorageFull = false;
     _conversationCache = null;
     _messageCache.clear();
     _messageListCache.clear();
     _messageRefreshes.clear();
     _hasOlderMessages.clear();
+    _expandedHistories.clear();
+    _olderLoads.clear();
     _conversationRefresh = null;
     _inboxRefresh = null;
     _inboxRevision = 0;
+    _inboxChanges.value = 0;
   }
 
   @override
@@ -57,21 +73,26 @@ class SylphyMessagingBridge
 
   @override
   Future<int> refreshInbox() {
-    return _inboxRefresh ??= _performInboxRefresh().whenComplete(
-      () => _inboxRefresh = null,
-    );
+    final generation = _cacheGeneration;
+    return _inboxRefresh ??= _performInboxRefresh().whenComplete(() {
+      if (generation == _cacheGeneration) _inboxRefresh = null;
+    });
   }
 
   Future<int> _performInboxRefresh() async {
+    final generation = _cacheGeneration;
     final core = _core;
     if (core is! NativeCoreClient) return _inboxRevision;
     final response = await core.syncInboundInBackground();
+    if (generation != _cacheGeneration) return _inboxRevision;
     _requireSuccess(response);
     final revision = response.data['revision'];
+    inboxStorageFull = response.data['storage_full'] == true;
     if (revision is! int || revision < 0) {
       throw const SecureMessagingException('invalid_native_response');
     }
     _inboxRevision = revision;
+    _inboxChanges.value = revision;
     return revision;
   }
 
@@ -82,8 +103,11 @@ class SylphyMessagingBridge
 
   @override
   Future<List<Conversation>> refreshConversations() {
+    final generation = _cacheGeneration;
     return _conversationRefresh ??= _performConversationRefresh().whenComplete(
-      () => _conversationRefresh = null,
+      () {
+        if (generation == _cacheGeneration) _conversationRefresh = null;
+      },
     );
   }
 
@@ -125,6 +149,7 @@ class SylphyMessagingBridge
     if (existing != null) {
       return existing;
     }
+    final generation = _cacheGeneration;
     return _messageRefreshes[conversationId] =
         _performMessageRefresh(
           conversationId,
@@ -132,7 +157,9 @@ class SylphyMessagingBridge
         ).whenComplete(() {
           // Do not return the removed Future from this callback: whenComplete
           // would wait on that same Future and create a self-referential deadlock.
-          _messageRefreshes.remove(conversationId);
+          if (generation == _cacheGeneration) {
+            _messageRefreshes.remove(conversationId);
+          }
         });
   }
 
@@ -142,14 +169,17 @@ class SylphyMessagingBridge
   }) async {
     final generation = _cacheGeneration;
     final core = _core;
-    final response = core is NativeCoreClient
-        ? await core.listMessagesInBackground(
+    final response = core is NativeCoreMessagePageApi
+        ? await (core as NativeCoreMessagePageApi).listMessagesInBackground(
             conversationId,
             priority: priority,
           )
         : core.listMessages(conversationId);
     if (generation != _cacheGeneration) return const [];
-    _hasOlderMessages[conversationId] = response.data['has_more'] == true;
+    _requireSuccess(response);
+    if (!_expandedHistories.contains(conversationId)) {
+      _hasOlderMessages[conversationId] = response.data['has_more'] == true;
+    }
     return _parseMessages(conversationId, response);
   }
 
@@ -158,18 +188,29 @@ class SylphyMessagingBridge
       _hasOlderMessages[conversationId] ?? false;
 
   @override
-  Future<List<ChatMessage>> loadOlderMessages(String conversationId) async {
+  Future<List<ChatMessage>> loadOlderMessages(String conversationId) {
+    final generation = _cacheGeneration;
+    return _olderLoads[conversationId] ??= _loadOlderMessages(conversationId)
+        .whenComplete(() {
+          if (generation == _cacheGeneration) {
+            _olderLoads.remove(conversationId);
+          }
+        });
+  }
+
+  Future<List<ChatMessage>> _loadOlderMessages(String conversationId) async {
     final generation = _cacheGeneration;
     final current = cachedMessages(conversationId) ?? const <ChatMessage>[];
     if (current.isEmpty || !hasOlderMessages(conversationId)) return current;
     final core = _core;
-    if (core is! NativeCoreClient) return current;
-    final response = await core.listMessagesInBackground(
-      conversationId,
-      priority: true,
-      beforeMs: current.first.sentAt.toUtc().millisecondsSinceEpoch,
-      beforeId: current.first.id,
-    );
+    if (core is! NativeCoreMessagePageApi) return current;
+    final response = await (core as NativeCoreMessagePageApi)
+        .listMessagesInBackground(
+          conversationId,
+          priority: true,
+          beforeMs: current.first.sentAt.toUtc().millisecondsSinceEpoch,
+          beforeId: current.first.id,
+        );
     _requireSuccess(response);
     if (generation != _cacheGeneration) {
       return cachedMessages(conversationId) ?? const <ChatMessage>[];
@@ -180,7 +221,11 @@ class SylphyMessagingBridge
     }
     _hasOlderMessages[conversationId] = response.data['has_more'] == true;
     final older = records.map(_parseMessage).toList(growable: false);
-    final merged = List<ChatMessage>.unmodifiable([...older, ...current]);
+    _expandedHistories.add(conversationId);
+    final merged = _mergeMessages(
+      _mergeMessages(older, current),
+      cachedMessages(conversationId) ?? const [],
+    );
     _messageListCache[conversationId] = merged;
     for (final message in older) {
       _messageCache['$conversationId:${message.id}'] = message;
@@ -220,11 +265,20 @@ class SylphyMessagingBridge
         _messageCache.remove(key);
       }
     }
-    final immutable = List<ChatMessage>.unmodifiable(messages);
+    final immutable = _expandedHistories.contains(conversationId)
+        ? _mergeMessages(
+            _messageListCache[conversationId] ?? const [],
+            messages,
+          )
+        : List<ChatMessage>.unmodifiable(messages);
     _messageListCache.remove(conversationId);
     _messageListCache[conversationId] = immutable;
     while (_messageListCache.length > 24) {
-      _messageListCache.remove(_messageListCache.keys.first);
+      final evicted = _messageListCache.keys.first;
+      _messageListCache.remove(evicted);
+      _expandedHistories.remove(evicted);
+      _hasOlderMessages.remove(evicted);
+      _messageCache.removeWhere((key, _) => key.startsWith('$evicted:'));
     }
     return immutable;
   }
@@ -307,6 +361,8 @@ class SylphyMessagingBridge
     );
     _conversationCache = null;
     _messageListCache.remove(conversationId);
+    _expandedHistories.remove(conversationId);
+    _hasOlderMessages.remove(conversationId);
     _messageCache.removeWhere((key, _) => key.startsWith('$conversationId:'));
   }
 
@@ -347,7 +403,6 @@ class SylphyMessagingBridge
           : core.sendText(conversationId: conversationId, plaintext: plaintext),
     );
     _conversationCache = null;
-    _messageListCache.remove(conversationId);
   }
 
   @override
@@ -373,8 +428,23 @@ class SylphyMessagingBridge
             ),
     );
     _conversationCache = null;
-    _messageListCache.remove(conversationId);
   }
+}
+
+List<ChatMessage> _mergeMessages(
+  List<ChatMessage> older,
+  List<ChatMessage> newer,
+) {
+  final byId = {for (final message in older) message.id: message};
+  for (final message in newer) {
+    byId[message.id] = message;
+  }
+  final merged = byId.values.toList()
+    ..sort((a, b) {
+      final time = a.sentAt.compareTo(b.sentAt);
+      return time == 0 ? a.id.compareTo(b.id) : time;
+    });
+  return List.unmodifiable(merged);
 }
 
 void _requireSuccess(NativeCoreResponse response) {
@@ -480,6 +550,7 @@ ChatMessage _parseMessage(Object? value, {ChatMessage? cached}) {
     'sent' => DeliveryState.sent,
     'delivered' => DeliveryState.delivered,
     'read' => DeliveryState.read,
+    'not_restored' => DeliveryState.notRestored,
     _ => throw const SecureMessagingException('invalid_native_response'),
   };
   if (cached != null &&
@@ -488,7 +559,10 @@ ChatMessage _parseMessage(Object? value, {ChatMessage? cached}) {
       cached.body == body &&
       cached.sentAt == sentAt &&
       cached.isOutgoing == isOutgoing &&
-      cached.attachmentName == attachmentName) {
+      cached.attachmentName == attachmentName &&
+      (cached.attachmentBytes != null) ==
+          (value['attachment_base64'] is String &&
+              (value['attachment_base64'] as String).isNotEmpty)) {
     return cached.deliveryState == deliveryState
         ? cached
         : cached.copyWith(deliveryState: deliveryState);

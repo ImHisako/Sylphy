@@ -3,6 +3,7 @@
 pub mod account_backup;
 mod atomic_file;
 pub mod bundle;
+mod device_sync;
 pub mod envelope;
 pub mod error;
 pub mod ffi;

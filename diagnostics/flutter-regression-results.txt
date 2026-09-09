@@ -1,0 +1,68 @@
+00:00 +0: loading C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/account_transfer_service_test.dart
+00:00 +0: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/account_transfer_service_test.dart: accepts a one-time Sylphy account endpoint on the local network
+00:00 +1: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/account_transfer_service_test.dart: rejects account QR codes that target the public internet
+00:00 +2: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/account_transfer_service_test.dart: rejects unrelated or malformed QR payloads
+00:00 +3: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/account_transfer_service_test.dart: uses a valid fallback address from a multi-interface QR code
+00:00 +4: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/account_transfer_service_test.dart: account transfer errors expose their diagnostic code
+00:00 +5: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: recognizes only compact Veilid invitations as short IDs
+00:00 +6: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: loads the public identity through the native encrypted vault
+00:00 +7: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: publishes a compact profile photo instead of silently omitting it
+00:01 +8: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:03 +9: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:03 +10: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:03 +11: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:04 +12: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:04 +13: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:05 +14: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:06 +15: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:06 +16: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:06 +17: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:06 +18: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:06 +19: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:06 +20: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:06 +21: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:06 +22: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:06 +23: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:06 +24: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:07 +25: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:07 +26: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:07 +27: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:07 +28: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:07 +29: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:07 +30: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:07 +31: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:07 +32: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:07 +33: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:07 +33: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/veilid_service_test.dart: retries Android platform bootstrap without restarting the app
+2026-09-09T18:35:47.246717Z [ERROR] veilid · state_changed · platform_not_initialized
+00:07 +34: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:07 +35: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:08 +35: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/review_regressions_test.dart: preserves the next draft when an earlier send fails
+2026-09-09T18:35:47.999649Z [WARNING] messenger · send_blocked · network_attach_failed
+00:08 +36: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:10 +37: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:10 +38: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:10 +39: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:11 +39: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/widget_test.dart: opens Developer Options and exposes diagnostic logs
+2026-09-09T18:35:51.310433Z [INFO] developer_options · verbose_logging_enabled
+2026-09-09T18:35:51.359926Z [INFO] developer_options · verbose_logging_disabled
+00:11 +40: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:11 +41: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:11 +42: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:11 +43: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:11 +44: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:12 +45: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/identity_service_test.dart: does not retry a long inline invitation on a periodic timer
+00:12 +46: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/widget_test.dart: inserts emoji and kaomoji from the cross-platform picker
+00:12 +47: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/widget_test.dart: inserts emoji and kaomoji from the cross-platform picker
+00:12 +48: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/widget_test.dart: inserts emoji and kaomoji from the cross-platform picker
+00:13 +49: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/widget_test.dart: opens the encrypted file archive and lists attachments
+00:13 +50: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/widget_test.dart: shows a new mobile message without leaving the chat
+00:13 +51: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/widget_test.dart: scrolls to the latest message when a new one arrives
+00:14 +52: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/widget_test.dart: opens a mobile chat without waiting for the read receipt
+00:14 +53: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/widget_test.dart: lets the user verify a contact without blocking messages
+00:14 +54: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/widget_test.dart: deletes a conversation after explicit confirmation
+00:14 +55: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/widget_test.dart: keeps the real empty state readable on a mobile viewport
+00:15 +56: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/widget_test.dart: asks for a name on first launch and accepts no photo
+00:15 +57: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/widget_test.dart: opens the add-contact flow from the mobile home
+00:15 +58: C:/Users/Hisako/Desktop/App-di-Messaggistica-Kerberus/Sylphy/Sylphy/test/widget_test.dart: opens the own profile and changes the display name
+00:15 +59: All tests passed!

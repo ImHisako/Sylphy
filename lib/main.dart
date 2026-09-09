@@ -89,6 +89,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   bool _nativeServicesReady = false;
   int _nativeServicesGeneration = 0;
   Timer? _identityRepublishTimer;
+  DateTime? _lastRouteRefresh;
 
   @override
   void initState() {
@@ -123,6 +124,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
         widget.privacySettings ??
         PrivacySettingsController(cipher: profileCipher);
     _privacySettings.addListener(_onPrivacyChanged);
+    _veilidService.addListener(_onRouteChanged);
     _profileLoadFuture = _loadProfile();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -172,6 +174,26 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       forceRefresh: forceRefresh,
     );
     _scheduleShortInvitationRefresh();
+  }
+
+  void _onRouteChanged() {
+    if (!_nativeServicesReady ||
+        _profile == null ||
+        !_veilidService.snapshot.isAttached ||
+        !_veilidService.snapshot.routeNeedsPublish) {
+      return;
+    }
+    final now = DateTime.now();
+    if (_lastRouteRefresh != null &&
+        now.difference(_lastRouteRefresh!) < const Duration(seconds: 15)) {
+      return;
+    }
+    _lastRouteRefresh = now;
+    _runGuarded(
+      _publishProfile(forceRefresh: true),
+      category: 'identity',
+      action: 'route_republish_failed',
+    );
   }
 
   void _scheduleShortInvitationRefresh() {
@@ -325,6 +347,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _privacySettings.removeListener(_onPrivacyChanged);
+    _veilidService.removeListener(_onRouteChanged);
     _identityRepublishTimer?.cancel();
     if (_ownsVeilidService) {
       unawaited(_veilidService.stop());

@@ -33,6 +33,15 @@ L'implementazione di produzione di `SecureMessagingBridge` deve essere un adapte
 
 ## Consegna e ripresa della connessione
 
+`SylphyMessagingBridge` espone `InboxRevisionNotifications`: le chat aperte
+ascoltano la revisione completata dal refresh della schermata principale,
+senza avviare un secondo polling di rete. Vale anche per gli aggiornamenti
+delle spunte che non cambiano l'anteprima della conversazione. Le notifiche
+non cambiate non causano nuove letture; il listener viene rimosso alla chiusura
+o alla sostituzione del bridge. Il timer preesistente resta solo per gli
+adapter che non espongono questa capability. Una risposta in volo del vecchio
+account non può pubblicare una revisione dopo l'import di un altro account.
+
 Gli invii vengono confermati al composer appena registrati nell'outbox cifrato.
 Il trasporto lavora in un worker nativo e aggiorna successivamente `queued` o
 `sent`, anche dopo un riavvio; il log deve applicare gli aggiornamenti delle

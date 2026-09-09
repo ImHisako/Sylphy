@@ -16,6 +16,7 @@ void main() {
         'attachment_state': 'attached_good',
         'public_internet_ready': true,
         'live_peer_count': '7',
+        'route_needs_publish': true,
       },
     );
 
@@ -23,6 +24,7 @@ void main() {
 
     expect(snapshot.phase, VeilidPhase.attached);
     expect(snapshot.livePeerCount, 7);
+    expect(snapshot.routeNeedsPublish, isTrue);
     expect(response.data, isNot(contains('node_id')));
     expect(response.data, isNot(contains('route_blob')));
   });
@@ -78,6 +80,9 @@ void main() {
         '${legacyMessaging.path}${Platform.pathSeparator}messages-v2.log',
       ).writeAsString('legacy messages');
       await File(
+        '${legacyMessaging.path}${Platform.pathSeparator}groups-v1.vault',
+      ).writeAsString('legacy groups');
+      await File(
         '${accountMessaging.path}${Platform.pathSeparator}contacts-v2.vault',
       ).writeAsString('imported contacts');
       final service = VeilidService(
@@ -99,6 +104,12 @@ void main() {
           '${accountMessaging.path}${Platform.pathSeparator}messages-v2.log',
         ).readAsString(),
         'legacy messages',
+      );
+      expect(
+        await File(
+          '${accountMessaging.path}${Platform.pathSeparator}groups-v1.vault',
+        ).readAsString(),
+        'legacy groups',
       );
     },
   );

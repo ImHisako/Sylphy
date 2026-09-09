@@ -435,6 +435,7 @@ fn error_response(error: CoreError) -> CoreResponse {
         CoreError::AuthenticationFailed => "authentication_failed",
         CoreError::VerificationFailed => "verification_failed",
         CoreError::LimitExceeded => "limit_exceeded",
+        CoreError::StorageFull => "storage_full",
         CoreError::FeatureUnavailable => "feature_unavailable",
         CoreError::PlatformNotInitialized => "platform_not_initialized",
         CoreError::VeilidProtectedStoreFailed => "veilid_protected_store_failed",

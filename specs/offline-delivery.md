@@ -20,6 +20,12 @@ liberano capacità ma non costituiscono ricevute di lettura. Cancellare una
 conversazione elimina i suoi tentativi ancora nella coda locale; non ritira
 pacchetti già inviati o depositati.
 
+Una consegna diretta riuscita porta a `sent` senza attendere un secondo
+deposito nella DHT. La mailbox viene usata come fallback quando il percorso
+diretto fallisce. Una mailbox piena o indisponibile non riporta in coda un
+pacchetto già affidato al trasporto diretto; se entrambi i percorsi falliscono,
+il ciphertext rimane nella coda persistente per il retry.
+
 ## Capability per coppia
 
 `offline-mailbox-v1` è negoziata nel bundle contenuto nella `PublishedIdentity`

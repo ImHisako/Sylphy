@@ -77,13 +77,13 @@ fn replace_file(source: &Path, destination: &Path) -> CoreResult<()> {
 }
 
 #[cfg(unix)]
-fn sync_parent(parent: &Path) -> CoreResult<()> {
+pub(crate) fn sync_parent(parent: &Path) -> CoreResult<()> {
     std::fs::File::open(parent)
         .and_then(|directory| directory.sync_all())
         .map_err(|_| CoreError::Internal)
 }
 
 #[cfg(not(unix))]
-fn sync_parent(_parent: &Path) -> CoreResult<()> {
+pub(crate) fn sync_parent(_parent: &Path) -> CoreResult<()> {
     Ok(())
 }

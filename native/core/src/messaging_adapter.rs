@@ -43,6 +43,7 @@ const DEFAULT_MESSAGE_PAGE_SIZE: usize = 120;
 const MAX_MESSAGE_PAGE_SIZE: usize = 500;
 const ATTACHMENT_PREFIX: &str = "sylphy-attachment-v1:";
 const GROUP_INVITE_PREFIX: &str = "sylphy-group-invite-v1:";
+const GROUP_INVITE_BLOB_PREFIX: &str = "sylphy-group-invite-v2:";
 const GROUP_MESSAGE_PREFIX: &str = "sylphy-group-message-v1:";
 const MAX_GROUP_MEMBERS: usize = 64;
 const DEVICE_SYNC_PREFIX: &[u8] = b"SYLPHY-DEVICE-SYNC-V1\0";
@@ -139,6 +140,8 @@ struct GroupMember {
     display_name: String,
     fingerprint: String,
     identity: PublishedIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    invitation_code: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -159,6 +162,15 @@ struct GroupInvitation {
     version: u8,
     group: StoredGroup,
     admin: GroupMember,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct GroupInvitationPointer {
+    version: u8,
+    size: usize,
+    record_key: String,
+    chunk_count: u16,
+    key_base64: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -186,9 +198,13 @@ struct MessagingAccountBackup {
     messages: Vec<StoredMessage>,
     #[serde(default)]
     groups: Vec<StoredGroup>,
+    #[serde(default)]
+    outbox: Vec<PendingDelivery>,
+    #[serde(default)]
+    attachment_leases: Vec<AttachmentLease>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 enum MessageEvent {
     Upsert { message: StoredMessage },
@@ -253,6 +269,12 @@ struct AttachmentLease {
 struct PendingDeviceSync {
     id: String,
     event: DeviceSyncEvent,
+    #[serde(default)]
+    attempts: u32,
+    #[serde(default)]
+    next_attempt_ms: u64,
+    #[serde(default)]
+    blob: Option<crate::device_sync::BlobPointer>,
 }
 
 #[derive(Default)]
@@ -360,14 +382,28 @@ pub(crate) fn export_account_backup() -> CoreResult<Value> {
         contacts: store.contacts.clone(),
         messages: store.messages.clone(),
         groups: store.groups.clone(),
+        outbox: store.outbox.clone(),
+        attachment_leases: store.attachment_leases.clone(),
     })
     .map_err(|_| CoreError::Internal)
 }
 
 pub(crate) fn import_account_backup(value: Value) -> CoreResult<()> {
     validate_account_backup(&value)?;
-    let backup: MessagingAccountBackup =
+    let mut backup: MessagingAccountBackup =
         serde_json::from_value(value).map_err(|_| CoreError::VerificationFailed)?;
+    // Preserve already sealed packets, never clone live Signal sessions.
+    // Old backups without the durable outbox cannot promise automatic retry.
+    for message in &mut backup.messages {
+        if message.delivery_state == "queued"
+            && !backup
+                .outbox
+                .iter()
+                .any(|entry| entry.message_id == message.id)
+        {
+            message.delivery_state = "not_restored".to_owned();
+        }
+    }
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     let contact_path = store.path.clone().ok_or(CoreError::FeatureUnavailable)?;
     let message_path = store
@@ -381,6 +417,22 @@ pub(crate) fn import_account_backup(value: Value) -> CoreResult<()> {
     persist_contacts(&contact_path, &backup.contacts)?;
     write_message_snapshot(&message_path, &backup.messages)?;
     persist_groups(&groups_path, &backup.groups)?;
+    persist_outbox(
+        store
+            .outbox_path
+            .as_deref()
+            .ok_or(CoreError::FeatureUnavailable)?,
+        &backup.outbox,
+    )?;
+    persist_attachment_leases(
+        store
+            .attachment_lease_path
+            .as_deref()
+            .ok_or(CoreError::FeatureUnavailable)?,
+        &backup.attachment_leases,
+    )?;
+    store.outbox = backup.outbox;
+    store.attachment_leases = backup.attachment_leases;
     store.contacts = backup.contacts;
     store.groups = backup.groups;
     store.messages = backup.messages;
@@ -397,10 +449,31 @@ pub(crate) fn validate_account_backup(value: &Value) -> CoreResult<()> {
         || backup.contacts.len() > MAX_CONTACTS
         || backup.messages.len() > MAX_MESSAGES
         || backup.groups.len() > MAX_CONTACTS
+        || backup.outbox.len() > MAX_OUTBOX_DELIVERIES
+        || backup.attachment_leases.len() > MAX_OUTBOX_DELIVERIES
     {
         return Err(CoreError::LimitExceeded);
     }
     validate_groups(&backup.groups)?;
+    for delivery in &backup.outbox {
+        if delivery.id.is_empty()
+            || delivery.route_blob.is_empty()
+            || delivery.payload.is_empty()
+            || delivery.payload.len() > 32 * 1024
+            || !backup
+                .messages
+                .iter()
+                .any(|message| message.id == delivery.message_id && message.is_outgoing)
+        {
+            return Err(CoreError::VerificationFailed);
+        }
+        secure_packet::validate_stored_delivery(&delivery.payload)?;
+    }
+    if backup.attachment_leases.iter().any(|lease| {
+        lease.record_key.is_empty() || lease.chunk_count == 0 || lease.chunk_count > 128
+    }) {
+        return Err(CoreError::VerificationFailed);
+    }
     let contact_ids = backup
         .contacts
         .iter()
@@ -474,7 +547,7 @@ fn validate_stored_message(message: &StoredMessage) -> CoreResult<()> {
         || message.body.len() > MAX_MESSAGE_BODY_BYTES
         || !matches!(
             message.delivery_state.as_str(),
-            "queued" | "sent" | "delivered" | "read"
+            "queued" | "sent" | "delivered" | "read" | "not_restored"
         )
         || message.sent_at_ms > current_time_ms()?.saturating_add(MAX_CLOCK_SKEW_MS)
     {
@@ -609,29 +682,15 @@ pub fn list_messages(
     }
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     ensure_messages_loaded(&mut store)?;
-    let mut messages = store
-        .messages
-        .iter()
-        .filter(|message| message.conversation_id == conversation_id)
-        .filter(|message| match (before_ms, before_id) {
-            (Some(before), Some(id)) => (message.sent_at_ms, message.id.as_str()) < (before, id),
-            (Some(before), None) => message.sent_at_ms < before,
-            (None, None) => true,
-            (None, Some(_)) => false,
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    messages.sort_by(|left, right| {
-        right
-            .sent_at_ms
-            .cmp(&left.sent_at_ms)
-            .then_with(|| right.id.cmp(&left.id))
-    });
-    let has_more = messages.len() > limit;
-    messages.truncate(limit);
-    messages.reverse();
+    let (messages, has_more) = select_message_page(
+        &store.messages,
+        conversation_id,
+        before_ms,
+        before_id,
+        limit,
+    );
     let next_before_ms = messages.first().map(|message| message.sent_at_ms);
-    let next_before_id = messages.first().map(|message| message.id.clone());
+    let next_before_id = messages.first().map(|message| message.id.as_str());
     Ok(json!({
         "conversation_id": conversation_id,
         "messages": messages.into_iter().map(message_json).collect::<Vec<_>>(),
@@ -640,6 +699,41 @@ pub fn list_messages(
         "has_more": has_more,
         "revision": store.revision,
     }))
+}
+
+fn select_message_page<'a>(
+    history: &'a [StoredMessage],
+    conversation_id: &str,
+    before_ms: Option<u64>,
+    before_id: Option<&str>,
+    limit: usize,
+) -> (Vec<&'a StoredMessage>, bool) {
+    // Select references first: off-page bodies and attachments are never
+    // cloned, and only the visible page needs a complete sort.
+    let mut messages = history
+        .iter()
+        .filter(|message| message.conversation_id == conversation_id)
+        .filter(|message| match (before_ms, before_id) {
+            (Some(before), Some(id)) => (message.sent_at_ms, message.id.as_str()) < (before, id),
+            (Some(before), None) => message.sent_at_ms < before,
+            (None, None) => true,
+            (None, Some(_)) => false,
+        })
+        .collect::<Vec<_>>();
+    let newest_first = |left: &&StoredMessage, right: &&StoredMessage| {
+        right
+            .sent_at_ms
+            .cmp(&left.sent_at_ms)
+            .then_with(|| right.id.cmp(&left.id))
+    };
+    let has_more = messages.len() > limit;
+    if has_more {
+        messages.select_nth_unstable_by(limit, newest_first);
+        messages.truncate(limit);
+    }
+    messages.sort_unstable_by(newest_first);
+    messages.reverse();
+    (messages, has_more)
 }
 
 pub fn add_contact(_legacy_display_name: &str, invitation_code: &str) -> CoreResult<Value> {
@@ -727,7 +821,83 @@ fn group_member(identity: PublishedIdentity) -> CoreResult<GroupMember> {
         display_name,
         fingerprint: fingerprint(&identity.bundle.identity_ed25519),
         identity,
+        invitation_code: None,
     })
+}
+
+fn update_group_endpoints(
+    store: &mut ContactStore,
+    id: &str,
+    published: &PublishedIdentity,
+) -> CoreResult<()> {
+    published.validate()?;
+    if contact_id(&published.bundle.identity_ed25519) != id {
+        return Err(CoreError::VerificationFailed);
+    }
+    let invitation = store
+        .contacts
+        .iter()
+        .find(|contact| contact.id == id)
+        .and_then(|contact| contact.invitation_code.clone());
+    let mut groups = store.groups.clone();
+    let mut changed = false;
+    for member in groups
+        .iter_mut()
+        .flat_map(|group| &mut group.members)
+        .filter(|member| member.id == id)
+    {
+        if member.identity.bundle.expires_at_ms > published.bundle.expires_at_ms {
+            continue;
+        }
+        if serde_json::to_vec(&member.identity).ok() != serde_json::to_vec(published).ok() {
+            member.identity = published.clone();
+            changed = true;
+        }
+        if member.invitation_code.is_none() && invitation.is_some() {
+            member.invitation_code = invitation.clone();
+            changed = true;
+        }
+    }
+    if changed {
+        persist_groups(
+            store
+                .groups_path
+                .as_deref()
+                .ok_or(CoreError::FeatureUnavailable)?,
+            &groups,
+        )?;
+        store.groups = groups;
+        store.revision = store.revision.wrapping_add(1);
+    }
+    Ok(())
+}
+
+fn current_group(id: &str) -> CoreResult<Option<StoredGroup>> {
+    let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    let Some(group) = store.groups.iter().find(|group| group.id == id).cloned() else {
+        return Ok(None);
+    };
+    let contacts = store
+        .contacts
+        .iter()
+        .filter(|contact| group.members.iter().any(|member| member.id == contact.id))
+        .filter_map(|contact| {
+            contact
+                .published_identity
+                .clone()
+                .filter(|identity| {
+                    group.members.iter().any(|member| {
+                        member.id == contact.id
+                            && member.identity.bundle.expires_at_ms < identity.bundle.expires_at_ms
+                    })
+                })
+                .map(|identity| (contact.id.clone(), identity))
+        })
+        .collect::<Vec<_>>();
+    for (id, identity) in contacts {
+        update_group_endpoints(&mut store, &id, &identity)?;
+    }
+    Ok(store.groups.iter().find(|group| group.id == id).cloned())
 }
 
 pub fn create_group(
@@ -745,13 +915,27 @@ pub fn create_group(
         return Err(CoreError::LimitExceeded);
     }
     let admin_identity = local_published_identity()?;
-    let admin = group_member(admin_identity.clone())?;
+    let mut admin = group_member(admin_identity.clone())?;
+    admin.invitation_code = identity::active_dht_descriptor()?
+        .and_then(|descriptor| veilid_adapter::owned_identity_code(&descriptor).ok());
     let admin_id = admin.id.clone();
     let mut members = Vec::with_capacity(invitation_codes.len());
     let mut ids = HashSet::new();
     for code in invitation_codes {
         let (_, published) = decode_invitation(code)?;
-        let member = group_member(published.ok_or(CoreError::VerificationFailed)?)?;
+        let mut member = group_member(published.ok_or(CoreError::VerificationFailed)?)?;
+        if code.trim().starts_with("sylphy:VLD") || code.trim().starts_with("VLD") {
+            member.invitation_code = Some(code.trim().to_owned());
+        }
+        if member.identity.delivery_devices()?.iter().any(|device| {
+            !device
+                .bundle
+                .capabilities
+                .iter()
+                .any(|value| value == "group-invite-blob-v2")
+        }) {
+            return Err(CoreError::UnsupportedVersion);
+        }
         if member.id == admin_id || !ids.insert(member.id.clone()) {
             return Err(CoreError::VerificationFailed);
         }
@@ -781,23 +965,37 @@ pub fn create_group(
         group: invitation_group,
         admin,
     };
-    let encoded =
-        STANDARD_NO_PAD.encode(serde_json::to_vec(&invitation).map_err(|_| CoreError::Internal)?);
-    let plaintext = format!("{GROUP_INVITE_PREFIX}{encoded}");
-    if plaintext.len() > MAX_MESSAGE_BODY_BYTES {
-        return Err(CoreError::LimitExceeded);
-    }
     let message_path = contact_store()
         .lock()
         .map_err(|_| CoreError::Internal)?
         .message_path
         .clone()
         .ok_or(CoreError::FeatureUnavailable)?;
+    // Public identities (especially PQ prekeys and avatars) cannot fit in a
+    // chat packet. Only the encrypted blob pointer travels in each session.
+    let (plaintext, pointer) =
+        encode_group_invitation(&invitation, veilid_adapter::publish_attachment_blob)?;
+    let result = register_attachment_lease(&pointer.record_key, pointer.chunk_count)
+        .and_then(|()| queue_created_group(&group, &plaintext, &message_path));
+    if result.is_err() {
+        let _ = veilid_adapter::delete_attachment_blob(&pointer.record_key, pointer.chunk_count);
+        remove_attachment_lease(&pointer.record_key);
+    }
+    result
+}
+
+fn queue_created_group(
+    group: &StoredGroup,
+    plaintext: &str,
+    message_path: &Path,
+) -> CoreResult<Value> {
+    let group_id = group.id.clone();
+    let members = &group.members;
     // A single durable system message carries one encrypted delivery per
     // member. The secure packet still uses the member's individual session.
     let mut deliveries = Vec::new();
-    for member in &members {
-        let (mut member_deliveries, _) = secure_packet::seal_for_all(&member.identity, &plaintext)?;
+    for member in members {
+        let (mut member_deliveries, _) = secure_packet::seal_for_all(&member.identity, plaintext)?;
         deliveries.append(&mut member_deliveries);
     }
     if deliveries.is_empty() {
@@ -826,14 +1024,14 @@ pub fn create_group(
         conversation_id: group_id.clone(),
         author_id: "me".to_owned(),
         body: "Gruppo creato".to_owned(),
-        sent_at_ms: now_ms,
+        sent_at_ms: group.created_at_ms,
         is_outgoing: true,
         is_read: true,
         delivery_state: "queued".to_owned(),
         attachment_name: None,
         attachment_base64: None,
     };
-    if let Err(error) = queue_outgoing(&message_path, system_message, deliveries) {
+    if let Err(error) = queue_outgoing(message_path, system_message, deliveries) {
         if let Ok(mut store) = contact_store().lock() {
             if let Some(path) = store.groups_path.clone() {
                 let updated = store
@@ -860,14 +1058,8 @@ pub fn create_group(
 
 pub fn send_text(conversation_id: &str, plaintext: &str) -> CoreResult<Value> {
     validate_conversation_id(conversation_id)?;
-    if let Some(group) = contact_store()
-        .lock()
-        .map_err(|_| CoreError::Internal)?
-        .groups
-        .iter()
-        .find(|group| group.id == conversation_id)
-        .cloned()
-    {
+    let group = current_group(conversation_id)?;
+    if let Some(group) = group {
         let plaintext = plaintext.trim();
         if group.mode == "channel" && group.admin_id != "me" {
             return Err(CoreError::AuthenticationFailed);
@@ -958,14 +1150,8 @@ pub fn send_attachment(
     if bytes.is_empty() || bytes.len() > MAX_ATTACHMENT_BYTES {
         return Err(CoreError::LimitExceeded);
     }
-    if let Some(group) = contact_store()
-        .lock()
-        .map_err(|_| CoreError::Internal)?
-        .groups
-        .iter()
-        .find(|group| group.id == conversation_id)
-        .cloned()
-    {
+    let group = current_group(conversation_id)?;
+    if let Some(group) = group {
         if group.mode == "channel" && group.admin_id != "me" {
             return Err(CoreError::AuthenticationFailed);
         }
@@ -1285,11 +1471,11 @@ pub fn sync_inbound_messages() -> CoreResult<Value> {
     }
     refresh_contact_directory();
     let _ = configure_offline_receivers();
-    flush_device_sync_outbox();
     cleanup_expired_attachments();
     let payloads = veilid_adapter::take_inbound_payloads()?;
     let mut persisted = 0_usize;
     let mut discarded = 0_usize;
+    let mut storage_full = false;
     for payload in payloads {
         match persist_inbound_payload(&payload.payload) {
             Ok(is_new) => {
@@ -1303,17 +1489,23 @@ pub fn sync_inbound_messages() -> CoreResult<Value> {
                 discarded += 1;
                 let _ = veilid_adapter::acknowledge_inbound_payload(payload);
             }
-            Err(_) => veilid_adapter::retry_inbound_payload(payload),
+            Err(error) => {
+                storage_full |= matches!(error, CoreError::StorageFull);
+                veilid_adapter::retry_inbound_payload(payload);
+            }
         }
     }
     // Receive first: a slow or unavailable recipient must not delay messages
     // that have already arrived for us.
     let _ = flush_outbox(None);
+    flush_device_sync_outbox();
     let revision = contact_store()
         .lock()
         .map_err(|_| CoreError::Internal)?
         .revision;
-    Ok(json!({"persisted": persisted, "discarded": discarded, "revision": revision}))
+    Ok(
+        json!({"persisted": persisted, "discarded": discarded, "revision": revision, "storage_full": storage_full}),
+    )
 }
 
 fn configure_offline_receivers() -> CoreResult<()> {
@@ -1348,6 +1540,8 @@ fn configure_offline_receivers() -> CoreResult<()> {
             }
             bundles
         };
+    let receiving_secrets = local.receiving_x25519_secrets()?;
+    let mut seen_bundles = HashSet::new();
     let mut seen = HashSet::new();
     let mut targets = Vec::new();
     for bundle in bundles {
@@ -1359,9 +1553,18 @@ fn configure_offline_receivers() -> CoreResult<()> {
             .as_ref()
             .ok_or(CoreError::UnsupportedVersion)?
             .device_id;
-        for secret in local.receiving_x25519_secrets()? {
+        // A peer can occur in the address book and several groups. Derive
+        // its mailboxes once, retaining distinct devices and rotated prekeys.
+        if !seen_bundles.insert((
+            bundle.identity_ed25519.clone(),
+            bundle.signed_prekey_x25519.clone(),
+            remote_device,
+        )) {
+            continue;
+        }
+        for secret in &receiving_secrets {
             let keys = crate::offline_mailbox::MailboxKeys::derive(
-                &secret,
+                secret,
                 &bundle.signed_prekey_x25519,
                 &bundle.identity_ed25519,
                 &local_id,
@@ -1408,7 +1611,7 @@ fn refresh_contact_directory() {
                         != serde_json::to_vec(&published).ok();
                     if changed
                         && published.bundle.expires_at_ms > current_time_ms().unwrap_or(u64::MAX)
-                        && update_contact_identity(contact, published).is_ok()
+                        && update_contact_identity(contact, published.clone()).is_ok()
                     {
                         if let Some(path) = &store.path {
                             if persist_contacts(path, &contacts).is_ok() {
@@ -1418,6 +1621,7 @@ fn refresh_contact_directory() {
                         }
                     }
                 }
+                let _ = update_group_endpoints(&mut store, &id, &published);
             }
             Err(TryRecvError::Empty) => return,
             _ => {}
@@ -1428,7 +1632,7 @@ fn refresh_contact_directory() {
     if now < refresh.next_attempt_ms {
         return;
     }
-    let contacts = store
+    let mut contacts = store
         .contacts
         .iter()
         .filter_map(|contact| {
@@ -1439,6 +1643,13 @@ fn refresh_contact_directory() {
                 .map(|code| (contact.id.clone(), code.clone()))
         })
         .collect::<Vec<_>>();
+    for member in store.groups.iter().flat_map(|group| &group.members) {
+        if let Some(code) = &member.invitation_code {
+            if !contacts.iter().any(|(id, _)| id == &member.id) {
+                contacts.push((member.id.clone(), code.clone()));
+            }
+        }
+    }
     if contacts.is_empty() {
         return;
     }
@@ -1469,6 +1680,28 @@ fn should_discard_inbound(error: &CoreError) -> bool {
 }
 
 fn persist_inbound_payload(payload: &[u8]) -> CoreResult<bool> {
+    persist_inbound_payload_with(payload, veilid_adapter::fetch_attachment_blob)
+}
+
+fn persist_inbound_payload_with(
+    payload: &[u8],
+    fetch: impl FnOnce(&str, u16) -> CoreResult<Vec<u8>>,
+) -> CoreResult<bool> {
+    if let Some(encrypted) = payload.strip_prefix(crate::device_sync::PREFIX) {
+        let key = identity::active_identity()?.storage_key()?;
+        let plaintext =
+            crate::device_sync::open_reference(&key, encrypted, veilid_adapter::fetch_sync_blob)?;
+        let before = contact_store()
+            .lock()
+            .map_err(|_| CoreError::Internal)?
+            .revision;
+        apply_device_sync_plaintext(&plaintext)?;
+        return Ok(contact_store()
+            .lock()
+            .map_err(|_| CoreError::Internal)?
+            .revision
+            != before);
+    }
     if let Some(encrypted) = payload.strip_prefix(DEVICE_SYNC_PREFIX) {
         let before = contact_store()
             .lock()
@@ -1489,17 +1722,15 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<bool> {
     {
         let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
         ensure_messages_loaded(&mut store)?;
-        if store
-            .messages
-            .iter()
-            .any(|message| message.id == inspected.message_id)
-        {
+        if store.messages.iter().any(|message| {
+            message.id == inspected.message_id && !legacy_attachment_placeholder(message)
+        }) {
             return Ok(false);
         }
     }
     let mut opened = secure_packet::open(payload)?;
-    if let Some(invitation) = decode_group_invitation(&opened.plaintext)? {
-        let sender = group_member(opened.sender.clone())?;
+    if let Some(invitation) = decode_group_invitation_with(&opened.plaintext, fetch)? {
+        let mut sender = group_member(opened.sender.clone())?;
         if invitation.version != 1
             || invitation.group.admin_id != sender.id
             || invitation.admin.id != sender.id
@@ -1508,7 +1739,16 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<bool> {
         {
             return Err(CoreError::VerificationFailed);
         }
+        sender.invitation_code = invitation.admin.invitation_code;
         let mut group = invitation.group;
+        validate_groups(std::slice::from_ref(&group))?;
+        let local_id = contact_id(&identity::active_identity()?.identity_public_key()?);
+        if !group.members.iter().any(|member| member.id == local_id) {
+            return Err(CoreError::AuthenticationFailed);
+        }
+        // Store only remote endpoints, as on the creator's device. Otherwise
+        // replies are sent back to ourselves and the member count is inflated.
+        group.members.retain(|member| member.id != local_id);
         if !group.members.iter().any(|member| member.id == sender.id) {
             group.members.push(sender.clone());
         }
@@ -1529,6 +1769,9 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<bool> {
                 return Err(CoreError::VerificationFailed);
             }
         } else {
+            if store.groups.len() >= MAX_CONTACTS {
+                return Err(CoreError::StorageFull);
+            }
             let mut updated = store.groups.clone();
             updated.push(group);
             persist_groups(&path, &updated)?;
@@ -1590,15 +1833,47 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<bool> {
         .clone()
         .ok_or(CoreError::FeatureUnavailable)?;
     ensure_messages_loaded(&mut store)?;
-    if store.messages.iter().any(|item| item.id == message.id) {
-        return Ok(false);
+    if let Some(existing) = store.messages.iter().find(|item| item.id == message.id) {
+        if !legacy_attachment_placeholder(existing) {
+            return Ok(false);
+        }
+        let previous = existing.clone();
+        let merged = merge_synced_message(existing, &message)?;
+        upsert_synced_message(&mut store, &message_path, merged)?;
+        store.revision = store.revision.wrapping_add(1);
+        drop(store);
+        if let Err(error) = opened.commit_ratchet() {
+            let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+            append_message_event(
+                &message_path,
+                &MessageEvent::Upsert {
+                    message: previous.clone(),
+                },
+            )?;
+            if let Some(item) = store
+                .messages
+                .iter_mut()
+                .find(|item| item.id == previous.id)
+            {
+                *item = previous;
+            }
+            store.revision = store.revision.wrapping_add(1);
+            return Err(error);
+        }
+        return Ok(true);
+    }
+    if store.messages.len() >= MAX_MESSAGES {
+        return Err(CoreError::StorageFull);
     }
     let is_group = store.groups.iter().any(|group| group.id == conversation_id);
     if is_group {
-        // Membership was checked against the signed sender above.
+        update_group_endpoints(&mut store, &id, &opened.sender)?;
     } else if let Some(contact) = store.contacts.iter_mut().find(|contact| contact.id == id) {
         update_contact_identity(contact, opened.sender.clone())?;
-    } else if allows_unknown_contacts()? && store.contacts.len() < MAX_CONTACTS {
+    } else if allows_unknown_contacts()? {
+        if store.contacts.len() >= MAX_CONTACTS {
+            return Err(CoreError::StorageFull);
+        }
         let contact_fingerprint = fingerprint(&opened.sender.bundle.identity_ed25519);
         let suffix = contact_fingerprint.replace(' ', "");
         let suffix = &suffix[suffix.len().saturating_sub(8)..];
@@ -1636,19 +1911,24 @@ fn persist_inbound_payload(payload: &[u8]) -> CoreResult<bool> {
         let _ = compact_message_log_if_needed(&mut store);
     }
     if let Some(contact) = sync_contact {
-        let mut sync_message = message;
-        if sync_message
-            .attachment_base64
-            .as_ref()
-            .is_some_and(|value| value.len() > 20 * 1024)
-        {
-            sync_message.attachment_base64 = None;
-            sync_message.attachment_name = None;
+        if !is_group {
+            queue_device_sync(&DeviceSyncEvent::UpsertMessage {
+                contact,
+                message: message.clone(),
+            });
         }
-        queue_device_sync(&DeviceSyncEvent::UpsertMessage {
-            contact,
-            message: sync_message,
+    }
+    if is_group {
+        let group = contact_store().lock().ok().and_then(|store| {
+            store
+                .groups
+                .iter()
+                .find(|group| group.id == conversation_id)
+                .cloned()
         });
+        if let Some(group) = group {
+            queue_device_sync(&DeviceSyncEvent::UpsertGroupMessage { group, message });
+        }
     }
     Ok(true)
 }
@@ -1679,45 +1959,6 @@ fn rollback_message(message_id: &str) {
     }
 }
 
-fn broadcast_device_sync(event: &DeviceSyncEvent) -> CoreResult<()> {
-    let encoded = serde_json::to_vec(event).map_err(|_| CoreError::Internal)?;
-    let encrypted = vault::seal_with_key(&identity::active_identity()?.storage_key()?, &encoded)?;
-    let mut payload = Vec::with_capacity(DEVICE_SYNC_PREFIX.len() + encrypted.len());
-    payload.extend_from_slice(DEVICE_SYNC_PREFIX);
-    payload.extend_from_slice(&encrypted);
-    let descriptor = identity::active_dht_descriptor()?.ok_or(CoreError::FeatureUnavailable)?;
-    let published = veilid_adapter::resolve_owned_identity(&descriptor)?;
-    let local_device_id = crate::ratchet_adapter::public_pre_key_bundle()?
-        .ok_or(CoreError::UnsupportedVersion)?
-        .device_id;
-    let targets = published
-        .delivery_devices()?
-        .into_iter()
-        .filter(|device| {
-            device
-                .bundle
-                .signal_pre_key
-                .as_ref()
-                .is_some_and(|pre_key| pre_key.device_id != local_device_id)
-        })
-        .collect::<Vec<_>>();
-    if targets.is_empty() {
-        return Ok(());
-    }
-    let mut failed = false;
-    for target in targets {
-        if veilid_adapter::deliver_payload(&target.route_blob, None, payload.clone()).is_err() {
-            failed = true;
-        }
-    }
-    if !failed {
-        return Ok(());
-    }
-    let mailbox =
-        crate::peer_identity::current_public_mailbox().ok_or(CoreError::FeatureUnavailable)?;
-    veilid_adapter::store_mailbox_payload(&mailbox, &payload)
-}
-
 fn queue_device_sync(event: &DeviceSyncEvent) {
     // Device synchronization is a secondary replication step. Once the local
     // mutation is durable it must never turn the primary operation into a
@@ -1728,6 +1969,9 @@ fn queue_device_sync(event: &DeviceSyncEvent) {
     let pending = PendingDeviceSync {
         id: compact_hex(&Sha256::digest(&encoded)[..16]),
         event: event.clone(),
+        attempts: 0,
+        next_attempt_ms: 0,
+        blob: None,
     };
     let stored = (|| -> CoreResult<()> {
         let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
@@ -1758,35 +2002,93 @@ fn queue_device_sync(event: &DeviceSyncEvent) {
 }
 
 fn flush_device_sync_outbox() {
-    let pending = match contact_store().lock() {
-        Ok(store) => store.device_sync_outbox.clone(),
+    let now = current_time_ms().unwrap_or_default();
+    let generation = match contact_store().lock() {
+        Ok(store) => store.generation,
         Err(_) => return,
     };
-    let delivered = pending
-        .iter()
-        .filter(|item| broadcast_device_sync(&item.event).is_ok())
-        .map(|item| item.id.clone())
-        .collect::<HashSet<_>>();
-    if delivered.is_empty() {
+    let Some(results) = crate::device_sync::poll(generation, || {
+        let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+        if store.generation != generation {
+            return Err(CoreError::FeatureUnavailable);
+        }
+        let pending = store
+            .device_sync_outbox
+            .iter()
+            .filter(|item| item.next_attempt_ms <= now)
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>();
+        drop(store);
+        if pending.is_empty() {
+            return Err(CoreError::FeatureUnavailable);
+        }
+        let context = crate::device_sync::Context {
+            key: zeroize::Zeroizing::new(identity::active_identity()?.storage_key()?),
+            descriptor: identity::active_dht_descriptor()?.ok_or(CoreError::FeatureUnavailable)?,
+            device_id: ratchet_adapter::public_pre_key_bundle()?
+                .ok_or(CoreError::FeatureUnavailable)?
+                .device_id,
+            mailbox: crate::peer_identity::current_public_mailbox(),
+        };
+        let prepared = pending
+            .into_iter()
+            .filter_map(|item| {
+                serde_json::to_vec(&item.event)
+                    .ok()
+                    .map(|encoded| crate::device_sync::Pending {
+                        id: item.id,
+                        encoded: zeroize::Zeroizing::new(encoded),
+                        blob: item.blob,
+                    })
+            })
+            .collect();
+        Ok((prepared, context))
+    }) else {
         return;
-    }
+    };
     let Ok(mut store) = contact_store().lock() else {
         return;
     };
+    if store.generation != generation {
+        return;
+    }
     let Some(path) = store.device_sync_outbox_path.clone() else {
         return;
     };
-    let retained = store
-        .device_sync_outbox
-        .iter()
-        .filter(|item| !delivered.contains(&item.id))
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut retained = store.device_sync_outbox.clone();
+    let mut leases = store.attachment_leases.clone();
+    for result in results {
+        if let Some(blob) = &result.blob {
+            if !leases
+                .iter()
+                .any(|lease| lease.record_key == blob.record_key)
+            {
+                leases.push(AttachmentLease {
+                    record_key: blob.record_key.clone(),
+                    chunk_count: blob.chunk_count,
+                    delete_after_ms: blob.created_at_ms.saturating_add(ATTACHMENT_RETENTION_MS),
+                });
+            }
+        }
+        if result.delivered {
+            retained.retain(|item| item.id != result.id);
+        } else if let Some(item) = retained.iter_mut().find(|item| item.id == result.id) {
+            item.attempts = item.attempts.saturating_add(1);
+            item.next_attempt_ms = now.saturating_add(retry_delay_ms(item.attempts));
+            item.blob = result.blob;
+        }
+    }
+    if let Some(lease_path) = &store.attachment_lease_path {
+        if persist_attachment_leases(lease_path, &leases).is_err() {
+            return;
+        }
+        store.attachment_leases = leases;
+    }
     if persist_device_sync_outbox(&path, &retained).is_ok() {
         store.device_sync_outbox = retained;
     }
 }
-
 fn queue_outgoing(
     message_path: &Path,
     message: StoredMessage,
@@ -1994,16 +2296,22 @@ fn poll_outbox_transport(
             let results = pending
                 .into_iter()
                 .map(|item| {
-                    let direct = veilid_adapter::deliver_payload(
-                        &item.route_blob,
-                        None,
-                        item.payload.clone(),
+                    let delivered = deliver_with_offline_fallback(
+                        || {
+                            veilid_adapter::deliver_payload(
+                                &item.route_blob,
+                                None,
+                                item.payload.clone(),
+                            )
+                        },
+                        || {
+                            item.offline_keys
+                                .as_ref()
+                                .map_or(Err(CoreError::FeatureUnavailable), |keys| {
+                                    veilid_adapter::store_offline_payload(keys, &item.payload)
+                                })
+                        },
                     );
-                    let delivered = if let Some(keys) = &item.offline_keys {
-                        veilid_adapter::store_offline_payload(keys, &item.payload).is_ok()
-                    } else {
-                        direct.is_ok()
-                    };
                     (item, delivered)
                 })
                 .collect();
@@ -2012,6 +2320,15 @@ fn poll_outbox_transport(
         .ok()?;
     *active = Some((generation, receiver));
     None
+}
+
+fn deliver_with_offline_fallback(
+    direct: impl FnOnce() -> CoreResult<()>,
+    offline: impl FnOnce() -> CoreResult<()>,
+) -> bool {
+    // Either handoff is sufficient for `sent`. Do not hold a successful
+    // direct send hostage to an unavailable/full offline mailbox.
+    direct().is_ok() || offline().is_ok()
 }
 
 fn retry_delay_ms(attempts: u32) -> u64 {
@@ -2061,6 +2378,10 @@ fn refreshed_recipient(conversation_id: &str) -> CoreResult<PublishedIdentity> {
 
 fn apply_device_sync(encrypted: &[u8]) -> CoreResult<()> {
     let plaintext = vault::open_with_key(&identity::active_identity()?.storage_key()?, encrypted)?;
+    apply_device_sync_plaintext(&plaintext)
+}
+
+fn apply_device_sync_plaintext(plaintext: &[u8]) -> CoreResult<()> {
     let event: DeviceSyncEvent =
         serde_json::from_slice(&plaintext).map_err(|_| CoreError::VerificationFailed)?;
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
@@ -2088,9 +2409,14 @@ fn apply_device_sync(encrypted: &[u8]) -> CoreResult<()> {
             } else if store.contacts.len() < MAX_CONTACTS {
                 store.contacts.push(contact);
                 changed = true;
+            } else {
+                return Err(CoreError::StorageFull);
             }
         }
         DeviceSyncEvent::UpsertMessage { contact, message } => {
+            if message.conversation_id != contact_id(&contact.bundle.identity_ed25519) {
+                return Err(CoreError::VerificationFailed);
+            }
             validate_conversation_id(&contact.id)?;
             validate_stored_message(&message)?;
             contact.bundle.validate()?;
@@ -2103,20 +2429,10 @@ fn apply_device_sync(encrypted: &[u8]) -> CoreResult<()> {
             } else if store.contacts.len() < MAX_CONTACTS {
                 store.contacts.push(contact);
                 changed = true;
+            } else {
+                return Err(CoreError::StorageFull);
             }
-            if !store.messages.iter().any(|item| item.id == message.id)
-                && store.messages.len() < MAX_MESSAGES
-            {
-                append_message_event(
-                    &message_path,
-                    &MessageEvent::Upsert {
-                        message: message.clone(),
-                    },
-                )?;
-                store.messages.push(message);
-                store.message_event_count += 1;
-                changed = true;
-            }
+            changed |= upsert_synced_message(&mut store, &message_path, message)?;
         }
         DeviceSyncEvent::UpsertGroup { group } => {
             validate_groups(std::slice::from_ref(&group))?;
@@ -2128,6 +2444,8 @@ fn apply_device_sync(encrypted: &[u8]) -> CoreResult<()> {
             } else if store.groups.len() < MAX_CONTACTS {
                 store.groups.push(group);
                 changed = true;
+            } else {
+                return Err(CoreError::StorageFull);
             }
         }
         DeviceSyncEvent::UpsertGroupMessage { group, message } => {
@@ -2144,29 +2462,94 @@ fn apply_device_sync(encrypted: &[u8]) -> CoreResult<()> {
             } else if store.groups.len() < MAX_CONTACTS {
                 store.groups.push(group);
                 changed = true;
+            } else {
+                return Err(CoreError::StorageFull);
             }
-            if !store.messages.iter().any(|item| item.id == message.id)
-                && store.messages.len() < MAX_MESSAGES
-            {
-                append_message_event(
-                    &message_path,
-                    &MessageEvent::Upsert {
-                        message: message.clone(),
-                    },
-                )?;
-                store.messages.push(message);
-                store.message_event_count += 1;
-                changed = true;
-            }
+            changed |= upsert_synced_message(&mut store, &message_path, message)?;
         }
     }
+    // A previous attempt may have updated RAM before a disk failure. Retry
+    // persistence even when this replay no longer changes the in-memory value.
+    persist_contacts(&contact_path, &store.contacts)?;
+    persist_groups(&groups_path, &store.groups)?;
     if changed {
-        persist_contacts(&contact_path, &store.contacts)?;
-        persist_groups(&groups_path, &store.groups)?;
         store.revision = store.revision.wrapping_add(1);
         compact_message_log_if_needed(&mut store)?;
     }
     Ok(())
+}
+
+fn merge_synced_message(
+    existing: &StoredMessage,
+    incoming: &StoredMessage,
+) -> CoreResult<StoredMessage> {
+    if existing.id != incoming.id
+        || existing.conversation_id != incoming.conversation_id
+        || existing.author_id != incoming.author_id
+        || existing.sent_at_ms != incoming.sent_at_ms
+        || existing.is_outgoing != incoming.is_outgoing
+        || existing.body != incoming.body
+    {
+        return Err(CoreError::VerificationFailed);
+    }
+    let mut merged = existing.clone();
+    let rank = |state: &str| match state {
+        "not_restored" => 0,
+        "queued" => 1,
+        "sent" => 2,
+        "delivered" => 3,
+        "read" => 4,
+        _ => 0,
+    };
+    if rank(&incoming.delivery_state) > rank(&existing.delivery_state) {
+        merged.delivery_state = incoming.delivery_state.clone();
+    }
+    if existing.attachment_base64.is_none() && incoming.attachment_base64.is_some() {
+        merged.attachment_name = incoming.attachment_name.clone();
+        merged.attachment_base64 = incoming.attachment_base64.clone();
+    }
+    // Reading on one device must not overwrite the local read state.
+    Ok(merged)
+}
+
+fn legacy_attachment_placeholder(message: &StoredMessage) -> bool {
+    !message.is_outgoing
+        && message.attachment_base64.is_none()
+        && message.attachment_name.is_none()
+        && message.body.starts_with("📎 ")
+}
+
+fn upsert_synced_message(
+    store: &mut ContactStore,
+    path: &Path,
+    message: StoredMessage,
+) -> CoreResult<bool> {
+    if let Some(index) = store.messages.iter().position(|item| item.id == message.id) {
+        let merged = merge_synced_message(&store.messages[index], &message)?;
+        if serde_json::to_vec(&merged).ok() == serde_json::to_vec(&store.messages[index]).ok() {
+            return Ok(false);
+        }
+        append_message_event(
+            path,
+            &MessageEvent::Upsert {
+                message: merged.clone(),
+            },
+        )?;
+        store.messages[index] = merged;
+    } else {
+        if store.messages.len() >= MAX_MESSAGES {
+            return Err(CoreError::StorageFull);
+        }
+        append_message_event(
+            path,
+            &MessageEvent::Upsert {
+                message: message.clone(),
+            },
+        )?;
+        store.messages.push(message);
+    }
+    store.message_event_count += 1;
+    Ok(true)
 }
 
 fn same_contact(first: &StoredContact, second: &StoredContact) -> bool {
@@ -2245,7 +2628,7 @@ fn load_contacts(path: &Path, legacy_path: &Path) -> CoreResult<(Vec<StoredConta
 fn persist_contacts(path: &Path, contacts: &[StoredContact]) -> CoreResult<()> {
     let encoded = serde_json::to_vec(contacts).map_err(|_| CoreError::Internal)?;
     if encoded.len() as u64 > MAX_CONTACT_STORE_BYTES {
-        return Err(CoreError::LimitExceeded);
+        return Err(CoreError::StorageFull);
     }
     let key = identity::active_identity()?.storage_key()?;
     let encrypted = vault::seal_with_key(&key, &encoded)?;
@@ -2272,6 +2655,11 @@ fn validate_groups(groups: &[StoredGroup]) -> CoreResult<()> {
             validate_conversation_id(&member.id)?;
             validate_display_name(&member.display_name)?;
             member.identity.validate()?;
+            if member.invitation_code.as_ref().is_some_and(|code| {
+                code.len() > 128 || !(code.starts_with("sylphy:VLD") || code.starts_with("VLD"))
+            }) {
+                return Err(CoreError::VerificationFailed);
+            }
             if member.id != contact_id(&member.identity.bundle.identity_ed25519)
                 || member.fingerprint != fingerprint(&member.identity.bundle.identity_ed25519)
                 || !member_ids.insert(member.id.as_str())
@@ -2303,7 +2691,7 @@ fn persist_groups(path: &Path, groups: &[StoredGroup]) -> CoreResult<()> {
     validate_groups(groups)?;
     let encoded = serde_json::to_vec(groups).map_err(|_| CoreError::Internal)?;
     if encoded.len() as u64 > MAX_CONTACT_STORE_BYTES {
-        return Err(CoreError::LimitExceeded);
+        return Err(CoreError::StorageFull);
     }
     let key = identity::active_identity()?.storage_key()?;
     let encrypted = vault::seal_with_key(&key, &encoded)?;
@@ -2591,6 +2979,14 @@ fn apply_message_event(messages: &mut Vec<StoredMessage>, event: MessageEvent) -
 }
 
 fn append_message_event(path: &Path, event: &MessageEvent) -> CoreResult<()> {
+    append_message_event_with_limit(path, event, MAX_MESSAGE_STORE_BYTES)
+}
+
+fn append_message_event_with_limit(
+    path: &Path,
+    event: &MessageEvent,
+    limit: u64,
+) -> CoreResult<()> {
     if !path.exists() {
         atomic_file::replace(path, MESSAGE_LOG_MAGIC)?;
     }
@@ -2598,8 +2994,20 @@ fn append_message_event(path: &Path, event: &MessageEvent) -> CoreResult<()> {
     let encrypted = vault::seal_with_key(&identity::active_identity()?.storage_key()?, &encoded)?;
     let length = u32::try_from(encrypted.len()).map_err(|_| CoreError::LimitExceeded)?;
     let current = fs::metadata(path).map_err(|_| CoreError::Internal)?.len();
-    if current + 4 + u64::from(length) > MAX_MESSAGE_STORE_BYTES {
-        return Err(CoreError::LimitExceeded);
+    if current + 4 + u64::from(length) > limit {
+        // A local capacity error is retryable, not an invalid network packet.
+        // Compact together with the event so deletion still works at capacity.
+        let (mut messages, _) = load_message_log(path)?;
+        apply_message_event(&mut messages, event.clone()).map_err(|error| match error {
+            CoreError::LimitExceeded => CoreError::StorageFull,
+            other => other,
+        })?;
+        return write_message_snapshot_with_limit(path, &messages, limit).map_err(
+            |error| match error {
+                CoreError::LimitExceeded => CoreError::StorageFull,
+                other => other,
+            },
+        );
     }
     let mut options = OpenOptions::new();
     options.append(true).write(true);
@@ -2631,6 +3039,14 @@ fn compact_message_log_if_needed(store: &mut ContactStore) -> CoreResult<()> {
 }
 
 fn write_message_snapshot(path: &Path, messages: &[StoredMessage]) -> CoreResult<()> {
+    write_message_snapshot_with_limit(path, messages, MAX_MESSAGE_STORE_BYTES)
+}
+
+fn write_message_snapshot_with_limit(
+    path: &Path,
+    messages: &[StoredMessage],
+    limit: u64,
+) -> CoreResult<()> {
     if messages.len() > MAX_MESSAGES {
         return Err(CoreError::LimitExceeded);
     }
@@ -2645,7 +3061,7 @@ fn write_message_snapshot(path: &Path, messages: &[StoredMessage]) -> CoreResult
         let length = u32::try_from(encrypted.len()).map_err(|_| CoreError::LimitExceeded)?;
         output.extend_from_slice(&length.to_be_bytes());
         output.extend_from_slice(&encrypted);
-        if output.len() as u64 > MAX_MESSAGE_STORE_BYTES {
+        if output.len() as u64 > limit {
             return Err(CoreError::LimitExceeded);
         }
     }
@@ -2656,7 +3072,7 @@ fn persist_bytes(path: &Path, bytes: &[u8]) -> CoreResult<()> {
     atomic_file::replace(path, bytes)
 }
 
-fn message_json(message: StoredMessage) -> Value {
+fn message_json(message: &StoredMessage) -> Value {
     json!({
         "id": message.id,
         "author_id": message.author_id,
@@ -2673,7 +3089,76 @@ fn default_delivery_state() -> String {
     "sent".to_owned()
 }
 
-fn decode_group_invitation(plaintext: &str) -> CoreResult<Option<GroupInvitation>> {
+fn encode_group_invitation(
+    invitation: &GroupInvitation,
+    publish: impl FnOnce(&[u8]) -> CoreResult<(String, u16)>,
+) -> CoreResult<(String, GroupInvitationPointer)> {
+    let bytes = serde_json::to_vec(invitation).map_err(|_| CoreError::Internal)?;
+    if bytes.len() > MAX_ATTACHMENT_BYTES {
+        return Err(CoreError::LimitExceeded);
+    }
+    let mut key = zeroize::Zeroizing::new([0_u8; 32]);
+    OsRng.fill_bytes(key.as_mut());
+    let encrypted = vault::seal_with_key(&key, &bytes)?;
+    let (record_key, chunk_count) = publish(&encrypted)?;
+    let pointer = GroupInvitationPointer {
+        version: 2,
+        size: bytes.len(),
+        record_key,
+        chunk_count,
+        key_base64: STANDARD_NO_PAD.encode(key.as_ref()),
+    };
+    let encoded =
+        STANDARD_NO_PAD.encode(serde_json::to_vec(&pointer).map_err(|_| CoreError::Internal)?);
+    Ok((format!("{GROUP_INVITE_BLOB_PREFIX}{encoded}"), pointer))
+}
+
+fn decode_group_invitation_with(
+    plaintext: &str,
+    fetch: impl FnOnce(&str, u16) -> CoreResult<Vec<u8>>,
+) -> CoreResult<Option<GroupInvitation>> {
+    if let Some(encoded) = plaintext.strip_prefix(GROUP_INVITE_BLOB_PREFIX) {
+        if encoded.len() > MAX_MESSAGE_BODY_BYTES {
+            return Err(CoreError::LimitExceeded);
+        }
+        let bytes = STANDARD_NO_PAD
+            .decode(encoded)
+            .map_err(|_| CoreError::InvalidInput)?;
+        let pointer: GroupInvitationPointer =
+            serde_json::from_slice(&bytes).map_err(|_| CoreError::InvalidInput)?;
+        if pointer.version != 2 {
+            return Err(CoreError::UnsupportedVersion);
+        }
+        if pointer.size == 0
+            || pointer.size > MAX_ATTACHMENT_BYTES
+            || pointer.record_key.is_empty()
+            || pointer.record_key.len() > 1024
+            || pointer.chunk_count == 0
+            || pointer.chunk_count > 32
+        {
+            return Err(CoreError::InvalidInput);
+        }
+        let key = zeroize::Zeroizing::new(
+            STANDARD_NO_PAD
+                .decode(&pointer.key_base64)
+                .map_err(|_| CoreError::InvalidInput)?,
+        );
+        let key: &[u8; 32] = key
+            .as_slice()
+            .try_into()
+            .map_err(|_| CoreError::InvalidInput)?;
+        let encrypted = fetch(&pointer.record_key, pointer.chunk_count)?;
+        if encrypted.len() > pointer.size + 64 {
+            return Err(CoreError::LimitExceeded);
+        }
+        let bytes = vault::open_with_key(key, &encrypted)?;
+        if bytes.len() != pointer.size {
+            return Err(CoreError::VerificationFailed);
+        }
+        return serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| CoreError::VerificationFailed);
+    }
     let Some(encoded) = plaintext.strip_prefix(GROUP_INVITE_PREFIX) else {
         return Ok(None);
     };
@@ -2822,6 +3307,459 @@ fn grouped_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synced_messages_complete_attachments_and_never_regress_receipts() {
+        let mut old = history_message(1);
+        old.delivery_state = "queued".to_owned();
+        old.is_read = false;
+        let mut new = old.clone();
+        new.delivery_state = "read".to_owned();
+        new.is_read = true;
+        new.attachment_name = Some("file.bin".to_owned());
+        new.attachment_base64 = Some(STANDARD.encode([1, 2, 3]));
+        let merged = merge_synced_message(&old, &new).unwrap();
+        assert_eq!(merged.delivery_state, "read");
+        assert_eq!(merged.attachment_base64, new.attachment_base64);
+        assert!(!merged.is_read);
+        assert_eq!(
+            merge_synced_message(&merged, &old).unwrap().delivery_state,
+            "read"
+        );
+        new.body = "conflicting content".to_owned();
+        assert!(merge_synced_message(&old, &new).is_err());
+    }
+
+    #[test]
+    fn full_log_compacts_and_retains_unsaved_packets_until_space_is_freed() {
+        let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+        let directory =
+            std::env::temp_dir().join(format!("sylphy-capacity-{}", std::process::id()));
+        identity::ensure_identity(
+            &directory.to_string_lossy(),
+            "capacity-test-vault",
+            None,
+            None,
+        )
+        .unwrap();
+        let path = directory.join("capacity.log");
+        let first = history_message(1);
+        append_message_event(
+            &path,
+            &MessageEvent::Upsert {
+                message: first.clone(),
+            },
+        )
+        .unwrap();
+        let limit = fs::metadata(&path).unwrap().len() + 10;
+        // A receipt update would exceed the log, but its compacted snapshot fits.
+        let mut update = first.clone();
+        update.delivery_state = "read".to_owned();
+        append_message_event_with_limit(&path, &MessageEvent::Upsert { message: update }, limit)
+            .unwrap();
+        let error = append_message_event_with_limit(
+            &path,
+            &MessageEvent::Upsert {
+                message: history_message(2),
+            },
+            limit,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CoreError::StorageFull));
+        assert!(!should_discard_inbound(&error));
+        let (messages, _) = load_message_log(&path).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].delivery_state, "read");
+        // Deletion also succeeds with no room to append another event.
+        append_message_event_with_limit(
+            &path,
+            &MessageEvent::DeleteMessage {
+                message_id: first.id,
+            },
+            limit,
+        )
+        .unwrap();
+        assert!(load_message_log(&path).unwrap().0.is_empty());
+        append_message_event_with_limit(
+            &path,
+            &MessageEvent::Upsert {
+                message: history_message(2),
+            },
+            limit,
+        )
+        .unwrap();
+        assert_eq!(load_message_log(&path).unwrap().0.len(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(feature = "signal-ratchet")]
+    #[test]
+    fn backup_restores_sealed_outbox_and_legacy_backup_marks_missing_retries() {
+        let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+        let directory =
+            std::env::temp_dir().join(format!("sylphy-outbox-backup-{}", std::process::id()));
+        let peer_root = directory.join("peer");
+        identity::ensure_identity(
+            &peer_root.to_string_lossy(),
+            "backup-test-vault",
+            None,
+            None,
+        )
+        .unwrap();
+        let peer = identity::active_identity().unwrap();
+        let published = PublishedIdentity::new(
+            &peer.signing_key().unwrap(),
+            peer.public_bundle(ratchet_adapter::public_pre_key_bundle().unwrap())
+                .unwrap(),
+            vec![1; 512],
+            crate::peer_identity::PublicProfile {
+                display_name: Some("Peer".to_owned()),
+                avatar_base64: None,
+            },
+            None,
+        )
+        .unwrap();
+        let member = group_member(published.clone()).unwrap();
+        let contact = StoredContact {
+            id: member.id.clone(),
+            display_name: member.display_name.clone(),
+            fingerprint: member.fingerprint.clone(),
+            added_at_ms: current_time_ms().unwrap(),
+            bundle: published.bundle.clone(),
+            published_identity: Some(published.clone()),
+            invitation_code: None,
+            previous_bundles: Vec::new(),
+            verified: false,
+        };
+        let local_root = directory.join("local");
+        identity::ensure_identity(
+            &local_root.to_string_lossy(),
+            "backup-test-vault",
+            None,
+            None,
+        )
+        .unwrap();
+        configure_storage(&local_root.to_string_lossy()).unwrap();
+        let (payload, id) = secure_packet::seal_for_test(
+            &published.delivery_devices().unwrap()[0],
+            "Synthetic message",
+        )
+        .unwrap();
+        let mut message = history_message(1);
+        message.id = id.clone();
+        message.conversation_id = contact.id.clone();
+        message.delivery_state = "queued".to_owned();
+        let mut delivery = pending_delivery(&id);
+        delivery.payload = payload.clone();
+        let backup = MessagingAccountBackup {
+            version: 1,
+            contacts: vec![contact.clone()],
+            groups: Vec::new(),
+            messages: vec![message.clone()],
+            outbox: vec![delivery],
+            attachment_leases: Vec::new(),
+        };
+        import_account_backup(serde_json::to_value(&backup).unwrap()).unwrap();
+        configure_storage(&local_root.to_string_lossy()).unwrap();
+        let restored = export_account_backup().unwrap();
+        assert_eq!(
+            restored["outbox"][0]["payload"],
+            serde_json::to_value(payload).unwrap()
+        );
+        assert_eq!(restored["messages"][0]["delivery_state"], "queued");
+        // Upsert updates the existing ID and survives restarting the store.
+        message.delivery_state = "sent".to_owned();
+        apply_device_sync_plaintext(
+            &serde_json::to_vec(&DeviceSyncEvent::UpsertMessage { contact, message }).unwrap(),
+        )
+        .unwrap();
+        configure_storage(&local_root.to_string_lossy()).unwrap();
+        assert_eq!(
+            export_account_backup().unwrap()["messages"][0]["delivery_state"],
+            "sent"
+        );
+        let mut legacy = serde_json::to_value(backup).unwrap();
+        legacy.as_object_mut().unwrap().remove("outbox");
+        import_account_backup(legacy).unwrap();
+        assert_eq!(
+            export_account_backup().unwrap()["messages"][0]["delivery_state"],
+            "not_restored"
+        );
+        // Group endpoints receive authenticated route changes and persist them.
+        let updated = PublishedIdentity::new(
+            &peer.signing_key().unwrap(),
+            published.bundle.clone(),
+            vec![2; 512],
+            published.profile.clone(),
+            None,
+        )
+        .unwrap();
+        {
+            let mut store = contact_store().lock().unwrap();
+            store.groups = vec![StoredGroup {
+                id: "group-endpoints".to_owned(),
+                name: "Group".to_owned(),
+                description: String::new(),
+                mode: "group".to_owned(),
+                admin_id: "me".to_owned(),
+                created_at_ms: current_time_ms().unwrap(),
+                members: vec![member.clone()],
+            }];
+            update_group_endpoints(&mut store, &member.id, &updated).unwrap();
+        }
+        configure_storage(&local_root.to_string_lossy()).unwrap();
+        // An older address-book route with equal prekey expiry must not undo it.
+        assert_eq!(
+            current_group("group-endpoints").unwrap().unwrap().members[0]
+                .identity
+                .route_blob,
+            vec![2; 512]
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn history_message(index: usize) -> StoredMessage {
+        StoredMessage {
+            id: format!("message-{index:06}"),
+            conversation_id: if index % 5 == 0 { "other" } else { "chat" }.to_owned(),
+            author_id: "me".to_owned(),
+            body: "Synthetic message".to_owned(),
+            sent_at_ms: (index / 3) as u64,
+            is_outgoing: true,
+            is_read: true,
+            delivery_state: "sent".to_owned(),
+            attachment_name: None,
+            attachment_base64: None,
+        }
+    }
+
+    #[test]
+    fn message_pages_preserve_order_and_cursor_without_copying_history() {
+        let mut history = (0..503).map(history_message).collect::<Vec<_>>();
+        history.reverse();
+        history.rotate_left(91);
+        let mut expected = history
+            .iter()
+            .filter(|message| message.conversation_id == "chat")
+            .collect::<Vec<_>>();
+        expected.sort_by_key(|message| (message.sent_at_ms, message.id.as_str()));
+        for limit in [1, 2, 7, 120, 500] {
+            let mut before_ms = None;
+            let mut before_id = None;
+            let mut collected = Vec::new();
+            loop {
+                let (page, has_more) =
+                    select_message_page(&history, "chat", before_ms, before_id, limit);
+                assert!(page.len() <= limit);
+                for message in &page {
+                    assert!(
+                        history
+                            .iter()
+                            .any(|original| std::ptr::eq(*message, original))
+                    );
+                }
+                collected.splice(0..0, page.iter().map(|message| message.id.as_str()));
+                if !has_more {
+                    break;
+                }
+                before_ms = page.first().map(|message| message.sent_at_ms);
+                before_id = page.first().map(|message| message.id.as_str());
+            }
+            assert_eq!(
+                collected,
+                expected
+                    .iter()
+                    .map(|message| message.id.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+        let (page, has_more) = select_message_page(&history, "absent", None, None, 120);
+        assert!(page.is_empty());
+        assert!(!has_more);
+        let (page, _) = select_message_page(&history, "chat", Some(12), None, 120);
+        assert!(page.iter().all(|message| message.sent_at_ms < 12));
+    }
+
+    #[test]
+    #[ignore = "manual synthetic performance comparison; no timing threshold"]
+    fn benchmark_message_page_selection() {
+        let mut history = (0..25_000)
+            .map(|index| {
+                let mut message = history_message(index);
+                message.body = "x".repeat(256);
+                if index % 8 == 0 {
+                    message.attachment_name = Some("sample.bin".to_owned());
+                    message.attachment_base64 = Some("A".repeat(8192));
+                }
+                message
+            })
+            .collect::<Vec<_>>();
+        history.rotate_left(9123);
+        let legacy_start = std::time::Instant::now();
+        for _ in 0..10 {
+            let mut messages = history
+                .iter()
+                .filter(|message| message.conversation_id == "chat")
+                .cloned()
+                .collect::<Vec<_>>();
+            messages.sort_by(|left, right| {
+                right
+                    .sent_at_ms
+                    .cmp(&left.sent_at_ms)
+                    .then_with(|| right.id.cmp(&left.id))
+            });
+            messages.truncate(120);
+            messages.reverse();
+            std::hint::black_box(messages);
+        }
+        let legacy = legacy_start.elapsed();
+        let optimized_start = std::time::Instant::now();
+        for _ in 0..10 {
+            std::hint::black_box(select_message_page(&history, "chat", None, None, 120));
+        }
+        eprintln!(
+            "25,000 synthetic messages, 10 page reads: legacy={legacy:?}, optimized={:?}",
+            optimized_start.elapsed()
+        );
+    }
+
+    #[test]
+    fn direct_delivery_completes_without_waiting_for_offline_storage() {
+        assert!(deliver_with_offline_fallback(
+            || Ok(()),
+            || panic!("A successful direct send must not wait for the mailbox"),
+        ));
+        assert!(deliver_with_offline_fallback(
+            || Err(CoreError::NetworkAttachFailed),
+            || Ok(()),
+        ));
+        assert!(!deliver_with_offline_fallback(
+            || Err(CoreError::NetworkAttachFailed),
+            || Err(CoreError::LimitExceeded),
+        ));
+        assert!(!deliver_with_offline_fallback(
+            || Err(CoreError::NetworkAttachFailed),
+            || Err(CoreError::FeatureUnavailable),
+        ));
+    }
+
+    #[cfg(feature = "signal-ratchet")]
+    #[test]
+    fn group_invitation_with_large_signed_profiles_uses_small_authenticated_pointer() {
+        let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "sylphy-group-{}-{}",
+            std::process::id(),
+            current_time_ms().unwrap(),
+        ));
+        let make_member = |name: &str| {
+            let root = directory.join(name).to_string_lossy().into_owned();
+            identity::ensure_identity(&root, "group-test-vault", None, None).unwrap();
+            let local = identity::active_identity().unwrap();
+            group_member(
+                PublishedIdentity::new(
+                    &local.signing_key().unwrap(),
+                    local
+                        .public_bundle(ratchet_adapter::public_pre_key_bundle().unwrap())
+                        .unwrap(),
+                    vec![1; 512],
+                    crate::peer_identity::PublicProfile {
+                        display_name: Some(name.to_owned()),
+                        avatar_base64: Some(STANDARD.encode(vec![42; 9000])),
+                    },
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let admin = make_member("Admin");
+        let member = make_member("Member");
+        let invitation = GroupInvitation {
+            version: 1,
+            group: StoredGroup {
+                id: "group-regression".to_owned(),
+                name: "Private group".to_owned(),
+                description: String::new(),
+                mode: "group".to_owned(),
+                admin_id: admin.id.clone(),
+                created_at_ms: current_time_ms().unwrap(),
+                members: vec![member],
+            },
+            admin,
+        };
+        validate_groups(std::slice::from_ref(&invitation.group)).unwrap();
+        let original = serde_json::to_vec(&invitation).unwrap();
+        assert!(original.len() > MAX_MESSAGE_BODY_BYTES);
+        let mut blob = Vec::new();
+        let (control, pointer) = encode_group_invitation(&invitation, |bytes| {
+            blob = bytes.to_vec();
+            Ok(("test-record".to_owned(), 3))
+        })
+        .unwrap();
+        assert!(control.len() < 1024);
+        assert!(!blob.windows(13).any(|part| part == b"Private group"));
+        let decoded = decode_group_invitation_with(&control, |record, chunks| {
+            assert_eq!(record, "test-record");
+            assert_eq!(chunks, 3);
+            Ok(blob.clone())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), original);
+        validate_groups(std::slice::from_ref(&decoded.group)).unwrap();
+        // Missing blobs remain retryable; corrupted ciphertext is never accepted.
+        assert!(matches!(
+            decode_group_invitation_with(&control, |_, _| { Err(CoreError::NetworkAttachFailed) }),
+            Err(CoreError::NetworkAttachFailed)
+        ));
+        let mut corrupted = blob.clone();
+        *corrupted.last_mut().unwrap() ^= 1;
+        assert!(decode_group_invitation_with(&control, |_, _| Ok(corrupted)).is_err());
+        let oversized = GroupInvitationPointer {
+            size: MAX_ATTACHMENT_BYTES + 1,
+            ..pointer
+        };
+        let invalid_control = format!(
+            "{GROUP_INVITE_BLOB_PREFIX}{}",
+            STANDARD_NO_PAD.encode(serde_json::to_vec(&oversized).unwrap())
+        );
+        assert!(
+            decode_group_invitation_with(&invalid_control, |_, _| {
+                panic!("Reject invalid pointers before network I/O")
+            })
+            .is_err()
+        );
+        // Exercise the real hybrid/Signal packet and receive path, including
+        // a missing blob on the first attempt and a retry with the same packet.
+        let admin_root = directory.join("Admin").to_string_lossy().into_owned();
+        let member_root = directory.join("Member").to_string_lossy().into_owned();
+        identity::activate_from_storage(&admin_root, "group-test-vault").unwrap();
+        let device = invitation.group.members[0]
+            .identity
+            .delivery_devices()
+            .unwrap()
+            .remove(0);
+        let (packet, _) = secure_packet::seal_for_test(&device, &control).unwrap();
+        assert!(packet.len() <= 32 * 1024);
+        identity::activate_from_storage(&member_root, "group-test-vault").unwrap();
+        configure_storage(&member_root).unwrap();
+        assert!(matches!(
+            persist_inbound_payload_with(&packet, |_, _| { Err(CoreError::NetworkAttachFailed) }),
+            Err(CoreError::NetworkAttachFailed)
+        ));
+        assert!(persist_inbound_payload_with(&packet, |_, _| Ok(blob)).unwrap());
+        // The recipient keeps the admin as its sole remote member, including
+        // after a restart. It must not fan out messages to itself.
+        configure_storage(&member_root).unwrap();
+        {
+            let store = contact_store().lock().unwrap();
+            assert_eq!(store.groups.len(), 1);
+            assert_eq!(store.groups[0].members.len(), 1);
+            assert_eq!(store.groups[0].members[0].id, invitation.admin.id);
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn partial_delivery_retries_survive_restart_and_cancellation() {

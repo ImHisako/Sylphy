@@ -192,6 +192,7 @@ pub(crate) fn import_account_record(
     value: serde_json::Value,
 ) -> CoreResult<()> {
     validate_inputs(storage_directory, vault_password)?;
+    crate::account_backup::recover_pending_import(Path::new(storage_directory))?;
     let record: IdentityRecord =
         serde_json::from_value(value).map_err(|_| CoreError::VerificationFailed)?;
     record.validate()?;

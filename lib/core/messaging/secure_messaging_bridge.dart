@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart';
+
 import 'models.dart';
 
 abstract class SecureMessagingBridge {
@@ -36,6 +38,15 @@ abstract interface class InboxRefreshingBridge {
 
   /// Pulls and persists pending network envelopes without blocking rendering.
   Future<int> refreshInbox();
+}
+
+/// Shares completed inbox changes with open chats without another network poll.
+abstract interface class InboxRevisionNotifications {
+  ValueListenable<int> get inboxChanges;
+}
+
+abstract interface class InboxStorageStatus {
+  bool get inboxStorageFull;
 }
 
 /// Optional capability so existing integrations can keep implementing the

@@ -17,6 +17,7 @@ class VeilidSnapshot {
     this.attachmentState = 'unavailable',
     this.livePeerCount = 0,
     this.publicInternetReady = false,
+    this.routeNeedsPublish = false,
     this.diagnosticCode,
   });
 
@@ -26,6 +27,7 @@ class VeilidSnapshot {
   final String attachmentState;
   final int livePeerCount;
   final bool publicInternetReady;
+  final bool routeNeedsPublish;
   final String? diagnosticCode;
 
   bool get isAttached =>
@@ -110,6 +112,7 @@ class VeilidSnapshot {
       attachmentState: attachmentState,
       livePeerCount: livePeerCount,
       publicInternetReady: publicInternetReady,
+      routeNeedsPublish: data['route_needs_publish'] == true,
     );
   }
 }
@@ -226,6 +229,7 @@ class VeilidService extends ChangeNotifier {
     const accountFiles = [
       'contacts-v2.vault',
       'contacts-v1.json',
+      'groups-v1.vault',
       'messages-v1.vault',
       'messages-v2.log',
       'outbox-v1.vault',
@@ -345,9 +349,10 @@ class VeilidService extends ChangeNotifier {
         _snapshot.diagnosticCode != value.diagnosticCode ||
         _snapshot.attachmentState != value.attachmentState ||
         _snapshot.livePeerCount != value.livePeerCount ||
+        _snapshot.routeNeedsPublish != value.routeNeedsPublish ||
         _snapshot.publicInternetReady != value.publicInternetReady;
     _snapshot = value;
-    if (changed) {
+    if (changed || value.routeNeedsPublish) {
       AppLog.instance.record(
         category: 'veilid',
         action: 'state_changed',
