@@ -6,6 +6,157 @@ import 'package:sylphy/features/messenger/group_management_page.dart';
 
 void main() {
   testWidgets(
+    'saving zero privileges preserves admin; only revoke removes it',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(800, 1200));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final bridge = _Groups()..alicePermissions = {'delete_messages': true};
+      await tester.pumpWidget(
+        MaterialApp(
+          home: GroupManagementPage(bridge: bridge, conversationId: 'group'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      Future<void> openRole() async {
+        await tester.ensureVisible(find.byTooltip('Gestisci membro'));
+        await tester.tap(find.byTooltip('Gestisci membro'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Ruolo e privilegi'));
+        await tester.pumpAndSettle();
+      }
+
+      await openRole();
+      await tester.tap(find.text('Eliminare messaggi'));
+      await tester.tap(find.text('Salva'));
+      await tester.pumpAndSettle();
+      expect(bridge.actions.single['kind'], 'set_admin');
+      expect(
+        (bridge.actions.single['permissions'] as Map).values,
+        everyElement(false),
+      );
+      expect(find.text('Amministratore'), findsOneWidget);
+      await openRole();
+      await tester.tap(find.text('Revoca ruolo'));
+      await tester.pumpAndSettle();
+      expect(bridge.actions.last['permissions'], isNull);
+      expect(find.text('Amministratore'), findsNothing);
+    },
+  );
+
+  testWidgets('inbox updates do not starve a pending settings load', (
+    tester,
+  ) async {
+    final bridge = _LiveGroups();
+    final details = await bridge.groupDetails('group');
+    final pending = Completer<Map<String, dynamic>>();
+    var calls = 0;
+    bridge.detailsOverride = () {
+      calls++;
+      return pending.future;
+    };
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GroupManagementPage(bridge: bridge, conversationId: 'group'),
+      ),
+    );
+    for (var i = 0; i < 10; i++) {
+      bridge.inboxChanges.value++;
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    expect(calls, 1);
+    pending.complete(details);
+    await tester.pumpAndSettle();
+    expect(find.text('Team Sylphy'), findsOneWidget);
+    expect(calls, 2);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+    bridge.inboxChanges.dispose();
+  });
+
+  testWidgets('settings timeout offers a working retry', (tester) async {
+    final bridge = _Groups();
+    final details = await bridge.groupDetails('group');
+    final pending = Completer<Map<String, dynamic>>();
+    bridge.detailsOverride = () => pending.future;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GroupManagementPage(bridge: bridge, conversationId: 'group'),
+      ),
+    );
+    await tester.pump(const Duration(seconds: 11));
+    await tester.pump();
+    expect(
+      find.textContaining('stanno impiegando troppo tempo'),
+      findsOneWidget,
+    );
+    bridge.detailsOverride = () async => details;
+    await tester.tap(find.text('Riprova'));
+    await tester.pumpAndSettle();
+    expect(find.text('Team Sylphy'), findsOneWidget);
+    expect(find.text('Riprova'), findsNothing);
+    pending.complete(details);
+    await tester.pump();
+  });
+
+  testWidgets('new permissions are usable without reopening group settings', (
+    tester,
+  ) async {
+    final bridge = _LiveGroups()..owner = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GroupManagementPage(bridge: bridge, conversationId: 'group'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    bridge.grantedPermissions.add('manage_permissions');
+    bridge.inboxChanges.value++;
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Permessi e antispam'));
+    await tester.pumpAndSettle();
+    expect(find.text('Permessi del gruppo'), findsOneWidget);
+    expect(find.text('Inviare link'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    bridge.inboxChanges.dispose();
+  });
+  testWidgets('pinned messages show their content without an ID search field', (
+    tester,
+  ) async {
+    final bridge = _Groups()
+      ..searchOverride = (query) async {
+        expect(query, 'id:D7BFDC');
+        return {
+          'messages': [
+            {
+              'id': 'D7BFDC',
+              'body': 'Testo fissato completo',
+              'author_id': 'alice',
+              'author_name': 'Alice',
+              'sent_at_ms': 1000,
+              'is_outgoing': false,
+            },
+          ],
+          'total': 1,
+          'has_more': false,
+        };
+      };
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChatSearchPage(
+          bridge: bridge,
+          conversationId: 'group',
+          pinnedMessageIds: const ['D7BFDC'],
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Messaggi fissati'), findsOneWidget);
+    expect(find.text('Testo fissato completo'), findsOneWidget);
+    expect(find.byType(TextField), findsNothing);
+    await tester.tap(find.text('Testo fissato completo'));
+    await tester.pumpAndSettle();
+    expect(find.byType(SelectableText), findsOneWidget);
+  });
+  testWidgets(
     'group settings save write permissions and never offer stickers',
     (tester) async {
       final bridge = _Groups();
@@ -52,7 +203,7 @@ void main() {
         'sylphy:VLDbob',
       ]);
       expect(
-        find.textContaining('quando il proprietario sarà online'),
+        find.textContaining('In attesa di conferma della modifica'),
         findsOneWidget,
       );
     },
@@ -231,7 +382,14 @@ void main() {
   });
 }
 
+class _LiveGroups extends _Groups implements InboxRevisionNotifications {
+  @override
+  final ValueNotifier<int> inboxChanges = ValueNotifier<int>(0);
+}
+
 class _Groups implements GroupManagementBridge {
+  Map<String, dynamic>? alicePermissions;
+  Future<Map<String, dynamic>> Function()? detailsOverride;
   bool owner = true;
   bool closed = false;
   Set<String> grantedPermissions = {};
@@ -247,39 +405,52 @@ class _Groups implements GroupManagementBridge {
   final List<Map<String, dynamic>> actions = [];
   Future<Map<String, dynamic>> Function(String)? searchOverride;
   @override
-  Future<Map<String, dynamic>> groupDetails(String conversationId) async => {
-    'id': conversationId,
-    'name': 'Team Sylphy',
-    'description': 'Gruppo aziendale',
-    'revision': 1,
-    'policy': policy,
-    'is_owner': owner,
-    'closed': closed,
-    'can_send': true,
-    'pinned': pinned,
-    'permissions': {
-      for (final key in [
-        'change_info',
-        'manage_permissions',
-        'manage_members',
-        'invite_members',
-        'pin_messages',
-        'delete_messages',
-        'add_admins',
-      ])
-        key: owner || grantedPermissions.contains(key),
-    },
-    'members': [
-      {'id': 'owner', 'name': 'Proprietario', 'is_owner': true},
-      {'id': 'alice', 'name': 'Alice', 'is_owner': false},
-    ],
-  };
+  Future<Map<String, dynamic>> groupDetails(String conversationId) async =>
+      detailsOverride != null
+      ? detailsOverride!()
+      : {
+          'id': conversationId,
+          'name': 'Team Sylphy',
+          'description': 'Gruppo aziendale',
+          'revision': 1,
+          'policy': policy,
+          'is_owner': owner,
+          'closed': closed,
+          'can_send': true,
+          'pinned': pinned,
+          'permissions': {
+            for (final key in [
+              'change_info',
+              'manage_permissions',
+              'manage_members',
+              'invite_members',
+              'pin_messages',
+              'delete_messages',
+              'add_admins',
+            ])
+              key: owner || grantedPermissions.contains(key),
+          },
+          'members': [
+            {'id': 'owner', 'name': 'Proprietario', 'is_owner': true},
+            {
+              'id': 'alice',
+              'name': 'Alice',
+              'is_owner': false,
+              'permissions': alicePermissions,
+            },
+          ],
+        };
   @override
   Future<String> groupAction(
     String conversationId,
     Map<String, dynamic> action,
   ) async {
     actions.add(action);
+    if (!pending && action['kind'] == 'set_admin') {
+      alicePermissions = action['permissions'] == null
+          ? null
+          : Map<String, dynamic>.from(action['permissions'] as Map);
+    }
     if (!pending && action['kind'] == 'policy') {
       policy = Map<String, dynamic>.from(action['policy'] as Map);
     }

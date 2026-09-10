@@ -8,6 +8,33 @@ import 'package:sylphy/core/native/native_core.dart';
 
 void main() {
   test(
+    'history merges and paginates by local order while preserving sender time',
+    () async {
+      final core = _PagedCore()
+        ..latest = [
+          {
+            ..._record('incoming', 1),
+            'order_at_ms': 2000,
+            'is_outgoing': false,
+          },
+          {..._record('outgoing', 3000), 'order_at_ms': 3000},
+        ];
+      final bridge = SylphyMessagingBridge(core: core);
+      await bridge.refreshMessages('chat');
+      final pending = bridge.loadOlderMessages('chat');
+      expect(core.lastBeforeMs, 2000);
+      core.older.complete(_page([_record('older', 1000)], false));
+      final messages = await pending;
+      expect(messages.map((m) => m.id), ['older', 'incoming', 'outgoing']);
+      expect(messages[1].sentAt.millisecondsSinceEpoch, 1);
+      expect(messages[1].orderAt.millisecondsSinceEpoch, 2000);
+      expect(
+        messages[1].copyWith(deliveryState: DeliveryState.read).orderAt,
+        messages[1].orderAt,
+      );
+    },
+  );
+  test(
     'sender names survive parsing, receipt updates and cache refreshes',
     () async {
       final core = _FakeNativeCore();
@@ -235,6 +262,7 @@ NativeCoreResponse _page(
 class _PagedCore extends _FakeNativeCore implements NativeCoreMessagePageApi {
   final older = Completer<NativeCoreResponse>();
   int olderCalls = 0;
+  int? lastBeforeMs;
   int? groupRevision;
   List<Map<String, Object>> latest = [_record('middle', 2)];
 
@@ -246,6 +274,7 @@ class _PagedCore extends _FakeNativeCore implements NativeCoreMessagePageApi {
     String? beforeId,
   }) {
     if (beforeMs != null) {
+      lastBeforeMs = beforeMs;
       olderCalls++;
       return older.future;
     }

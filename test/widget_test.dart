@@ -12,6 +12,99 @@ import 'package:sylphy/main.dart';
 
 void main() {
   testWidgets(
+    'link moderation preserves existing member restrictions and submits once',
+    (tester) async {
+      final bridge = _MenuMessagingBridge()
+        ..injectIncoming('Guarda example.com');
+      bridge.details.complete({
+        'permissions': {'manage_members': true},
+        'members': [
+          {
+            'id': 'test-contact',
+            'is_owner': false,
+            'permissions': null,
+            'restriction': {'send_media': false, 'slow_mode_seconds': 30},
+          },
+        ],
+      });
+      await tester.pumpWidget(
+        SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Contatto di test'));
+      await tester.pumpAndSettle();
+      final detectors = find.ancestor(
+        of: find.text('Guarda example.com').last,
+        matching: find.byType(GestureDetector),
+      );
+      tester
+          .widgetList<GestureDetector>(detectors)
+          .firstWhere((item) => item.onSecondaryTap != null)
+          .onSecondaryTap!();
+      await tester.pumpAndSettle();
+      final tile = tester.widget<ListTile>(
+        find.ancestor(
+          of: find.text('Blocca i link di questo membro'),
+          matching: find.byType(ListTile),
+        ),
+      );
+      tile.onTap!();
+      tile.onTap!();
+      await tester.pumpAndSettle();
+      expect(bridge.actions, [
+        {
+          'kind': 'restrict',
+          'member_id': 'test-contact',
+          'policy': {
+            'send_media': false,
+            'slow_mode_seconds': 30,
+            'send_links': false,
+          },
+        },
+      ]);
+      expect(find.byKey(const ValueKey('chat-message-list')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+  testWidgets(
+    'message actions open immediately and cannot stack while permissions load',
+    (tester) async {
+      final bridge = _MenuMessagingBridge()
+        ..injectIncoming('Messaggio del menu');
+      await tester.pumpWidget(
+        SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Contatto di test'));
+      await tester.pumpAndSettle();
+      final message = find.text('Messaggio del menu').last;
+      final detectors = find.ancestor(
+        of: message,
+        matching: find.byType(GestureDetector),
+      );
+      final detector = tester
+          .widgetList<GestureDetector>(detectors)
+          .firstWhere((item) => item.onSecondaryTap != null);
+      detector.onSecondaryTap!();
+      detector.onSecondaryTap!();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(find.text('Rispondi'), findsOneWidget);
+      expect(bridge.detailCalls, 1);
+      expect(find.text('Fissa per tutti'), findsNothing);
+      bridge.details.complete({
+        'permissions': {'pin_messages': true},
+        'pinned': [],
+      });
+      await tester.pumpAndSettle();
+      expect(find.text('Fissa per tutti'), findsOneWidget);
+      await tester.tap(find.text('Rispondi'));
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+  testWidgets(
     'notification visibility follows mobile routes and app lifecycle',
     (tester) async {
       await tester.binding.setSurfaceSize(const Size(390, 844));
@@ -652,6 +745,44 @@ class _NotifyingTestMessagingBridge extends _TestMessagingBridge
     inboxChanges.value = revision;
     return revision;
   }
+}
+
+class _MenuMessagingBridge extends _TestMessagingBridge
+    implements GroupManagementBridge {
+  _MenuMessagingBridge() : super(isGroup: true);
+  final details = Completer<Map<String, dynamic>>();
+  int detailCalls = 0;
+  final actions = <Map<String, dynamic>>[];
+
+  @override
+  Future<Map<String, dynamic>> groupDetails(String conversationId) {
+    detailCalls++;
+    return details.future;
+  }
+
+  @override
+  Future<String> groupAction(
+    String conversationId,
+    Map<String, dynamic> action,
+  ) async {
+    actions.add(action);
+    return 'applied';
+  }
+
+  @override
+  Future<Map<String, dynamic>> searchMessages(
+    String conversationId,
+    String query, {
+    int offset = 0,
+  }) async => {'messages': [], 'total': 0, 'has_more': false};
+  @override
+  Future<void> sendReply(
+    String conversationId,
+    String plaintext,
+    String replyTo,
+  ) async {}
+  @override
+  Future<String> joinGroup(String invitationCode) async => 'test-contact';
 }
 
 class _TestMessagingBridge

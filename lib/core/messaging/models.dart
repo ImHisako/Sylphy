@@ -24,19 +24,21 @@ class ChatMessage {
     required this.authorId,
     required this.body,
     required this.sentAt,
+    DateTime? orderAt,
     required this.isOutgoing,
     this.deliveryState = DeliveryState.sent,
     this.attachmentName,
     this.attachmentBytes,
     this.replyTo,
     this.authorName,
-  });
+  }) : orderAt = orderAt ?? sentAt;
 
   final String id;
   final String authorId;
   final String? authorName;
   final String body;
   final DateTime sentAt;
+  final DateTime orderAt;
   final bool isOutgoing;
   final DeliveryState deliveryState;
   final String? attachmentName;
@@ -50,6 +52,7 @@ class ChatMessage {
       authorName: authorName,
       body: body,
       sentAt: sentAt,
+      orderAt: orderAt,
       isOutgoing: isOutgoing,
       deliveryState: deliveryState ?? this.deliveryState,
       attachmentName: attachmentName,

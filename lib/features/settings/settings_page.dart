@@ -689,12 +689,13 @@ class _SettingsCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: const Color(0xFF151A21),
+    return Material(
+      color: const Color(0xFF151A21),
+      shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: const Color(0xFF303741)),
+        side: const BorderSide(color: Color(0xFF303741)),
       ),
+      clipBehavior: Clip.antiAlias,
       child: child,
     );
   }

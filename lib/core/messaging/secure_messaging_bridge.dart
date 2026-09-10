@@ -104,6 +104,10 @@ extension GroupMessagingOperations on SecureMessagingBridge {
 
 /// Optional fast-path used by the UI to render local data immediately while
 /// disk/network refreshes continue on the native worker isolate.
+abstract interface class CachedGroupManagementBridge {
+  Map<String, dynamic>? cachedGroupDetails(String conversationId);
+}
+
 abstract interface class CachedMessagingBridge
     implements SecureMessagingBridge {
   List<Conversation>? get cachedConversations;

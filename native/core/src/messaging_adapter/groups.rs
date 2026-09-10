@@ -3,6 +3,7 @@
 use super::*;
 
 const CONTROL: &str = "sylphy-group-control-v1:";
+const INLINE_CONTROL: &str = "sylphy-group-control-v2:";
 const RICH: &str = "sylphy-group-text-v1:";
 const MAX_CONTROLS: usize = 512;
 
@@ -11,7 +12,7 @@ const MAX_CONTROLS: usize = 512;
 mod tests;
 
 pub(super) fn is_control(body: &str) -> bool {
-    body.starts_with(CONTROL)
+    body.starts_with(CONTROL) || body.starts_with(INLINE_CONTROL)
 }
 
 #[cfg(all(test, feature = "signal-ratchet"))]
@@ -158,6 +159,13 @@ pub struct Management {
     pub coordinator: Option<PublishedIdentity>,
     #[serde(default)]
     pub removed: bool,
+    /// Durable opt-out. Only a new, explicit join may clear this tombstone.
+    #[serde(default)]
+    pub left: bool,
+    #[serde(default)]
+    pending_departure: Option<Departure>,
+    #[serde(default)]
+    departed: HashSet<String>,
     #[serde(default)]
     requests: Vec<Request>,
     #[serde(default)]
@@ -177,6 +185,12 @@ struct Effect {
     outgoing: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Departure {
+    event_id: String,
+    successor: Option<String>,
+}
+
 impl Management {
     pub(super) fn new(coordinator: PublishedIdentity) -> Self {
         Self {
@@ -187,20 +201,47 @@ impl Management {
 }
 
 pub(super) fn preserve_local_queues(existing: &StoredGroup, incoming: &mut StoredGroup) {
+    incoming.management.left |= existing.management.left;
+    if incoming.management.left {
+        incoming.management.removed = true;
+        incoming.management.pending_effect = None;
+    }
+    incoming.management.pending_departure = existing
+        .management
+        .pending_departure
+        .clone()
+        .or(incoming.management.pending_departure.clone());
+    incoming
+        .management
+        .departed
+        .extend(existing.management.departed.iter().cloned());
+    incoming
+        .members
+        .retain(|member| !incoming.management.departed.contains(&member.id));
     incoming.management.outbound = existing.management.outbound.clone();
     incoming.management.requests = existing.management.requests.clone();
     incoming.management.processed = existing.management.processed.clone();
     if incoming.management.coordinator.is_none() {
         incoming.management.coordinator = existing.management.coordinator.clone();
     }
-    if existing.management.closed != incoming.management.closed
-        || existing.management.deleted_messages != incoming.management.deleted_messages
+    if !incoming.management.left
+        && (existing.management.closed != incoming.management.closed
+            || existing.management.deleted_messages != incoming.management.deleted_messages)
     {
         incoming.management.pending_effect = Some(Effect {
             notice: "Moderazione del gruppo sincronizzata".to_owned(),
             event_id: new_id(),
             outgoing: false,
         });
+    }
+    if incoming.management.left {
+        incoming.management.requests.clear();
+        // A departure may already be sealed and persisted but not yet moved to
+        // the transport outbox. Do not discard it when an old snapshot arrives.
+        if !existing.management.left {
+            incoming.management.outbound.clear();
+        }
+        incoming.management.pinned.clear();
     }
 }
 
@@ -267,6 +308,10 @@ struct Request {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Control {
+    Departure {
+        group_id: String,
+        departure: Departure,
+    },
     Request {
         group_id: String,
         request: Request,
@@ -317,7 +362,7 @@ fn owner_id(group: &StoredGroup) -> CoreResult<String> {
     }
 }
 fn is_coordinator(group: &StoredGroup) -> CoreResult<bool> {
-    if group.admin_id != "me" {
+    if owner_id(group)? != local_id()? {
         return Ok(false);
     }
     let active = ratchet_adapter::public_pre_key_bundle()?.ok_or(CoreError::FeatureUnavailable)?;
@@ -330,7 +375,7 @@ fn is_coordinator(group: &StoredGroup) -> CoreResult<bool> {
                 .bundle
                 .signal_pre_key
                 .as_ref()
-                .is_some_and(|key| key.device_id == active.device_id)
+                .is_some_and(|key| key.identity_key == active.identity_key)
         }))
 }
 fn permissions(group: &StoredGroup, actor: &str) -> CoreResult<AdminPermissions> {
@@ -343,6 +388,11 @@ fn permissions(group: &StoredGroup, actor: &str) -> CoreResult<AdminPermissions>
         .get(actor)
         .cloned()
         .unwrap_or_default())
+}
+
+pub(super) fn is_admin(group: &StoredGroup) -> CoreResult<bool> {
+    let local = local_id()?;
+    Ok(local == owner_id(group)? || group.management.admins.contains_key(&local))
 }
 fn participant(group: &StoredGroup, actor: &str) -> CoreResult<bool> {
     Ok(actor == owner_id(group)?
@@ -433,8 +483,18 @@ pub(super) fn validate(group: &StoredGroup) -> CoreResult<()> {
         .keys()
         .chain(value.pinned.iter())
         .chain(value.deleted_messages.iter())
+        .chain(value.departed.iter())
     {
         validate_conversation_id(id)?;
+    }
+    if let Some(departure) = &value.pending_departure {
+        if !value.left {
+            return Err(CoreError::InvalidInput);
+        }
+        validate_conversation_id(&departure.event_id)?;
+        if let Some(successor) = &departure.successor {
+            validate_conversation_id(successor)?;
+        }
     }
     Ok(())
 }
@@ -455,7 +515,15 @@ pub(super) fn require_updated(group: &StoredGroup) -> CoreResult<()> {
 }
 
 pub fn details(id: &str) -> CoreResult<Value> {
-    let group = current_group(id)?.ok_or(CoreError::InvalidInput)?;
+    // Settings are a local read: do not refresh endpoints or persist contacts.
+    let group = contact_store()
+        .lock()
+        .map_err(|_| CoreError::Internal)?
+        .groups
+        .iter()
+        .find(|group| group.id == id && !group.management.left)
+        .cloned()
+        .ok_or(CoreError::InvalidInput)?;
     let local = local_id()?;
     let owner = owner_id(&group)?;
     let mut members = group
@@ -465,6 +533,7 @@ pub fn details(id: &str) -> CoreResult<Value> {
             json!({
                 "id": member.id, "name": member.display_name, "is_owner": member.id == owner,
                 "permissions": group.management.admins.get(&member.id),
+                "is_admin": member.id == owner || group.management.admins.contains_key(&member.id),
                 "restriction": group.management.restrictions.get(&member.id),
             })
         })
@@ -472,6 +541,7 @@ pub fn details(id: &str) -> CoreResult<Value> {
     members.push(
         json!({"id": local, "name": "Tu", "is_owner": local == owner,
         "permissions": group.management.admins.get(&local),
+        "is_admin": local == owner || group.management.admins.contains_key(&local),
         "restriction": group.management.restrictions.get(&local)}),
     );
     Ok(
@@ -576,43 +646,42 @@ pub(super) fn enforce(group: &StoredGroup, actor: &str, text: &str, media: bool)
 }
 
 fn contains_link(text: &str) -> bool {
-    text.split_whitespace().any(|word| {
-        let lower = word.to_lowercase();
-        if lower.contains("://")
-            || lower.starts_with("www.")
-            || lower.starts_with("mailto:")
-            || lower.starts_with("sylphy:")
-            || lower.starts_with("sylphy-group-join-v1:")
-        {
-            return true;
-        }
-        let host = lower
-            .trim_matches(|character: char| {
-                matches!(
-                    character,
-                    '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | '!' | '?' | '"' | '\'' | '.'
-                )
-            })
-            .split('/')
-            .next()
-            .unwrap_or_default()
-            .rsplit('@')
-            .next()
-            .unwrap_or_default()
-            .split(':')
-            .next()
-            .unwrap_or_default();
-        host.rsplit_once('.').is_some_and(|(name, tld)| {
-            !name.is_empty()
-                && (2..=24).contains(&tld.len())
-                && tld.chars().all(|character| character.is_ascii_alphabetic())
-                && name.chars().all(|character| {
-                    character.is_alphanumeric() || character == '-' || character == '.'
-                })
+    // Ignore invisible separators commonly inserted to evade moderation.
+    let normalized: String = text
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}'
+            )
         })
-    })
+        .collect();
+    let lower = normalized.to_lowercase();
+    if lower.contains("://")
+        || lower.contains("mailto:")
+        || lower.contains("sylphy:")
+        || lower.contains("sylphy-group-join-v1:")
+    {
+        return true;
+    }
+    lower
+        .split(|c: char| !(c.is_alphanumeric() || matches!(c, '-' | '.')))
+        .any(|host| {
+            let host = host.trim_matches('.');
+            if host.parse::<std::net::Ipv4Addr>().is_ok() {
+                return true;
+            }
+            host.rsplit_once('.').is_some_and(|(name, tld)| {
+                !name.is_empty()
+                    && ((2..=63).contains(&tld.chars().count())
+                        && tld.chars().all(char::is_alphabetic)
+                        || tld.starts_with("xn--") && tld.len() > 4)
+                    && name.split('.').all(|label| {
+                        !label.is_empty() && !label.starts_with('-') && !label.ends_with('-')
+                    })
+            })
+        })
 }
-
 pub fn act(id: &str, action: Action) -> CoreResult<Value> {
     let group = current_group(id)?.ok_or(CoreError::InvalidInput)?;
     let local = local_id()?;
@@ -662,9 +731,7 @@ fn apply_request(mut group: StoredGroup, request: &Request) -> CoreResult<()> {
     }
     authorized(&group, &request.actor, &request.action)?;
     require_updated(&group)?;
-    if group.management.coordinator.is_none() {
-        group.management.coordinator = Some(local_endpoint()?);
-    }
+    group.management.coordinator = Some(local_endpoint()?);
     if group.management.processed.len() >= 4096 {
         return Err(CoreError::StorageFull);
     }
@@ -696,6 +763,7 @@ fn apply_request(mut group: StoredGroup, request: &Request) -> CoreResult<()> {
                     return Err(CoreError::InvalidInput);
                 }
                 group.members.push(candidate.clone());
+                group.management.departed.remove(&candidate.id);
                 recipients.push(candidate.clone());
             }
             for code in invitation_codes {
@@ -710,6 +778,7 @@ fn apply_request(mut group: StoredGroup, request: &Request) -> CoreResult<()> {
                     return Err(CoreError::InvalidInput);
                 }
                 member.invitation_code = Some(code.trim().to_owned());
+                group.management.departed.remove(&member.id);
                 group.members.push(member.clone());
                 recipients.push(member);
             }
@@ -845,6 +914,9 @@ fn apply_request(mut group: StoredGroup, request: &Request) -> CoreResult<()> {
     snapshot.management.pending_effect = None;
     snapshot.management.invite = None;
     snapshot.management.shared_invite = None;
+    snapshot.management.left = false;
+    snapshot.management.pending_departure = None;
+    snapshot.management.departed.clear();
     let deliveries = seal_control(
         &Control::Snapshot {
             group: snapshot,
@@ -891,6 +963,44 @@ fn seal_control(control: &Control, recipients: &[GroupMember]) -> CoreResult<Vec
         return Ok(Vec::new());
     }
     let encoded = serde_json::to_vec(control).map_err(|_| CoreError::Internal)?;
+    // Small requests need only the existing encrypted direct transport. Avoid
+    // publishing and fetching a DHT attachment before the owner can apply them.
+    if encoded.len() <= 4096
+        && recipients.iter().all(|recipient| {
+            recipient.identity.delivery_devices().is_ok_and(|devices| {
+                devices.iter().all(|device| {
+                    device
+                        .bundle
+                        .capabilities
+                        .iter()
+                        .any(|capability| capability == "group-control-inline-v2")
+                })
+            })
+        })
+    {
+        let body = format!(
+            "{INLINE_CONTROL}{}",
+            String::from_utf8(encoded).map_err(|_| CoreError::Internal)?
+        );
+        let mut pending = Vec::new();
+        for recipient in recipients {
+            let (deliveries, id) = seal_endpoint(&recipient.identity, &body)?;
+            for sealed in deliveries {
+                pending.push(PendingDelivery {
+                    id: new_id(),
+                    message_id: id.clone(),
+                    is_control: true,
+                    route_blob: sealed.route_blob,
+                    payload: sealed.payload,
+                    offline_keys: sealed.offline_keys,
+                    created_at_ms: current_time_ms()?,
+                    attempts: 0,
+                    next_attempt_ms: 0,
+                });
+            }
+        }
+        return Ok(pending);
+    }
     if encoded.len() > MAX_ATTACHMENT_BYTES {
         return Err(CoreError::LimitExceeded);
     }
@@ -1006,7 +1116,67 @@ pub(super) fn transfer_outbound() -> CoreResult<()> {
     Ok(())
 }
 
+pub(super) fn prepare_leave(group: &mut StoredGroup) -> CoreResult<()> {
+    if group.management.left {
+        return Ok(());
+    }
+    let successor = if local_id()? == owner_id(group)? {
+        group
+            .members
+            .iter()
+            .min_by_key(|member| {
+                (
+                    !group.management.admins.contains_key(&member.id),
+                    member.id.as_str(),
+                )
+            })
+            .map(|member| member.id.clone())
+    } else {
+        None
+    };
+    group.management.left = true;
+    group.management.removed = true;
+    group.management.requests.clear();
+    group.management.pending_effect = None;
+    group.management.outbound.clear();
+    group.management.pinned.clear();
+    group.management.pending_departure = Some(Departure {
+        event_id: new_id(),
+        successor,
+    });
+    Ok(())
+}
+
+fn flush_departures() {
+    let groups = contact_store()
+        .lock()
+        .map(|store| {
+            store
+                .groups
+                .iter()
+                .filter(|group| group.management.pending_departure.is_some())
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for mut group in groups {
+        let departure = group.management.pending_departure.clone().unwrap();
+        let control = Control::Departure {
+            group_id: group.id.clone(),
+            departure,
+        };
+        let Ok(deliveries) = seal_control(&control, &group.members) else {
+            continue;
+        };
+        group.management.outbound.extend(deliveries);
+        group.management.pending_departure = None;
+        let _ = save(group);
+    }
+    let _ = transfer_outbound();
+}
+
 pub(super) fn process_requests() {
+    flush_departures();
     let requests = match contact_store().lock() {
         Ok(store) => store
             .groups
@@ -1090,6 +1260,14 @@ pub(super) fn receive<F>(
 where
     F: FnOnce(&str, u16) -> CoreResult<Vec<u8>>,
 {
+    if let Some(encoded) = body.strip_prefix(INLINE_CONTROL) {
+        if encoded.len() > 4096 {
+            return Err(CoreError::LimitExceeded);
+        }
+        let control: Control =
+            serde_json::from_str(encoded).map_err(|_| CoreError::InvalidInput)?;
+        return receive_control(control, sender).map(Some);
+    }
     let Some(encoded) = body.strip_prefix(CONTROL) else {
         return Ok(None);
     };
@@ -1127,7 +1305,80 @@ where
 
 fn receive_control(control: Control, sender: &PublishedIdentity) -> CoreResult<bool> {
     let sender_id = contact_id(&sender.bundle.identity_ed25519);
+    let group_id = match &control {
+        Control::Snapshot { group, .. } => &group.id,
+        Control::Request { group_id, .. }
+        | Control::Join { group_id, .. }
+        | Control::Invite { group_id, .. }
+        | Control::Rejected { group_id, .. }
+        | Control::Departure { group_id, .. } => group_id,
+    };
+    if current_group(group_id)?.is_some_and(|group| group.management.left) {
+        return Ok(false);
+    }
     match control {
+        Control::Departure {
+            group_id,
+            departure,
+        } => {
+            let mut group = current_group(&group_id)?.ok_or(CoreError::FeatureUnavailable)?;
+            validate_conversation_id(&departure.event_id)?;
+            if group.management.departed.contains(&sender_id) {
+                return Ok(false);
+            }
+            let owner = owner_id(&group)?;
+            if !group.members.iter().any(|member| member.id == sender_id) {
+                return Err(CoreError::AuthenticationFailed);
+            }
+            if owner == sender_id {
+                let successor = departure.successor.ok_or(CoreError::InvalidInput)?;
+                let local = local_id()?;
+                let endpoint = if successor == local {
+                    local_endpoint()?
+                } else {
+                    group
+                        .members
+                        .iter()
+                        .find(|member| member.id == successor && member.id != sender_id)
+                        .map(|member| member.identity.clone())
+                        .ok_or(CoreError::AuthenticationFailed)?
+                };
+                group.admin_id = if successor == local {
+                    "me".to_owned()
+                } else {
+                    successor
+                };
+                group.management.coordinator = Some(endpoint);
+                group.management.revision = group
+                    .management
+                    .revision
+                    .checked_add(1)
+                    .ok_or(CoreError::LimitExceeded)?;
+                group.management.invite = None;
+                group.management.shared_invite = None;
+            } else {
+                if departure.successor.is_some() {
+                    return Err(CoreError::AuthenticationFailed);
+                }
+                if is_coordinator(&group)? {
+                    group.management.revision = group
+                        .management
+                        .revision
+                        .checked_add(1)
+                        .ok_or(CoreError::LimitExceeded)?;
+                }
+            }
+            group.members.retain(|member| member.id != sender_id);
+            group.management.admins.remove(&sender_id);
+            group.management.restrictions.remove(&sender_id);
+            group.management.departed.insert(sender_id);
+            save(group.clone())?;
+            group.management.outbound.clear();
+            group.management.requests.clear();
+            group.management.pending_effect = None;
+            queue_device_sync(&DeviceSyncEvent::UpsertGroup { group });
+            Ok(true)
+        }
         Control::Join {
             group_id,
             token,
@@ -1248,6 +1499,9 @@ fn receive_control(control: Control, sender: &PublishedIdentity) -> CoreResult<b
                 || !group.management.outbound.is_empty()
                 || !group.management.processed.is_empty()
                 || group.management.removed
+                || group.management.left
+                || group.management.pending_departure.is_some()
+                || !group.management.departed.is_empty()
                 || group.management.pending_effect.is_some()
                 || group.management.invite.is_some()
                 || group.management.shared_invite.is_some()
@@ -1265,12 +1519,12 @@ fn receive_control(control: Control, sender: &PublishedIdentity) -> CoreResult<b
                         .bundle
                         .signal_pre_key
                         .as_ref()
-                        .map(|key| (key.device_id, &key.identity_key))
+                        .map(|key| &key.identity_key)
                         != sender
                             .bundle
                             .signal_pre_key
                             .as_ref()
-                            .map(|key| (key.device_id, &key.identity_key))
+                            .map(|key| &key.identity_key)
                     {
                         return Err(CoreError::GroupPermissionDenied);
                     }
@@ -1302,6 +1556,17 @@ fn receive_control(control: Control, sender: &PublishedIdentity) -> CoreResult<b
                 return Err(CoreError::VerificationFailed);
             }
             if let Some(existing) = existing {
+                // Retain departures that the owner has not yet observed. Once
+                // its snapshot excludes that member, its revision prevents replay.
+                group.management.departed = existing
+                    .management
+                    .departed
+                    .into_iter()
+                    .filter(|id| group.members.iter().any(|member| &member.id == id))
+                    .collect();
+                group
+                    .members
+                    .retain(|member| !group.management.departed.contains(&member.id));
                 group.management.outbound = existing.management.outbound;
                 group.management.shared_invite = existing.management.shared_invite;
             }
@@ -1335,6 +1600,7 @@ fn apply_local_effects(
         .filter(|message| {
             message.conversation_id == group.id
                 && (group.management.closed
+                    || group.management.left
                     || group.management.deleted_messages.contains(&message.id))
         })
         .map(|message| message.id.clone())
@@ -1363,7 +1629,10 @@ fn apply_local_effects(
         )?;
         store.outbox = outbox;
     }
-    if !group.management.closed && !store.messages.iter().any(|message| message.id == event_id) {
+    if !group.management.closed
+        && !group.management.left
+        && !store.messages.iter().any(|message| message.id == event_id)
+    {
         let message = StoredMessage {
             id: event_id.to_owned(),
             conversation_id: group.id.clone(),
@@ -1379,6 +1648,7 @@ fn apply_local_effects(
             is_outgoing: outgoing,
             is_read: outgoing,
             delivery_state: "delivered".to_owned(),
+            receipts: Default::default(),
             attachment_name: None,
             attachment_base64: None,
         };
@@ -1538,6 +1808,8 @@ pub fn join(code: &str) -> CoreResult<Value> {
         &[owner],
     )?;
     group.management.outbound.extend(pending);
+    group.management.left = false;
+    group.management.pending_departure = None;
     save(group)?;
     transfer_outbound()?;
     Ok(json!({"group_id": link.group_id, "state": "pending_owner"}))

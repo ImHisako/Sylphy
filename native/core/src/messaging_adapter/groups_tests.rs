@@ -152,6 +152,27 @@ fn group_permissions_restrictions_slow_mode_and_spam_are_enforced_natively() {
         Err(CoreError::GroupPermissionDenied)
     ));
     value.management.restrictions.clear();
+    value.management.policy.send_links = false;
+    for link in [
+        "example.com",
+        "(WWW.Example.com/path)",
+        "link:example.com?x=1",
+        "[vai](https://example.com)",
+        "example\u{200b}.com",
+        "192.168.1.1:8080",
+        "пример.рф",
+        "sylphy:abc",
+    ] {
+        assert!(
+            matches!(
+                enforce(&value, &member.id, link, false),
+                Err(CoreError::GroupPermissionDenied)
+            ),
+            "{link}"
+        );
+    }
+    assert!(enforce(&value, &member.id, "ciao @Alice, versione 1.2", false).is_ok());
+    value.management.policy.send_links = true;
     let rights = AdminPermissions {
         pin_messages: true,
         ..AdminPermissions::default()
@@ -198,6 +219,7 @@ fn group_permissions_restrictions_slow_mode_and_spam_are_enforced_natively() {
             is_outgoing: true,
             is_read: true,
             delivery_state: "sent".to_owned(),
+            receipts: Default::default(),
             attachment_name: None,
             attachment_base64: None,
         });
@@ -431,6 +453,24 @@ fn delegated_requests_cannot_inject_candidates_or_escalate_roles_and_replies_val
     fs::remove_dir_all(directory).unwrap();
 }
 
+#[test]
+fn owner_is_recognized_by_identity_even_when_device_number_changes() {
+    let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+    let directory = std::env::temp_dir().join(format!("sylphy-owner-{}", new_id()));
+    let admin = fixture(&directory, "Admin");
+    let member = fixture(&directory, "Member");
+    activate(&directory, "Admin");
+    let mut group = group(&admin, vec![member], "group");
+    let mut endpoint = admin.identity.clone();
+    let key = endpoint.bundle.signal_pre_key.as_mut().unwrap();
+    key.device_id = if key.device_id == 1 { 2 } else { 1 };
+    group.management.coordinator = Some(endpoint);
+    assert!(is_coordinator(&group).unwrap());
+    activate(&directory, "Member");
+    assert!(!is_coordinator(&group).unwrap());
+    fs::remove_dir_all(directory).unwrap();
+}
+
 fn take_controls() -> Vec<Vec<u8>> {
     let mut store = contact_store().lock().unwrap();
     let payloads = store
@@ -448,6 +488,185 @@ fn take_controls() -> Vec<Vec<u8>> {
     persist_outbox(store.outbox_path.as_deref().unwrap(), &retained).unwrap();
     store.outbox = retained;
     payloads
+}
+
+#[test]
+fn departure_is_durable_blocks_resurrection_and_transfers_ownership() {
+    let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+    struct Cleanup;
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            TEST_BLOBS.with(|value| *value.borrow_mut() = None);
+        }
+    }
+    let _cleanup = Cleanup;
+    TEST_BLOBS.with(|value| *value.borrow_mut() = Some(HashMap::new()));
+    let directory = std::env::temp_dir().join(format!("sylphy-departure-{}", new_id()));
+    let owner = fixture(&directory, "Owner");
+    let alice = fixture(&directory, "Alice");
+    let bob = fixture(&directory, "Bob");
+    activate(&directory, "Owner");
+    let mut original = group(&owner, vec![alice.clone(), bob.clone()], "group");
+    original.admin_id = "me".to_owned();
+    original.management.coordinator = Some(owner.identity.clone());
+    save(original.clone()).unwrap();
+    // Removing every privilege leaves the admin role present in the core and UI model.
+    act(
+        &original.id,
+        Action::SetAdmin {
+            member_id: alice.id.clone(),
+            permissions: Some(AdminPermissions::default()),
+        },
+    )
+    .unwrap();
+    let initial = take_controls();
+    activate(&directory, "Alice");
+    deliver_controls(&initial);
+    assert!(is_admin(&current_group(&original.id).unwrap().unwrap()).unwrap());
+    assert_eq!(
+        list_conversations().unwrap()["conversations"][0]["is_admin"],
+        true
+    );
+    let before_leave = current_group(&original.id).unwrap().unwrap();
+    activate(&directory, "Bob");
+    deliver_controls(&initial);
+    // Prepare an update and text while Alice is still a member, then deliver them late.
+    activate(&directory, "Owner");
+    act(
+        &original.id,
+        Action::Info {
+            name: "Aggiornamento ritardato".to_owned(),
+            description: String::new(),
+        },
+    )
+    .unwrap();
+    let stale = take_controls();
+    let device = alice.identity.delivery_devices().unwrap().remove(0);
+    let body = format!(
+        "{GROUP_MESSAGE_PREFIX}{}:{}",
+        original.id,
+        STANDARD_NO_PAD.encode("Messaggio ritardato")
+    );
+    let (late_message, _) = secure_packet::seal_for_test(&device, &body).unwrap();
+    activate(&directory, "Alice");
+    delete_conversation(&original.id).unwrap();
+    let leave_event = contact_store()
+        .lock()
+        .unwrap()
+        .device_sync_outbox
+        .iter()
+        .find_map(|pending| match &pending.event {
+            DeviceSyncEvent::UpsertGroup { group } if group.management.left => {
+                Some(pending.event.clone())
+            }
+            _ => None,
+        })
+        .expect("departure is queued for other account devices");
+    // A second device may already know a newer group revision. Leaving still wins.
+    let mut second_device = before_leave.clone();
+    second_device.management.revision += 50;
+    save(second_device).unwrap();
+    apply_device_sync_plaintext(&serde_json::to_vec(&leave_event).unwrap()).unwrap();
+    activate(&directory, "Alice"); // Departure intent and tombstone survive a restart.
+    assert!(
+        list_conversations().unwrap()["conversations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    process_requests();
+    // Simulate the crash boundary after sealing but before moving the departure
+    // into the transport outbox, followed by a stale account snapshot.
+    let sealed = contact_store().lock().unwrap().outbox[0].clone();
+    let mut durable = current_group(&original.id).unwrap().unwrap();
+    durable.management.outbound.push(sealed.clone());
+    let mut delayed_sync = before_leave.clone();
+    preserve_local_queues(&durable, &mut delayed_sync);
+    assert_eq!(delayed_sync.management.outbound[0].id, sealed.id);
+    assert!(delayed_sync.management.left);
+    let departure = take_controls();
+    deliver_controls(&stale);
+    assert!(matches!(
+        persist_inbound_payload(&late_message),
+        Err(CoreError::GroupClosed)
+    ));
+    let mut stale_sync = before_leave.clone();
+    stale_sync.management.revision += 100;
+    apply_device_sync_plaintext(
+        &serde_json::to_vec(&DeviceSyncEvent::UpsertGroup { group: stale_sync }).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        current_group(&original.id)
+            .unwrap()
+            .unwrap()
+            .management
+            .left
+    );
+    assert!(
+        list_conversations().unwrap()["conversations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        list_messages(&original.id, None, None, None).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    activate(&directory, "Bob");
+    deliver_controls(&departure);
+    deliver_controls(&stale); // Owner has not seen the departure yet.
+    assert!(
+        !current_group(&original.id)
+            .unwrap()
+            .unwrap()
+            .members
+            .iter()
+            .any(|m| m.id == alice.id)
+    );
+    activate(&directory, "Owner");
+    deliver_controls(&departure);
+    assert!(
+        !current_group(&original.id)
+            .unwrap()
+            .unwrap()
+            .members
+            .iter()
+            .any(|m| m.id == alice.id)
+    );
+    // With no remaining admins the owner hands off to Bob, without closing the group.
+    delete_conversation(&original.id).unwrap();
+    process_requests();
+    let handoff = take_controls();
+    activate(&directory, "Bob");
+    deliver_controls(&handoff);
+    let inherited = current_group(&original.id).unwrap().unwrap();
+    assert_eq!(inherited.admin_id, "me");
+    assert!(is_coordinator(&inherited).unwrap());
+    assert!(inherited.members.is_empty());
+    assert!(!inherited.management.closed);
+    assert_eq!(
+        details(&original.id).unwrap()["members"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // Preference uses the role, even for an admin with no extra privileges.
+    let mut choose_admin = original;
+    choose_admin
+        .management
+        .admins
+        .insert(alice.id.clone(), AdminPermissions::default());
+    activate(&directory, "Owner");
+    prepare_leave(&mut choose_admin).unwrap();
+    assert_eq!(
+        choose_admin.management.pending_departure.unwrap().successor,
+        Some(alice.id)
+    );
+    fs::remove_dir_all(directory).unwrap();
 }
 
 fn deliver_controls(packets: &[Vec<u8>]) {

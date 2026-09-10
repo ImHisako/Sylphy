@@ -5,6 +5,9 @@ import 'package:flutter/services.dart';
 import '../../core/messaging/secure_messaging_bridge.dart';
 
 String groupError(Object error) {
+  if (error is TimeoutException) {
+    return 'Le impostazioni stanno impiegando troppo tempo. Puoi riprovare.';
+  }
   final code = error is SecureMessagingException
       ? error.code
       : 'internal_error';
@@ -42,23 +45,65 @@ class _GroupManagementPageState extends State<GroupManagementPage> {
   Map<String, dynamic>? _details;
   String? _error;
   bool _busy = false;
+  Listenable? _inboxChanges;
+  int _loadGeneration = 0;
+  bool _loading = false;
+  bool _reloadRequested = false;
   @override
   void initState() {
     super.initState();
+    final bridge = widget.bridge;
+    if (bridge is CachedGroupManagementBridge) {
+      _details = (bridge as CachedGroupManagementBridge).cachedGroupDetails(
+        widget.conversationId,
+      );
+    }
     _load();
+    if (bridge is InboxRevisionNotifications) {
+      _inboxChanges = (bridge as InboxRevisionNotifications).inboxChanges;
+      _inboxChanges!.addListener(_onInboxChanged);
+    }
+  }
+
+  void _onInboxChanged() {
+    if (!_busy) _load();
+  }
+
+  @override
+  void dispose() {
+    _inboxChanges?.removeListener(_onInboxChanged);
+    super.dispose();
   }
 
   Future<void> _load() async {
+    if (_loading) {
+      _reloadRequested = true;
+      return;
+    }
+    _loading = true;
+    final generation = ++_loadGeneration;
     try {
-      final details = await widget.bridge.groupDetails(widget.conversationId);
-      if (mounted) {
+      final details = await widget.bridge
+          .groupDetails(widget.conversationId)
+          .timeout(const Duration(seconds: 10));
+      if (mounted && generation == _loadGeneration) {
         setState(() {
           _details = details;
           _error = null;
         });
       }
     } on Object catch (error) {
-      if (mounted) setState(() => _error = groupError(error));
+      if (mounted && generation == _loadGeneration) {
+        setState(() => _error = groupError(error));
+      }
+    } finally {
+      _loading = false;
+      if (_reloadRequested && mounted && _error == null) {
+        _reloadRequested = false;
+        unawaited(_load());
+      } else {
+        _reloadRequested = false;
+      }
     }
   }
 
@@ -105,7 +150,7 @@ class _GroupManagementPageState extends State<GroupManagementPage> {
         SnackBar(
           content: Text(
             state == 'pending_owner'
-                ? 'Richiesta inviata. Sarà applicata quando il proprietario sarà online.'
+                ? 'Richiesta inviata al proprietario. In attesa di conferma della modifica.'
                 : 'Gruppo aggiornato.',
           ),
         ),
@@ -266,7 +311,9 @@ class _GroupManagementPageState extends State<GroupManagementPage> {
       await _act({
         'kind': 'set_admin',
         'member_id': member['id'],
-        'permissions': result.isEmpty ? null : result,
+        'permissions': result['revoke_role'] == true
+            ? null
+            : result['permissions'],
       });
     }
   }
@@ -288,8 +335,31 @@ class _GroupManagementPageState extends State<GroupManagementPage> {
       body: details == null
           ? Center(
               child: _error == null
-                  ? const CircularProgressIndicator()
-                  : Text(_error!),
+                  ? const Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircularProgressIndicator(),
+                        SizedBox(height: 16),
+                        Text('Caricamento impostazioni del gruppo…'),
+                      ],
+                    )
+                  : Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Text(_error!),
+                        ),
+                        FilledButton.icon(
+                          onPressed: () {
+                            setState(() => _error = null);
+                            _load();
+                          },
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('Riprova'),
+                        ),
+                      ],
+                    ),
             )
           : Center(
               child: ConstrainedBox(
@@ -702,7 +772,7 @@ class _AdminDialogState extends State<_AdminDialog> {
     actions: [
       if (widget.initial != null)
         TextButton(
-          onPressed: () => Navigator.pop(context, <String, dynamic>{}),
+          onPressed: () => Navigator.pop(context, {'revoke_role': true}),
           child: const Text('Revoca ruolo'),
         ),
       TextButton(
@@ -710,7 +780,9 @@ class _AdminDialogState extends State<_AdminDialog> {
         child: const Text('Annulla'),
       ),
       FilledButton(
-        onPressed: () => Navigator.pop(context, _value),
+        onPressed: () => Navigator.pop(context, {
+          'permissions': Map<String, dynamic>.from(_value),
+        }),
         child: const Text('Salva'),
       ),
     ],
@@ -724,11 +796,13 @@ class ChatSearchPage extends StatefulWidget {
     required this.conversationId,
     this.initialQuery = '',
     this.allowReply = true,
+    this.pinnedMessageIds,
   });
   final GroupManagementBridge bridge;
   final String conversationId;
   final String initialQuery;
   final bool allowReply;
+  final List<String>? pinnedMessageIds;
   @override
   State<ChatSearchPage> createState() => _ChatSearchPageState();
 }
@@ -747,7 +821,9 @@ class _ChatSearchPageState extends State<ChatSearchPage> {
   @override
   void initState() {
     super.initState();
-    if (widget.initialQuery.isNotEmpty) _search();
+    if (widget.initialQuery.isNotEmpty || widget.pinnedMessageIds != null) {
+      _search();
+    }
   }
 
   @override
@@ -760,7 +836,7 @@ class _ChatSearchPageState extends State<ChatSearchPage> {
   Future<void> _search({bool more = false}) async {
     final generation = ++_generation;
     final query = _query.text.trim();
-    if (query.isEmpty) {
+    if (query.isEmpty && widget.pinnedMessageIds == null) {
       setState(() {
         _results = [];
         _hasMore = false;
@@ -776,11 +852,29 @@ class _ChatSearchPageState extends State<ChatSearchPage> {
       if (!more) _results = [];
     });
     try {
-      final response = await widget.bridge.searchMessages(
-        widget.conversationId,
-        query,
-        offset: more ? _results.length : 0,
-      );
+      final Map<String, dynamic> response;
+      if (widget.pinnedMessageIds case final ids?) {
+        final pages = await Future.wait(
+          ids.map(
+            (id) =>
+                widget.bridge.searchMessages(widget.conversationId, 'id:$id'),
+          ),
+        );
+        final messages = pages
+            .expand((page) => page['messages'] as List)
+            .toList();
+        response = {
+          'messages': messages,
+          'total': messages.length,
+          'has_more': false,
+        };
+      } else {
+        response = await widget.bridge.searchMessages(
+          widget.conversationId,
+          query,
+          offset: more ? _results.length : 0,
+        );
+      }
       if (!mounted || generation != _generation) return;
       setState(() {
         _results = [
@@ -831,27 +925,44 @@ class _ChatSearchPageState extends State<ChatSearchPage> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Cerca nella chat')),
+    appBar: AppBar(
+      title: Text(
+        widget.pinnedMessageIds != null
+            ? 'Messaggi fissati'
+            : 'Cerca nella chat',
+      ),
+    ),
     body: Column(
       children: [
-        Padding(
-          padding: const EdgeInsets.all(16),
-          child: TextField(
-            controller: _query,
-            autofocus: true,
-            decoration: const InputDecoration(
-              prefixIcon: Icon(Icons.search),
-              hintText: 'Testo, @menzioni o #hashtag',
+        if (widget.pinnedMessageIds == null)
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: TextField(
+              controller: _query,
+              autofocus: true,
+              decoration: const InputDecoration(
+                prefixIcon: Icon(Icons.search),
+                hintText: 'Testo, @menzioni o #hashtag',
+              ),
+              onChanged: (_) {
+                _generation++;
+                _debounce?.cancel();
+                _debounce = Timer(const Duration(milliseconds: 220), _search);
+              },
             ),
-            onChanged: (_) {
-              _generation++;
-              _debounce?.cancel();
-              _debounce = Timer(const Duration(milliseconds: 220), _search);
-            },
           ),
-        ),
         if (_loading) const LinearProgressIndicator(),
         if (_error != null) Text(_error!),
+        if (widget.pinnedMessageIds != null &&
+            !_loading &&
+            _results.isEmpty &&
+            _error == null)
+          const Padding(
+            padding: EdgeInsets.all(24),
+            child: Text(
+              'Il contenuto dei messaggi fissati non è disponibile su questo dispositivo.',
+            ),
+          ),
         if (_query.text.trim().isNotEmpty && !_loading)
           Text('$_total risultati'),
         Expanded(

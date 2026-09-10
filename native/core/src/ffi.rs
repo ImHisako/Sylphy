@@ -16,6 +16,9 @@ use crate::{
 // receive transaction may roll back until persisted, so it must not overlap
 // another command that changes sessions or activates a different account.
 pub(crate) static COMMAND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// Local group details may bypass network transactions, but must never observe
+// the intermediate identity/storage state of an account activation or import.
+static ACCOUNT_STATE_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -41,6 +44,8 @@ enum CoreRequest {
     },
     ConfigurePrivacy {
         allow_unknown_contacts: bool,
+        #[serde(default)]
+        send_read_receipts: bool,
     },
     AddContact {
         display_name: String,
@@ -156,10 +161,6 @@ pub unsafe extern "C" fn sylphy_core_abi_version() -> u32 {
 /// once with [`sylphy_core_free_string`].
 pub unsafe extern "C" fn sylphy_core_call(request: *const c_char) -> *mut c_char {
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let _command_guard = match COMMAND_LOCK.lock() {
-            Ok(guard) => guard,
-            Err(_) => return serialize_response(error_response(CoreError::Internal)),
-        };
         let request_text = if request.is_null() {
             Err(CoreError::InvalidInput)
         } else {
@@ -194,6 +195,31 @@ pub unsafe extern "C" fn sylphy_core_free_string(value: *mut c_char) {
 
 fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
     let request: CoreRequest = serde_json::from_str(body).map_err(|_| CoreError::InvalidInput)?;
+    if matches!(request, CoreRequest::GroupDetails { .. }) {
+        let _account_guard = ACCOUNT_STATE_LOCK
+            .try_read()
+            .map_err(|_| CoreError::FeatureUnavailable)?;
+        return dispatch_request(request);
+    }
+    let _command_guard = COMMAND_LOCK.lock().map_err(|_| CoreError::Internal)?;
+    let _account_guard = if matches!(
+        request,
+        CoreRequest::EnsureIdentity { .. }
+            | CoreRequest::ImportAccount { .. }
+            | CoreRequest::StartVeilid { .. }
+    ) {
+        Some(
+            ACCOUNT_STATE_LOCK
+                .write()
+                .map_err(|_| CoreError::Internal)?,
+        )
+    } else {
+        None
+    };
+    dispatch_request(request)
+}
+
+fn dispatch_request(request: CoreRequest) -> Result<CoreResponse, CoreError> {
     match request {
         CoreRequest::JoinGroup { invitation_code } => Ok(CoreResponse {
             ok: true,
@@ -303,8 +329,10 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
         }),
         CoreRequest::ConfigurePrivacy {
             allow_unknown_contacts,
+            send_read_receipts,
         } => {
             messaging_adapter::configure_privacy(allow_unknown_contacts)?;
+            messaging_adapter::configure_read_receipts(send_read_receipts);
             Ok(CoreResponse {
                 ok: true,
                 code: "ok",
@@ -528,6 +556,28 @@ fn serialize_response(response: CoreResponse) -> *mut c_char {
 #[cfg(test)]
 mod tests {
     use super::CoreRequest;
+
+    #[test]
+    fn group_details_bypass_network_queue_but_not_account_transitions() {
+        let _identity = crate::identity::TEST_IDENTITY_LOCK.lock().unwrap();
+        let command_guard = super::COMMAND_LOCK.lock().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let result =
+                super::dispatch(r#"{"command":"group_details","conversation_id":"absent"}"#);
+            send.send(matches!(result, Err(crate::error::CoreError::InvalidInput)))
+                .unwrap();
+        });
+        let result = receive.recv_timeout(std::time::Duration::from_secs(2));
+        drop(command_guard);
+        reader.join().unwrap();
+        assert_eq!(result.unwrap(), true);
+        let _account_guard = super::ACCOUNT_STATE_LOCK.write().unwrap();
+        assert!(matches!(
+            super::dispatch(r#"{"command":"group_details","conversation_id":"absent"}"#),
+            Err(crate::error::CoreError::FeatureUnavailable)
+        ));
+    }
 
     #[test]
     fn start_request_keeps_network_and_account_storage_separate() {

@@ -13,6 +13,7 @@ class SylphyMessagingBridge
         SecureMessagingBridge,
         GroupMessagingBridge,
         GroupManagementBridge,
+        CachedGroupManagementBridge,
         InboxRefreshingBridge,
         InboxRevisionNotifications,
         InboxStorageStatus,
@@ -44,11 +45,32 @@ class SylphyMessagingBridge
   }
 
   @override
-  Future<Map<String, dynamic>> groupDetails(String conversationId) async =>
-      (await _groupCommand({
-        'command': 'group_details',
-        'conversation_id': conversationId,
-      })).data;
+  Future<Map<String, dynamic>> groupDetails(String conversationId) {
+    final generation = _cacheGeneration;
+    return _groupDetailLoads[conversationId] ??=
+        _groupCommand({
+              'command': 'group_details',
+              'conversation_id': conversationId,
+            })
+            .then((response) {
+              if (generation != _cacheGeneration) {
+                throw const SecureMessagingException('invalid_input');
+              }
+              _groupDetailsCache[conversationId] = response.data;
+              return response.data;
+            })
+            .whenComplete(() {
+              if (generation == _cacheGeneration) {
+                _groupDetailLoads.remove(conversationId);
+              }
+            });
+  }
+
+  final _groupDetailLoads = <String, Future<Map<String, dynamic>>>{};
+  final _groupDetailsCache = <String, Map<String, dynamic>>{};
+  @override
+  Map<String, dynamic>? cachedGroupDetails(String conversationId) =>
+      _groupDetailsCache[conversationId];
 
   @override
   Future<String> groupAction(
@@ -117,6 +139,8 @@ class SylphyMessagingBridge
     _conversationCache = null;
     _messageCache.clear();
     _groupRevisions.clear();
+    _groupDetailLoads.clear();
+    _groupDetailsCache.clear();
     _messageListCache.clear();
     _messageRefreshes.clear();
     _hasOlderMessages.clear();
@@ -293,7 +317,7 @@ class SylphyMessagingBridge
         .listMessagesInBackground(
           conversationId,
           priority: true,
-          beforeMs: current.first.sentAt.toUtc().millisecondsSinceEpoch,
+          beforeMs: current.first.orderAt.toUtc().millisecondsSinceEpoch,
           beforeId: current.first.id,
         );
     _requireSuccess(response);
@@ -470,6 +494,7 @@ class SylphyMessagingBridge
     _conversationCache = null;
     _messageListCache.remove(conversationId);
     _expandedHistories.remove(conversationId);
+    _groupDetailsCache.remove(conversationId);
     _hasOlderMessages.remove(conversationId);
     _messageCache.removeWhere((key, _) => key.startsWith('$conversationId:'));
   }
@@ -549,7 +574,7 @@ List<ChatMessage> _mergeMessages(
   }
   final merged = byId.values.toList()
     ..sort((a, b) {
-      final time = a.sentAt.compareTo(b.sentAt);
+      final time = a.orderAt.compareTo(b.orderAt);
       return time == 0 ? a.id.compareTo(b.id) : time;
     });
   return List.unmodifiable(merged);
@@ -657,6 +682,10 @@ ChatMessage _parseMessage(Object? value, {ChatMessage? cached}) {
     isUtc: true,
   ).toLocal();
   final isOutgoing = value['is_outgoing'] == true;
+  final orderAt = DateTime.fromMillisecondsSinceEpoch(
+    (value['order_at_ms'] as int?) ?? _requiredInt(value, 'sent_at_ms'),
+    isUtc: true,
+  ).toLocal();
   final attachmentName = value['attachment_name'] as String?;
   final deliveryState = switch (_requiredString(value, 'delivery_state')) {
     'queued' => DeliveryState.queued,
@@ -673,6 +702,7 @@ ChatMessage _parseMessage(Object? value, {ChatMessage? cached}) {
       cached.body == body &&
       cached.replyTo == value['reply_to'] &&
       cached.sentAt == sentAt &&
+      cached.orderAt == orderAt &&
       cached.isOutgoing == isOutgoing &&
       cached.attachmentName == attachmentName &&
       (cached.attachmentBytes != null) ==
@@ -689,6 +719,7 @@ ChatMessage _parseMessage(Object? value, {ChatMessage? cached}) {
     body: body,
     replyTo: value['reply_to'] as String?,
     sentAt: sentAt,
+    orderAt: orderAt,
     isOutgoing: isOutgoing,
     deliveryState: deliveryState,
     attachmentName: attachmentName,

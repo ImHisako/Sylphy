@@ -44,7 +44,7 @@ impl Index {
                 .entry(message.conversation_id.clone())
                 .or_default()
                 .push(index as u32);
-            self.ids.insert(message.id.clone(), index as u32);
+            self.ids.insert(message.id.to_lowercase(), index as u32);
             self.texts.push(text);
         }
         self.last_id = messages.last().map(|message| message.id.clone());
@@ -106,6 +106,7 @@ pub(super) fn search(id: &str, query: &str, offset: usize) -> CoreResult<Value> 
     if let Some(group) = store.groups.iter().find(|group| group.id == id) {
         positions.retain(|position| {
             !group.management.closed
+                && !group.management.left
                 && !group
                     .management
                     .deleted_messages
@@ -115,9 +116,8 @@ pub(super) fn search(id: &str, query: &str, offset: usize) -> CoreResult<Value> 
     positions.sort_unstable_by(|left, right| {
         let left = &store.messages[*left];
         let right = &store.messages[*right];
-        right
-            .sent_at_ms
-            .cmp(&left.sent_at_ms)
+        message_order_ms(right)
+            .cmp(&message_order_ms(left))
             .then_with(|| right.id.cmp(&left.id))
     });
     let total = positions.len();
@@ -142,6 +142,7 @@ mod tests {
             is_outgoing: true,
             is_read: true,
             delivery_state: "sent".to_owned(),
+            receipts: Default::default(),
             attachment_name: None,
             attachment_base64: None,
         }
@@ -172,6 +173,27 @@ mod tests {
         index.update(&[message("1", "a", "Nuovo account")], 2);
         assert!(index.find("a", "unica").is_empty());
         assert_eq!(index.find("a", "account"), vec![0]);
+    }
+    #[test]
+    fn pinned_hex_ids_survive_case_normalization_and_stay_scoped_to_the_chat() {
+        let mut index = Index::default();
+        index.update(
+            &[message(
+                "D7BFDC8706A2DFA034E59B0317F7EDFC",
+                "a",
+                "Messaggio fissato",
+            )],
+            1,
+        );
+        assert_eq!(
+            index.find("a", "id:d7bfdc8706a2dfa034e59b0317f7edfc"),
+            vec![0]
+        );
+        assert!(
+            index
+                .find("b", "id:d7bfdc8706a2dfa034e59b0317f7edfc")
+                .is_empty()
+        );
     }
     #[test]
     fn index_queries_a_large_history_without_changing_storage_limits() {

@@ -242,6 +242,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     if (core is! NativeCoreClient) return;
     final response = await core.configurePrivacyInBackground(
       allowUnknownContacts: _privacySettings.value.allowUnknownContacts,
+      sendReadReceipts: _privacySettings.value.sendReadReceipts,
     );
     if (!response.ok) {
       throw NativeCoreException(

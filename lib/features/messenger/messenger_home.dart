@@ -20,6 +20,7 @@ import '../profile/profile_sheet.dart';
 import '../settings/settings_page.dart';
 import 'encrypted_file_archive_page.dart';
 import 'group_management_page.dart';
+import 'message_text.dart';
 
 class MessengerHome extends StatefulWidget {
   const MessengerHome({
@@ -1265,7 +1266,7 @@ class _ChatPaneState extends State<_ChatPane> {
     }
   }
 
-  Future<void> _searchChat([String initial = '']) async {
+  Future<void> _searchChat([String initial = '', List<String>? pins]) async {
     final bridge = _management;
     if (bridge == null) return;
     final id = widget.conversation.id;
@@ -1275,6 +1276,7 @@ class _ChatPaneState extends State<_ChatPane> {
           bridge: bridge,
           conversationId: id,
           initialQuery: initial,
+          pinnedMessageIds: pins,
         ),
       ),
     );
@@ -1335,42 +1337,82 @@ class _ChatPaneState extends State<_ChatPane> {
 
   Future<void> _messageActions(ChatMessage message) async {
     final bridge = _management;
-    if (bridge == null) return;
+    if (bridge == null || _messageActionsOpen) return;
+    _messageActionsOpen = true;
     final conversationId = widget.conversation.id;
     try {
       final details = widget.conversation.isGroup
-          ? await bridge.groupDetails(conversationId)
-          : null;
-      if (!mounted || conversationId != widget.conversation.id) return;
-      final permissions = details?['permissions'] as Map? ?? {};
-      final pinned = (details?['pinned'] as List? ?? []).contains(message.id);
+          ? bridge.groupDetails(conversationId)
+          : Future<Map<String, dynamic>>.value({});
+      var pinned = widget.conversation.pinnedMessageIds.contains(message.id);
+      var selectionMade = false;
+      Map? targetMember;
       final action = await showModalBottomSheet<String>(
         context: context,
-        builder: (context) => SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                leading: const Icon(Icons.reply),
-                title: const Text('Rispondi'),
-                onTap: () => Navigator.pop(context, 'reply'),
-              ),
-              if (permissions['pin_messages'] == true)
-                ListTile(
-                  leading: const Icon(Icons.push_pin_outlined),
-                  title: Text(
-                    pinned ? 'Rimuovi dai fissati' : 'Fissa per tutti',
+        builder: (context) => FutureBuilder<Map<String, dynamic>>(
+          future: details,
+          builder: (context, snapshot) {
+            final permissions = snapshot.data?['permissions'] as Map? ?? {};
+            targetMember = (snapshot.data?['members'] as List? ?? [])
+                .cast<Map>()
+                .where((member) => member['id'] == message.authorId)
+                .firstOrNull;
+            if (snapshot.data?['pinned'] case final List ids) {
+              pinned = ids.contains(message.id);
+            }
+            void choose(String action) {
+              if (selectionMade) return;
+              selectionMade = true;
+              Navigator.pop(context, action);
+            }
+
+            return SafeArea(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.reply),
+                    title: const Text('Rispondi'),
+                    onTap: () => choose('reply'),
                   ),
-                  onTap: () => Navigator.pop(context, 'pin'),
-                ),
-              if (permissions['delete_messages'] == true)
-                ListTile(
-                  leading: const Icon(Icons.delete_outline),
-                  title: const Text('Elimina messaggio per tutti'),
-                  onTap: () => Navigator.pop(context, 'delete'),
-                ),
-            ],
-          ),
+                  if (snapshot.connectionState != ConnectionState.done)
+                    const LinearProgressIndicator(),
+                  if (snapshot.hasError)
+                    Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Text(groupError(snapshot.error!)),
+                    ),
+                  if (permissions['pin_messages'] == true)
+                    ListTile(
+                      leading: const Icon(Icons.push_pin_outlined),
+                      title: Text(
+                        pinned ? 'Rimuovi dai fissati' : 'Fissa per tutti',
+                      ),
+                      onTap: () => choose('pin'),
+                    ),
+                  if (permissions['delete_messages'] == true)
+                    ListTile(
+                      leading: const Icon(Icons.delete_outline),
+                      title: const Text('Elimina messaggio per tutti'),
+                      onTap: () => choose('delete'),
+                    ),
+                  if (!message.isOutgoing &&
+                      messageContainsLink(message.body) &&
+                      permissions['manage_members'] == true &&
+                      targetMember != null &&
+                      targetMember!['is_owner'] != true &&
+                      targetMember!['permissions'] == null &&
+                      (targetMember!['restriction'] as Map?)?['send_links'] !=
+                          false)
+                    ListTile(
+                      leading: const Icon(Icons.link_off),
+                      title: const Text('Blocca i link di questo membro'),
+                      onTap: () => choose('block_links'),
+                    ),
+                ],
+              ),
+            );
+          },
         ),
       );
       if (!mounted ||
@@ -1404,16 +1446,34 @@ class _ChatPaneState extends State<_ChatPane> {
         );
         if (confirmed != true) return;
       }
-      final result = await bridge.groupAction(conversationId, {
-        'kind': action == 'pin' ? 'pin' : 'delete_message',
-        'message_id': message.id,
-        if (action == 'pin') 'pinned': !pinned,
-      });
+      final result = await bridge.groupAction(
+        conversationId,
+        action == 'block_links'
+            ? {
+                'kind': 'restrict',
+                'member_id': message.authorId,
+                'policy': {
+                  ...?(targetMember?['restriction'] as Map?),
+                  'send_links': false,
+                },
+              }
+            : {
+                'kind': action == 'pin' ? 'pin' : 'delete_message',
+                'message_id': message.id,
+                if (action == 'pin') 'pinned': !pinned,
+              },
+      );
       if (!mounted) return;
       if (result == 'pending_owner') {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Richiesta inviata al proprietario del gruppo.'),
+          ),
+        );
+      } else if (action == 'block_links') {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Invio di link bloccato per questo membro.'),
           ),
         );
       }
@@ -1425,8 +1485,12 @@ class _ChatPaneState extends State<_ChatPane> {
           context,
         ).showSnackBar(SnackBar(content: Text(groupError(error))));
       }
+    } finally {
+      _messageActionsOpen = false;
     }
   }
+
+  bool _messageActionsOpen = false;
 
   final TextEditingController _composerController = TextEditingController();
   final ScrollController _messageScrollController = ScrollController();
@@ -1706,11 +1770,17 @@ class _ChatPaneState extends State<_ChatPane> {
     if (latestIncomingId != null &&
         latestIncomingId != _lastAcknowledgedIncomingId) {
       _lastAcknowledgedIncomingId = latestIncomingId;
-      unawaited(_markConversationReadSafely());
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_markConversationReadSafely());
+      });
     }
   }
 
   Future<void> _markConversationReadSafely() async {
+    if (!MessageNotifications.isConversationVisible(widget.conversation.id)) {
+      _lastAcknowledgedIncomingId = null;
+      return;
+    }
     try {
       await widget.bridge.markConversationRead(widget.conversation.id);
     } on Object catch (error) {
@@ -1889,7 +1959,10 @@ class _ChatPaneState extends State<_ChatPane> {
   @override
   Widget build(BuildContext context) {
     final visibleMessages = [..._messages, ..._optimisticMessages]
-      ..sort((left, right) => left.sentAt.compareTo(right.sentAt));
+      ..sort((left, right) {
+        final order = left.orderAt.compareTo(right.orderAt);
+        return order == 0 ? left.id.compareTo(right.id) : order;
+      });
     final cachedBridge = widget.bridge is CachedMessagingBridge
         ? widget.bridge as CachedMessagingBridge
         : null;
@@ -1936,36 +2009,15 @@ class _ChatPaneState extends State<_ChatPane> {
                   onPressed: () => _searchChat(),
                   icon: const Icon(Icons.search),
                 ),
+                if (widget.conversation.pinnedMessageIds.isNotEmpty)
+                  IconButton(
+                    key: const ValueKey('pinned-messages'),
+                    tooltip: 'Messaggi fissati',
+                    onPressed: () =>
+                        _searchChat('', widget.conversation.pinnedMessageIds),
+                    icon: const Text('📌'),
+                  ),
               ],
-            ),
-          if (widget.conversation.pinnedMessageIds.isNotEmpty)
-            SizedBox(
-              height: 54,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                children: [
-                  for (final id in widget.conversation.pinnedMessageIds)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      child: ActionChip(
-                        avatar: const Icon(Icons.push_pin, size: 16),
-                        label: SizedBox(
-                          width: 220,
-                          child: Text(
-                            visibleMessages
-                                    .where((message) => message.id == id)
-                                    .firstOrNull
-                                    ?.body ??
-                                'Messaggio fissato',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        onPressed: () => _searchChat('id:$id'),
-                      ),
-                    ),
-                ],
-              ),
             ),
           Expanded(
             child: _isLoadingMessages && _messages.isEmpty
@@ -1985,12 +2037,12 @@ class _ChatPaneState extends State<_ChatPane> {
                         final startsDay =
                             previousIndex < 0 ||
                             !DateUtils.isSameDay(
-                              visibleMessages[previousIndex].sentAt,
-                              message.sentAt,
+                              visibleMessages[previousIndex].orderAt,
+                              message.orderAt,
                             );
                         return Column(
                           children: [
-                            if (startsDay) _DaySeparator(date: message.sentAt),
+                            if (startsDay) _DaySeparator(date: message.orderAt),
                             if (message.replyTo != null)
                               Align(
                                 alignment: message.isOutgoing
@@ -2048,31 +2100,6 @@ class _ChatPaneState extends State<_ChatPane> {
                                     .showReadReceipts,
                               ),
                             ),
-                            if (_management != null)
-                              Align(
-                                alignment: message.isOutgoing
-                                    ? Alignment.centerRight
-                                    : Alignment.centerLeft,
-                                child: Wrap(
-                                  spacing: 6,
-                                  children: [
-                                    for (final tag
-                                        in RegExp(
-                                              r'[@#][\p{L}\p{N}_]+',
-                                              unicode: true,
-                                            )
-                                            .allMatches(message.body)
-                                            .map((match) => match.group(0)!)
-                                            .toSet()
-                                            .take(12))
-                                      ActionChip(
-                                        label: Text(tag),
-                                        visualDensity: VisualDensity.compact,
-                                        onPressed: () => _searchChat(tag),
-                                      ),
-                                  ],
-                                ),
-                              ),
                           ],
                         );
                       }
@@ -3019,8 +3046,8 @@ class _MessageBubble extends StatelessWidget {
                 ),
               )
             else
-              Text(
-                message.body,
+              Text.rich(
+                messageTextSpan(message.body, outgoing: outgoing),
                 style: TextStyle(color: foreground, fontSize: 15, height: 1.3),
               ),
             if (message.deliveryState == DeliveryState.notRestored) ...[
@@ -4132,7 +4159,9 @@ Future<bool> _confirmDeleteConversation(
     builder: (dialogContext) => AlertDialog(
       title: const Text('Cancellare la chat?'),
       content: Text(
-        'Verranno eliminati dal dispositivo la conversazione con ${conversation.name}, i messaggi e il contatto. Questa operazione non cancella le copie sull’altro dispositivo.',
+        conversation.isGroup
+            ? 'Uscirai da ${conversation.name} e cancellerai la cronologia locale. Non riceverai più messaggi o aggiornamenti del gruppo. Se sei il proprietario, la proprietà passerà a un amministratore oppure a un membro.'
+            : 'Verranno eliminati dal dispositivo la conversazione con ${conversation.name}, i messaggi e il contatto. Questa operazione non cancella le copie sull’altro dispositivo.',
       ),
       actions: [
         TextButton(
@@ -4214,6 +4243,6 @@ String _signatureForConversations(
 String _signatureForMessages(List<ChatMessage> messages) => messages
     .map(
       (item) =>
-          '${item.id}|${item.authorName}|${item.sentAt.microsecondsSinceEpoch}|${item.deliveryState.name}',
+          '${item.id}|${item.authorName}|${item.sentAt.microsecondsSinceEpoch}|${item.orderAt.microsecondsSinceEpoch}|${item.deliveryState.name}',
     )
     .join('\n');

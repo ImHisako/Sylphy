@@ -120,6 +120,7 @@ class NativeCoreClient
   final Queue<_PendingNativeCall> _normalCalls = Queue();
   final List<Completer<void>> _idleWaiters = [];
   Future<_NativeWorker>? _worker;
+  Future<_NativeWorker>? _readOnlyWorker;
   bool _workerBusy = false;
 
   bool get backgroundCallInProgress => _pendingBackgroundCalls > 0;
@@ -251,9 +252,11 @@ class NativeCoreClient
 
   Future<NativeCoreResponse> configurePrivacyInBackground({
     required bool allowUnknownContacts,
+    bool sendReadReceipts = false,
   }) => _callInBackground({
     'command': 'configure_privacy',
     'allow_unknown_contacts': allowUnknownContacts,
+    'send_read_receipts': sendReadReceipts,
   }, priority: true);
 
   Future<NativeCoreResponse> syncInboundInBackground() =>
@@ -469,6 +472,9 @@ class NativeCoreClient
     Map<String, Object> request, {
     bool priority = false,
   }) {
+    if (request['command'] == 'group_details') {
+      return _readGroupDetails(request);
+    }
     final pending = _PendingNativeCall(request);
     _pendingBackgroundCalls += 1;
     if (priority || _isUrgentCommand(request['command'])) {
@@ -538,8 +544,30 @@ class NativeCoreClient
     }
   }
 
-  Future<NativeCoreResponse> _workerCall(Map<String, Object> request) async {
-    final worker = await (_worker ??= _spawnWorker());
+  Future<NativeCoreResponse> _readGroupDetails(
+    Map<String, Object> request,
+  ) async {
+    _pendingBackgroundCalls++;
+    try {
+      return await _workerCall(request, readOnly: true);
+    } finally {
+      _pendingBackgroundCalls--;
+      if (_pendingBackgroundCalls == 0) {
+        for (final waiter in _idleWaiters) {
+          waiter.complete();
+        }
+        _idleWaiters.clear();
+      }
+    }
+  }
+
+  Future<NativeCoreResponse> _workerCall(
+    Map<String, Object> request, {
+    bool readOnly = false,
+  }) async {
+    final worker = await (readOnly
+        ? (_readOnlyWorker ??= _spawnWorker())
+        : (_worker ??= _spawnWorker()));
     final responsePort = ReceivePort();
     try {
       worker.port.send((responsePort.sendPort, request));
@@ -549,23 +577,30 @@ class NativeCoreClient
           : const Duration(seconds: 30);
       // A timeout cannot cancel a native mutation. Keep its result and its
       // place in the queue until completion, including during account import.
-      final response = await awaitNativeOperation(
-        responsePort.first,
-        warningAfter: timeout,
-        onSlow: () => AppLog.instance.record(
-          category: 'native_core',
-          action: 'background_call_still_running:$command',
-          level: AppLogLevel.warning,
-          force: true,
-        ),
-      );
+      final operation = responsePort.first;
+      final response = readOnly
+          ? await operation.timeout(const Duration(seconds: 8))
+          : await awaitNativeOperation(
+              operation,
+              warningAfter: timeout,
+              onSlow: () => AppLog.instance.record(
+                category: 'native_core',
+                action: 'background_call_still_running:$command',
+                level: AppLogLevel.warning,
+                force: true,
+              ),
+            );
       if (response is Map) {
         return NativeCoreResponse.fromJson(response.cast<String, dynamic>());
       }
       throw const NativeCoreException('Risposta non valida dal worker nativo.');
     } on Object {
       worker.isolate.kill(priority: Isolate.immediate);
-      _worker = null;
+      if (readOnly) {
+        _readOnlyWorker = null;
+      } else {
+        _worker = null;
+      }
       rethrow;
     } finally {
       responsePort.close();

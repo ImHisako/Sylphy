@@ -27,6 +27,7 @@ use crate::{
 };
 
 pub mod groups;
+mod receipts;
 mod search;
 
 const MAX_CONVERSATION_ID_BYTES: usize = 128;
@@ -195,6 +196,8 @@ struct StoredMessage {
     #[serde(default = "default_delivery_state")]
     delivery_state: String,
     #[serde(default)]
+    receipts: receipts::Tracking,
+    #[serde(default)]
     attachment_name: Option<String>,
     #[serde(default)]
     attachment_base64: Option<String>,
@@ -334,6 +337,10 @@ pub fn configure_privacy(allow_unknown_contacts: bool) -> CoreResult<()> {
         .lock()
         .map_err(|_| CoreError::Internal)? = allow_unknown_contacts;
     Ok(())
+}
+
+pub fn configure_read_receipts(send_read_receipts: bool) {
+    receipts::configure(send_read_receipts);
 }
 
 fn allows_unknown_contacts() -> CoreResult<bool> {
@@ -598,7 +605,7 @@ pub fn list_conversations() -> CoreResult<Value> {
             .or_insert((None, 0));
         if summary
             .0
-            .is_none_or(|current| current.sent_at_ms <= message.sent_at_ms)
+            .is_none_or(|current| message_order_ms(current) <= message_order_ms(message))
         {
             summary.0 = Some(message);
         }
@@ -631,7 +638,7 @@ pub fn list_conversations() -> CoreResult<Value> {
                 "last_message": last.map(|message| message.body.as_str()).unwrap_or(
                     if can_message { "Conversazione pronta" } else { "Aggiorna l'ID Sylphy del contatto" }
                 ),
-                "last_activity_ms": last.map(|message| message.sent_at_ms).unwrap_or(contact.added_at_ms),
+                "last_activity_ms": last.map(message_order_ms).unwrap_or(contact.added_at_ms),
                 "unread_count": unread,
                 "is_online": false,
                 "is_group": false,
@@ -644,7 +651,7 @@ pub fn list_conversations() -> CoreResult<Value> {
             })
         })
         .collect::<Vec<_>>();
-    conversations.extend(store.groups.iter().filter(|group| !group.management.closed).map(|group| {
+    conversations.extend(store.groups.iter().filter(|group| !group.management.closed && !group.management.left).map(|group| {
         let (last, unread) = summaries
             .get(group.id.as_str())
             .copied()
@@ -656,13 +663,13 @@ pub fn list_conversations() -> CoreResult<Value> {
             "avatar_base64": Value::Null,
             "accent_value": accent_value(group.id.as_bytes()),
             "last_message": last.map(|message| groups::text_metadata(&message.body).map(|(text, _)| text).unwrap_or_default()).unwrap_or_else(|| "Gruppo creato".to_owned()),
-            "last_activity_ms": last.map(|message| message.sent_at_ms).unwrap_or(group.created_at_ms),
+            "last_activity_ms": last.map(message_order_ms).unwrap_or(group.created_at_ms),
             "unread_count": unread,
             "is_online": false,
             "is_group": true,
             "conversation_type": group.mode,
             "member_count": group.members.len() + 1,
-            "is_admin": group.admin_id == "me",
+            "is_admin": groups::is_admin(group).unwrap_or(false),
             "can_send_messages": groups::can_write(group).unwrap_or(false),
             "pinned_message_ids": group.management.pinned,
             "group_revision": group.management.revision,
@@ -714,13 +721,15 @@ pub fn list_messages(
     );
     if let Some(group) = group {
         messages.retain(|message| {
-            !group.management.closed && !group.management.deleted_messages.contains(&message.id)
+            !group.management.closed
+                && !group.management.left
+                && !group.management.deleted_messages.contains(&message.id)
         });
-        if group.management.closed {
+        if group.management.closed || group.management.left {
             has_more = false;
         }
     }
-    let next_before_ms = messages.first().map(|message| message.sent_at_ms);
+    let next_before_ms = messages.first().map(|message| message_order_ms(message));
     let next_before_id = messages.first().map(|message| message.id.as_str());
     Ok(json!({
         "conversation_id": conversation_id,
@@ -731,6 +740,16 @@ pub fn list_messages(
         "revision": store.revision,
         "group_revision": group.map(|group| group.management.revision),
     }))
+}
+
+// The remote wall clock is display metadata, not a shared clock. Use local
+// reception for incoming messages so clock skew cannot partition a chat by author.
+fn message_order_ms(message: &StoredMessage) -> u64 {
+    if !message.is_outgoing && message.received_at_ms != 0 {
+        message.received_at_ms
+    } else {
+        message.sent_at_ms
+    }
 }
 
 fn select_message_page<'a>(
@@ -746,16 +765,17 @@ fn select_message_page<'a>(
         .iter()
         .filter(|message| message.conversation_id == conversation_id)
         .filter(|message| match (before_ms, before_id) {
-            (Some(before), Some(id)) => (message.sent_at_ms, message.id.as_str()) < (before, id),
-            (Some(before), None) => message.sent_at_ms < before,
+            (Some(before), Some(id)) => {
+                (message_order_ms(message), message.id.as_str()) < (before, id)
+            }
+            (Some(before), None) => message_order_ms(message) < before,
             (None, None) => true,
             (None, Some(_)) => false,
         })
         .collect::<Vec<_>>();
     let newest_first = |left: &&StoredMessage, right: &&StoredMessage| {
-        right
-            .sent_at_ms
-            .cmp(&left.sent_at_ms)
+        message_order_ms(right)
+            .cmp(&message_order_ms(left))
             .then_with(|| right.id.cmp(&left.id))
     };
     let has_more = messages.len() > limit;
@@ -1064,6 +1084,7 @@ fn queue_created_group(
         is_outgoing: true,
         is_read: true,
         delivery_state: "queued".to_owned(),
+        receipts: Default::default(),
         attachment_name: None,
         attachment_base64: None,
     };
@@ -1169,6 +1190,7 @@ fn send_text_with(
             is_outgoing: true,
             is_read: true,
             delivery_state: "queued".to_owned(),
+            receipts: Default::default(),
             attachment_name: None,
             attachment_base64: None,
         };
@@ -1201,6 +1223,7 @@ fn send_text_with(
         is_outgoing: true,
         is_read: true,
         delivery_state: "queued".to_owned(),
+        receipts: Default::default(),
         attachment_name: None,
         attachment_base64: None,
     };
@@ -1290,6 +1313,7 @@ pub fn send_attachment(
             is_outgoing: true,
             is_read: true,
             delivery_state: "queued".to_owned(),
+            receipts: Default::default(),
             attachment_name: Some(file_name),
             attachment_base64: Some(STANDARD.encode(bytes)),
         };
@@ -1362,6 +1386,7 @@ pub fn send_attachment(
         is_outgoing: true,
         is_read: true,
         delivery_state: "queued".to_owned(),
+        receipts: Default::default(),
         attachment_name: Some(file_name),
         attachment_base64: Some(STANDARD.encode(bytes)),
     };
@@ -1414,12 +1439,13 @@ pub fn delete_conversation(conversation_id: &str) -> CoreResult<Value> {
             .groups_path
             .clone()
             .ok_or(CoreError::FeatureUnavailable)?;
-        let updated = store
-            .groups
-            .iter()
-            .filter(|group| group.id != conversation_id)
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut updated = store.groups.clone();
+        let group = updated
+            .iter_mut()
+            .find(|group| group.id == conversation_id)
+            .unwrap();
+        groups::prepare_leave(group)?;
+        let departure = group.clone();
         let message_path = store
             .message_path
             .clone()
@@ -1444,6 +1470,8 @@ pub fn delete_conversation(conversation_id: &str) -> CoreResult<Value> {
         store.message_event_count += 1;
         store.revision = store.revision.wrapping_add(1);
         compact_message_log_if_needed(&mut store)?;
+        drop(store);
+        queue_device_sync(&DeviceSyncEvent::UpsertGroup { group: departure });
         return Ok(json!({"conversation_id": conversation_id, "deleted": true}));
     }
     let original_len = store.contacts.len();
@@ -1588,6 +1616,7 @@ pub fn sync_inbound_messages() -> CoreResult<Value> {
     // Receive first: a slow or unavailable recipient must not delay messages
     // that have already arrived for us.
     groups::process_requests();
+    receipts::flush();
     let _ = flush_outbox(None);
     flush_device_sync_outbox();
     let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
@@ -1829,12 +1858,20 @@ fn persist_inbound_payload_with(
         }
     }
     let mut opened = secure_packet::open(payload)?;
+    if let Some(changed) = receipts::receive(&opened.plaintext, &opened.sender)? {
+        opened.commit_ratchet()?;
+        return Ok(changed);
+    }
     if groups::is_control(&opened.plaintext) {
         let changed = groups::receive(&opened.plaintext, &opened.sender, fetch)?.unwrap_or(false);
         opened.commit_ratchet()?;
         return Ok(changed);
     }
     if let Some(invitation) = decode_group_invitation_with(&opened.plaintext, fetch)? {
+        if current_group(&invitation.group.id)?.is_some_and(|group| group.management.left) {
+            opened.commit_ratchet()?;
+            return Ok(false);
+        }
         let mut sender = group_member(opened.sender.clone())?;
         if invitation.version != 1
             || invitation.group.admin_id != sender.id
@@ -1947,6 +1984,7 @@ fn persist_inbound_payload_with(
         is_outgoing: false,
         is_read: false,
         delivery_state: "delivered".to_owned(),
+        receipts: Default::default(),
         attachment_name,
         attachment_base64,
     };
@@ -2216,7 +2254,7 @@ fn flush_device_sync_outbox() {
 }
 fn queue_outgoing(
     message_path: &Path,
-    message: StoredMessage,
+    mut message: StoredMessage,
     deliveries: Vec<secure_packet::SealedDelivery>,
 ) -> CoreResult<()> {
     let now_ms = current_time_ms()?;
@@ -2245,6 +2283,18 @@ fn queue_outgoing(
     }
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     ensure_messages_loaded(&mut store)?;
+    message.receipts.recipients = store
+        .groups
+        .iter()
+        .find(|group| group.id == message.conversation_id)
+        .map(|group| {
+            group
+                .members
+                .iter()
+                .map(|member| member.id.clone())
+                .collect()
+        })
+        .unwrap_or_else(|| vec![message.conversation_id.clone()]);
     let outbox_path = store
         .outbox_path
         .clone()
@@ -2403,7 +2453,8 @@ fn poll_outbox_transport(
         if *previous == generation {
             match receiver.try_recv() {
                 Ok(results) => {
-                    *active = None;
+                    // Keep collecting this batch: each destination reports
+                    // independently, without waiting for slower/offline peers.
                     return Some(results);
                 }
                 Err(TryRecvError::Empty) => return None,
@@ -2419,29 +2470,31 @@ fn poll_outbox_transport(
     std::thread::Builder::new()
         .name("sylphy-outbox".to_owned())
         .spawn(move || {
-            let results = pending
-                .into_iter()
-                .map(|item| {
-                    let delivered = deliver_with_offline_fallback(
-                        || {
-                            veilid_adapter::deliver_payload(
-                                &item.route_blob,
-                                None,
-                                item.payload.clone(),
-                            )
-                        },
-                        || {
-                            item.offline_keys
-                                .as_ref()
-                                .map_or(Err(CoreError::FeatureUnavailable), |keys| {
-                                    veilid_adapter::store_offline_payload(keys, &item.payload)
-                                })
-                        },
-                    );
-                    (item, delivered)
-                })
-                .collect();
-            let _ = sender.send(results);
+            std::thread::scope(|scope| {
+                for item in pending {
+                    let sender = sender.clone();
+                    scope.spawn(move || {
+                        let delivered = deliver_with_offline_fallback(
+                            || {
+                                veilid_adapter::deliver_payload(
+                                    &item.route_blob,
+                                    None,
+                                    item.payload.clone(),
+                                )
+                            },
+                            || {
+                                item.offline_keys.as_ref().map_or(
+                                    Err(CoreError::FeatureUnavailable),
+                                    |keys| {
+                                        veilid_adapter::store_offline_payload(keys, &item.payload)
+                                    },
+                                )
+                            },
+                        );
+                        let _ = sender.send(vec![(item, delivered)]);
+                    });
+                }
+            });
         })
         .ok()?;
     *active = Some((generation, receiver));
@@ -2564,8 +2617,9 @@ fn apply_device_sync_plaintext(plaintext: &[u8]) -> CoreResult<()> {
             validate_groups(std::slice::from_ref(&group))?;
             if let Some(existing) = store.groups.iter_mut().find(|item| item.id == group.id) {
                 groups::preserve_local_queues(existing, &mut group);
-                if group.management.revision >= existing.management.revision
-                    && !existing.management.closed
+                if ((group.management.left && !existing.management.left)
+                    || (group.management.revision >= existing.management.revision
+                        && !existing.management.closed))
                     && serde_json::to_vec(existing).ok() != serde_json::to_vec(&group).ok()
                 {
                     *existing = group;
@@ -2586,8 +2640,9 @@ fn apply_device_sync_plaintext(plaintext: &[u8]) -> CoreResult<()> {
             }
             if let Some(existing) = store.groups.iter_mut().find(|item| item.id == group.id) {
                 groups::preserve_local_queues(existing, &mut group);
-                if group.management.revision >= existing.management.revision
-                    && !existing.management.closed
+                if ((group.management.left && !existing.management.left)
+                    || (group.management.revision >= existing.management.revision
+                        && !existing.management.closed))
                     && serde_json::to_vec(existing).ok() != serde_json::to_vec(&group).ok()
                 {
                     *existing = group.clone();
@@ -2602,6 +2657,8 @@ fn apply_device_sync_plaintext(plaintext: &[u8]) -> CoreResult<()> {
             if !store.groups.iter().any(|group| {
                 group.id == message.conversation_id
                     && (group.management.closed
+                        || group.management.left
+                        || group.management.removed
                         || group.management.deleted_messages.contains(&message.id))
             }) {
                 changed |= upsert_synced_message(&mut store, &message_path, message)?;
@@ -2610,6 +2667,30 @@ fn apply_device_sync_plaintext(plaintext: &[u8]) -> CoreResult<()> {
     }
     // A previous attempt may have updated RAM before a disk failure. Retry
     // persistence even when this replay no longer changes the in-memory value.
+    let left = store
+        .groups
+        .iter()
+        .filter(|group| group.management.left)
+        .map(|group| group.id.clone())
+        .collect::<HashSet<_>>();
+    for id in &left {
+        cancel_pending_conversation(&mut store, id)?;
+    }
+    if store
+        .messages
+        .iter()
+        .any(|message| left.contains(&message.conversation_id))
+    {
+        let messages = store
+            .messages
+            .iter()
+            .filter(|message| !left.contains(&message.conversation_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        write_message_snapshot(&message_path, &messages)?;
+        store.messages = messages;
+        changed = true;
+    }
     persist_contacts(&contact_path, &store.contacts)?;
     persist_groups(&groups_path, &store.groups)?;
     if changed {
@@ -2633,6 +2714,7 @@ fn merge_synced_message(
         return Err(CoreError::VerificationFailed);
     }
     let mut merged = existing.clone();
+    receipts::merge(&mut merged.receipts, &incoming.receipts);
     let rank = |state: &str| match state {
         "not_restored" => 0,
         "queued" => 1,
@@ -2644,6 +2726,7 @@ fn merge_synced_message(
     if rank(&incoming.delivery_state) > rank(&existing.delivery_state) {
         merged.delivery_state = incoming.delivery_state.clone();
     }
+    receipts::refresh_state(&mut merged);
     if existing.attachment_base64.is_none() && incoming.attachment_base64.is_some() {
         merged.attachment_name = incoming.attachment_name.clone();
         merged.attachment_base64 = incoming.attachment_base64.clone();
@@ -3255,6 +3338,7 @@ fn message_json(message: &StoredMessage, store: &ContactStore) -> Value {
         "body": text,
         "reply_to": reply_to,
         "sent_at_ms": message.sent_at_ms,
+        "order_at_ms": message_order_ms(message),
         "is_outgoing": message.is_outgoing,
         "delivery_state": message.delivery_state,
         "attachment_name": message.attachment_name,
@@ -3733,6 +3817,7 @@ mod tests {
             is_outgoing: true,
             is_read: true,
             delivery_state: "sent".to_owned(),
+            receipts: Default::default(),
             attachment_name: None,
             attachment_base64: None,
         }
@@ -3783,6 +3868,53 @@ mod tests {
         assert!(!has_more);
         let (page, _) = select_message_page(&history, "chat", Some(12), None, 120);
         assert!(page.iter().all(|message| message.sent_at_ms < 12));
+    }
+
+    #[test]
+    fn incoming_clock_skew_does_not_partition_history_or_break_pagination() {
+        let history = (1..=6)
+            .map(|i| {
+                let mut message = history_message(i);
+                message.conversation_id = "chat".to_owned();
+                message.is_outgoing = i % 2 != 0;
+                message.sent_at_ms = if message.is_outgoing {
+                    i as u64 * 1000
+                } else {
+                    100
+                };
+                message.received_at_ms = if message.is_outgoing {
+                    0
+                } else {
+                    i as u64 * 1000
+                };
+                message
+            })
+            .collect::<Vec<_>>();
+        let (latest, more) = select_message_page(&history, "chat", None, None, 3);
+        assert!(more);
+        assert_eq!(
+            latest
+                .iter()
+                .map(|m| message_order_ms(m))
+                .collect::<Vec<_>>(),
+            vec![4000, 5000, 6000]
+        );
+        let (older, more) = select_message_page(
+            &history,
+            "chat",
+            Some(message_order_ms(latest[0])),
+            Some(&latest[0].id),
+            3,
+        );
+        assert!(!more);
+        assert_eq!(
+            older
+                .iter()
+                .map(|m| message_order_ms(m))
+                .collect::<Vec<_>>(),
+            vec![1000, 2000, 3000]
+        );
+        assert_eq!(latest[0].sent_at_ms, 100); // Preserve the sender's timestamp.
     }
 
     #[test]
@@ -3989,6 +4121,7 @@ mod tests {
             is_outgoing: true,
             is_read: true,
             delivery_state: "queued".to_owned(),
+            receipts: Default::default(),
             attachment_name: None,
             attachment_base64: None,
         };
@@ -4020,13 +4153,12 @@ mod tests {
             (store.generation, store.outbox.clone())
         };
         let (sender, receiver) = std::sync::mpsc::channel();
-        sender
-            .send(vec![
-                (pending[0].clone(), true),
-                (pending[1].clone(), false),
-            ])
-            .unwrap();
+        sender.send(vec![(pending[0].clone(), true)]).unwrap();
         *OUTBOX_TRANSPORT.lock().unwrap() = Some((generation, receiver));
+        assert!(!flush_outbox(Some("message-one")));
+        assert_eq!(contact_store().lock().unwrap().outbox.len(), 1);
+        // A late result must use the same receiver, never start a duplicate batch.
+        sender.send(vec![(pending[1].clone(), false)]).unwrap();
         assert!(!flush_outbox(Some("message-one")));
         {
             let store = contact_store().lock().unwrap();
