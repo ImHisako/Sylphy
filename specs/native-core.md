@@ -6,6 +6,17 @@ Il confine Flutter/Rust è una singola ABI C JSON, attualmente alla versione 11.
 
 `ensure_identity` crea o riapre un record Argon2id/XChaCha20-Poly1305 contenente la chiave Ed25519 stabile, la prekey privata X25519 e il seed ML-KEM-768. Le prekey pubbliche sono firmate e ruotate alla scadenza, mentre il fingerprint Ed25519 rimane stabile. Il boundary restituisce esclusivamente fingerprint, scadenza e invito pubblico `sylphy:`; il segreto del vault è device-bound e proviene dal secure storage della piattaforma.
 
+## Verifica del bundle Android
+
+`native/build-android.ps1` registra ABI 11 e hash SHA-256 in `sylphy-core.properties`.
+Prima del packaging, `verifySylphyNativeCore` verifica ABI, sorgenti e librerie per
+le tre architetture Android. Entrambi i passaggi calcolano l'impronta su `Cargo.toml`,
+`Cargo.lock` e i file `src/**/*.rs`, ordinati con confronto ordinale case-sensitive
+dei percorsi relativi con separatore `/`. L'impronta è lo SHA-256 UTF-8 della
+concatenazione degli hash dei file, espressi in esadecimale minuscolo senza separatori.
+L'ordinamento non dipende dalla lingua del sistema. Dopo modifiche ai sorgenti o
+al formato dei metadati, le librerie vanno ricompilate prima di generare l'APK.
+
 ## Veilid
 
 `veilid-core` è una dipendenza opzionale del core. Con la feature `veilid`, `VeilidNode` avvia `VeilidAPI` con un callback che accetta soltanto `AppMessage` opachi entro 32 KiB e li conserva in una coda nativa limitata a 256 elementi. Gestisce inoltre attach, routing context, private route, import del route blob e shutdown. Il lifecycle dell'app usa il `program_name` stabile `sylphy`, parte da `VeilidConfig::default` e sostituisce soltanto le directory persistenti di protected, table e block store; i percorsi TLS rimangono quelli di default. Su Android usa NDK 28.2, Java 17 e AndroidX Security 1.1.0; `MainActivity` registra `Context`/JVM prima di `super.onCreate` e adatta i nomi JNI interni al formato binario richiesto da `ClassLoader`, così il protected store può caricare le classi AndroidX. Il core rifiuta lo startup con `platform_not_initialized` se questo contratto non è soddisfatto e classifica separatamente gli errori degli store senza esporne il testo interno.

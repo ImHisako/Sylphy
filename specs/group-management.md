@@ -23,6 +23,12 @@ modifica informazioni, inviti, nomina admin, messaggi fissati e gestione permess
 Un delegato non può conferire privilegi che non possiede né modificare un altro
 admin; solo il proprietario può eliminare il gruppo per tutti.
 
+Nella schermata di gestione, i comandi per informazioni, permessi e inviti mostrano
+un lucchetto quando manca il privilegio necessario. Un clic spiega quale permesso
+chiedere al proprietario, senza inviare azioni al core. Per un gruppo chiuso o
+una membership revocata viene mostrato il relativo motivo; durante un'operazione
+i comandi restano temporaneamente disabilitati.
+
 ## Trasporto e autorità
 
 Il dispositivo creatore coordina le revisioni del gruppo. Le azioni dei delegati

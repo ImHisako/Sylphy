@@ -71,8 +71,72 @@ void main() {
     await tester.tap(find.text('Permessi e antispam'));
     await tester.pumpAndSettle();
     expect(find.byType(AlertDialog), findsNothing);
+    expect(
+      find.text(
+        'Per questa azione chiedi al proprietario di assegnarti il permesso «Cambiare permessi e antispam».',
+      ),
+      findsOneWidget,
+    );
+    for (final label in ['Aggiungi persone', 'Crea link di invito']) {
+      await tester.tap(find.text(label));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(
+        find.text(
+          'Per questa azione chiedi al proprietario di assegnarti il permesso «Invitare persone».',
+        ),
+        findsOneWidget,
+      );
+    }
+    expect(find.byIcon(Icons.lock_outline), findsNWidgets(4));
     expect(find.text('Elimina gruppo per tutti'), findsNothing);
     expect(find.byTooltip('Gestisci membro'), findsNothing);
+    expect(bridge.actions, isEmpty);
+  });
+
+  testWidgets('delegated invite permission enables only the allowed actions', (
+    tester,
+  ) async {
+    final bridge = _Groups()
+      ..owner = false
+      ..grantedPermissions = {'invite_members'};
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GroupManagementPage(bridge: bridge, conversationId: 'group'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Aggiungi persone'));
+    await tester.pumpAndSettle();
+    expect(find.byType(TextField), findsOneWidget);
+    await tester.tap(find.text('Annulla'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Crea link di invito'));
+    await tester.pumpAndSettle();
+    expect(bridge.actions.single, {'kind': 'invite_link'});
+    await tester.tap(find.text('Permessi e antispam'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(bridge.actions, hasLength(1));
+    expect(find.byIcon(Icons.lock_outline), findsNWidgets(2));
+  });
+
+  testWidgets('closed groups explain why actions are unavailable', (
+    tester,
+  ) async {
+    final bridge = _Groups()..closed = true;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GroupManagementPage(bridge: bridge, conversationId: 'group'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Crea link di invito'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Il gruppo è stato chiuso o non ne fai più parte.'),
+      findsOneWidget,
+    );
     expect(bridge.actions, isEmpty);
   });
 
@@ -169,6 +233,8 @@ void main() {
 
 class _Groups implements GroupManagementBridge {
   bool owner = true;
+  bool closed = false;
+  Set<String> grantedPermissions = {};
   bool pending = false;
   List<String> pinned = [];
   Map<String, dynamic> policy = {
@@ -188,7 +254,7 @@ class _Groups implements GroupManagementBridge {
     'revision': 1,
     'policy': policy,
     'is_owner': owner,
-    'closed': false,
+    'closed': closed,
     'can_send': true,
     'pinned': pinned,
     'permissions': {
@@ -201,7 +267,7 @@ class _Groups implements GroupManagementBridge {
         'delete_messages',
         'add_admins',
       ])
-        key: owner,
+        key: owner || grantedPermissions.contains(key),
     },
     'members': [
       {'id': 'owner', 'name': 'Proprietario', 'is_owner': true},

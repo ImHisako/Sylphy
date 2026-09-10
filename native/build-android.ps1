@@ -67,17 +67,22 @@ try {
         exit $LASTEXITCODE
     }
     $metadata = @(
-        'abi=10'
+        'abi=11'
         'libsignal=signalapp/libsignal@v0.102.1'
         "profile=$Profile"
     )
-    $sourceFiles = @(
-        Get-ChildItem -LiteralPath (Join-Path $nativeCorePath 'src') -Recurse -File
+    [string[]]$sourceFiles = @(
+        Get-ChildItem -LiteralPath (Join-Path $nativeCorePath 'src') -Recurse -File -Filter '*.rs'
         Get-Item -LiteralPath (Join-Path $nativeCorePath 'Cargo.toml')
         Get-Item -LiteralPath (Join-Path $nativeCorePath 'Cargo.lock')
-    ) | Sort-Object FullName
+    ) | ForEach-Object {
+        $_.FullName.Substring($nativeCorePath.Length + 1).Replace('\', '/')
+    }
+    # Match Kotlin's ordinal ordering, including punctuation (groups.rs must
+    # precede groups_tests.rs). Sort-Object uses culture-dependent collation.
+    [Array]::Sort($sourceFiles, [StringComparer]::Ordinal)
     $sourceHashes = ($sourceFiles | ForEach-Object {
-        (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        (Get-FileHash -LiteralPath (Join-Path $nativeCorePath $_) -Algorithm SHA256).Hash.ToLowerInvariant()
     }) -join ''
     $sha256 = [Security.Cryptography.SHA256]::Create()
     try {

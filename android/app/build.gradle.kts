@@ -52,7 +52,7 @@ val verifySylphyNativeCore by tasks.registering {
         val metadata = Properties().apply {
             metadataFile.inputStream().use(::load)
         }
-        check(metadata.getProperty("abi") == "10") { "Stale Sylphy native ABI." }
+        check(metadata.getProperty("abi") == "11") { "Stale Sylphy native ABI." }
         check(metadata.getProperty("libsignal") == "signalapp/libsignal@v0.102.1") {
             "Android native core was not built with libsignal v0.102.1."
         }
@@ -60,10 +60,13 @@ val verifySylphyNativeCore by tasks.registering {
         val sourceFiles = (
             fileTree(nativeCore.resolve("src")) { include("**/*.rs") }.files +
                 listOf(nativeCore.resolve("Cargo.toml"), nativeCore.resolve("Cargo.lock"))
-            ).sortedBy { it.absolutePath }
+            // Match native/build-android.ps1: ordinal, case-sensitive ordering
+            // of relative paths with '/' separators, independent of host locale.
+            ).sortedBy { it.relativeTo(nativeCore).invariantSeparatorsPath }
         val sourceFingerprint = sha256(sourceFiles.joinToString("") { sha256(it) })
         check(metadata.getProperty("source.sha256") == sourceFingerprint) {
-            "Sylphy Rust sources changed after the Android libraries were built."
+            "Sylphy Rust sources changed after the Android libraries were built. " +
+                "Run native/build-android.ps1 again before building Android."
         }
         listOf("armeabi-v7a", "arm64-v8a", "x86_64").forEach { abi ->
             val library = root.resolve("$abi/libsylphy_core.so")

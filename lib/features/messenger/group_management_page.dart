@@ -62,10 +62,35 @@ class _GroupManagementPageState extends State<GroupManagementPage> {
     }
   }
 
-  bool _allowed(String permission) =>
-      !_busy &&
+  bool _hasPermission(String permission) =>
       (_details?['permissions'] as Map?)?[permission] == true &&
       _details?['closed'] != true;
+
+  bool _allowed(String permission) => !_busy && _hasPermission(permission);
+
+  String _permissionMessage(String permission) => _details?['closed'] == true
+      ? 'Il gruppo è stato chiuso o non ne fai più parte.'
+      : 'Per questa azione chiedi al proprietario di assegnarti il permesso «${_adminLabels[permission]}».';
+
+  VoidCallback? _onAction(String permission, VoidCallback action) {
+    if (_busy) return null;
+    return () {
+      if (_hasPermission(permission)) {
+        action();
+        return;
+      }
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text(_permissionMessage(permission))));
+    };
+  }
+
+  Widget _actionIndicator(String permission) => _hasPermission(permission)
+      ? const Icon(Icons.chevron_right)
+      : Tooltip(
+          message: _permissionMessage(permission),
+          child: const Icon(Icons.lock_outline),
+        );
 
   Future<void> _act(Map<String, dynamic> action) async {
     if (_busy) return;
@@ -287,9 +312,15 @@ class _GroupManagementPageState extends State<GroupManagementPage> {
                       ),
                       subtitle: Text(details['description'] as String? ?? ''),
                       trailing: IconButton(
-                        tooltip: 'Modifica informazioni',
-                        onPressed: _allowed('change_info') ? _editInfo : null,
-                        icon: const Icon(Icons.edit_outlined),
+                        tooltip: _hasPermission('change_info')
+                            ? 'Modifica informazioni'
+                            : _permissionMessage('change_info'),
+                        onPressed: _onAction('change_info', _editInfo),
+                        icon: Icon(
+                          _hasPermission('change_info')
+                              ? Icons.edit_outlined
+                              : Icons.lock_outline,
+                        ),
                       ),
                     ),
                     Card(
@@ -304,18 +335,18 @@ class _GroupManagementPageState extends State<GroupManagementPage> {
                                   ? 'Tutti i membri possono scrivere'
                                   : 'Scrivono solo gli amministratori',
                             ),
-                            trailing: const Icon(Icons.chevron_right),
-                            onTap: _allowed('manage_permissions')
-                                ? () => _editPolicy()
-                                : null,
+                            trailing: _actionIndicator('manage_permissions'),
+                            onTap: _onAction(
+                              'manage_permissions',
+                              () => _editPolicy(),
+                            ),
                           ),
                           ListTile(
                             leading: const Icon(Icons.person_add_alt),
                             title: const Text('Aggiungi persone'),
                             subtitle: const Text('Invita usando gli ID Sylphy'),
-                            onTap: _allowed('invite_members')
-                                ? _addMembers
-                                : null,
+                            trailing: _actionIndicator('invite_members'),
+                            onTap: _onAction('invite_members', _addMembers),
                           ),
                           ListTile(
                             leading: const Icon(Icons.link),
@@ -323,9 +354,11 @@ class _GroupManagementPageState extends State<GroupManagementPage> {
                             subtitle: const Text(
                               'Valido 7 giorni; un nuovo link sostituisce quello precedente.',
                             ),
-                            onTap: _allowed('invite_members')
-                                ? () => _act({'kind': 'invite_link'})
-                                : null,
+                            trailing: _actionIndicator('invite_members'),
+                            onTap: _onAction(
+                              'invite_members',
+                              () => _act({'kind': 'invite_link'}),
+                            ),
                           ),
                           if (details['invite_link'] case final String link)
                             Padding(
