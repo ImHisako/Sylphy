@@ -42,6 +42,121 @@ fn group(admin: &GroupMember, members: Vec<GroupMember>, mode: &str) -> StoredGr
 }
 
 #[test]
+fn offline_group_backlog_is_deferred_then_received_out_of_order_without_loss() {
+    let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+    let directory = std::env::temp_dir().join(format!("sylphy-backlog-{}", new_id()));
+    let admin = fixture(&directory, "Admin");
+    let alice = fixture(&directory, "Alice");
+    let bob = fixture(&directory, "Bob");
+    activate(&directory, "Alice");
+    let device = bob.identity.delivery_devices().unwrap().remove(0);
+    let packets = (1..=3)
+        .map(|id| {
+            let body = format!(
+                "{GROUP_MESSAGE_PREFIX}test-group:{}",
+                STANDARD_NO_PAD.encode(format!("messaggio {id}"))
+            );
+            secure_packet::seal_for_test_with_id(&device, &body, &[id; 16])
+                .unwrap()
+                .0
+        })
+        .collect::<Vec<_>>();
+    activate(&directory, "Bob");
+    let mut value = group(&admin, vec![admin.clone(), alice.clone()], "group");
+    value.management.policy.slow_mode_seconds = 30;
+    save(value.clone()).unwrap();
+    assert!(persist_inbound_payload(&packets[2]).unwrap());
+    for packet in [&packets[0], &packets[1]] {
+        let error = persist_inbound_payload(packet).unwrap_err();
+        assert!(matches!(error, CoreError::InboundDeferred));
+        assert!(!should_discard_inbound(&error));
+    }
+    // Advance the local receive window without sleeping. Retrying the exact
+    // ciphertext also checks rollback of the uncommitted Signal receive state.
+    for packet in [&packets[0], &packets[1]] {
+        for message in &mut contact_store().lock().unwrap().messages {
+            message.received_at_ms = current_time_ms().unwrap() - 31_000;
+        }
+        assert!(persist_inbound_payload(packet).unwrap());
+    }
+    activate(&directory, "Bob");
+    let messages = list_messages(&value.id, None, None, None).unwrap();
+    assert_eq!(messages["messages"].as_array().unwrap().len(), 3);
+    for packet in &packets {
+        assert!(!persist_inbound_payload(packet).unwrap());
+    }
+    // Permanent content/policy rejections still discard packets.
+    value.management.policy.aggressive_antispam = true;
+    let error = enforce_inbound(&value, &alice.id, "@a @b @c @d @e @f", false).unwrap_err();
+    assert!(matches!(error, CoreError::SpamRejected));
+    assert!(should_discard_inbound(&error));
+    value.management.policy.send_messages = false;
+    assert!(matches!(
+        enforce_inbound(&value, &alice.id, "test", false),
+        Err(CoreError::GroupPermissionDenied)
+    ));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn inbound_antispam_timing_is_retryable_while_local_send_limits_remain_errors() {
+    let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+    let directory = std::env::temp_dir().join(format!("sylphy-spam-backlog-{}", new_id()));
+    let admin = fixture(&directory, "Admin");
+    let member = fixture(&directory, "Member");
+    activate(&directory, "Admin");
+    let mut value = group(&admin, vec![member.clone()], "group");
+    value.admin_id = "me".to_owned();
+    value.management.policy.aggressive_antispam = true;
+    save(value.clone()).unwrap();
+    let now = current_time_ms().unwrap();
+    {
+        let mut store = contact_store().lock().unwrap();
+        ensure_messages_loaded(&mut store).unwrap();
+        store.messages.push(StoredMessage {
+            id: new_id(),
+            conversation_id: value.id.clone(),
+            author_id: member.id.clone(),
+            body: "ripetizione".to_owned(),
+            sent_at_ms: now - 120_000,
+            received_at_ms: now,
+            author_name: None,
+            is_outgoing: false,
+            is_read: false,
+            delivery_state: "delivered".to_owned(),
+            receipts: Default::default(),
+            attachment_name: None,
+            attachment_base64: None,
+        });
+    }
+    assert!(matches!(
+        enforce(&value, &member.id, "ripetizione", false),
+        Err(CoreError::SpamRejected)
+    ));
+    assert!(matches!(
+        enforce_inbound(&value, &member.id, "ripetizione", false),
+        Err(CoreError::InboundDeferred)
+    ));
+    {
+        let mut store = contact_store().lock().unwrap();
+        let first = store.messages[0].clone();
+        for _ in 0..4 {
+            let mut message = first.clone();
+            message.id = new_id();
+            store.messages.push(message);
+        }
+    }
+    let error = enforce_inbound(&value, &member.id, "testo diverso", false).unwrap_err();
+    assert!(matches!(error, CoreError::InboundDeferred));
+    assert!(!should_discard_inbound(&error));
+    for message in &mut contact_store().lock().unwrap().messages {
+        message.received_at_ms = now - 61_000;
+    }
+    assert!(enforce_inbound(&value, &member.id, "ripetizione", false).is_ok());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn invited_members_send_to_everyone_in_normal_and_business_groups_with_shared_ids() {
     let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
     let directory = std::env::temp_dir().join(format!("sylphy-group-management-{}", new_id()));

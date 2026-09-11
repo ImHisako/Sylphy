@@ -520,6 +520,7 @@ fn error_response(error: CoreError) -> CoreResponse {
         CoreError::AuthenticationFailed => "authentication_failed",
         CoreError::GroupPermissionDenied => "group_permission_denied",
         CoreError::SlowModeActive => "slow_mode_active",
+        CoreError::InboundDeferred => "inbound_deferred",
         CoreError::SpamRejected => "spam_rejected",
         CoreError::GroupClosed => "group_closed",
         CoreError::VerificationFailed => "verification_failed",

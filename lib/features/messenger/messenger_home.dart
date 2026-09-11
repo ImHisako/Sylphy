@@ -1141,7 +1141,7 @@ class _MobileConversationList extends StatelessWidget {
   }
 }
 
-class _MobileChatScreen extends StatelessWidget {
+class _MobileChatScreen extends StatefulWidget {
   const _MobileChatScreen({
     required this.bridge,
     required this.conversation,
@@ -1155,37 +1155,52 @@ class _MobileChatScreen extends StatelessWidget {
   final PrivacySettingsController privacySettings;
 
   @override
+  State<_MobileChatScreen> createState() => _MobileChatScreenState();
+}
+
+class _MobileChatScreenState extends State<_MobileChatScreen> {
+  final _chatPaneKey = GlobalKey<_ChatPaneState>();
+
+  @override
   Widget build(BuildContext context) {
+    final bridge = widget.bridge;
+    final conversation = widget.conversation;
+    final onChanged = widget.onChanged;
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 0,
-        title: Row(
-          children: [
-            _ContactAvatar(conversation: conversation, radius: 17),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    conversation.name,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
+        title: _GroupHeaderButton(
+          onTap: conversation.isGroup && bridge is GroupManagementBridge
+              ? () => _chatPaneKey.currentState?._manageGroup()
+              : null,
+          child: Row(
+            children: [
+              _ContactAvatar(conversation: conversation, radius: 17),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      conversation.name,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
-                  ),
-                  Text(
-                    _presenceLabel(conversation),
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: Color(0xFF9DA5B2),
+                    Text(
+                      _presenceLabel(conversation),
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFF9DA5B2),
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
         actions: [
           IconButton(
@@ -1213,11 +1228,12 @@ class _MobileChatScreen extends StatelessWidget {
         ],
       ),
       body: _ChatPane(
+        key: _chatPaneKey,
         bridge: bridge,
         conversation: conversation,
         onChanged: onChanged,
         showHeader: false,
-        privacySettings: privacySettings,
+        privacySettings: widget.privacySettings,
       ),
     );
   }
@@ -1225,6 +1241,7 @@ class _MobileChatScreen extends StatelessWidget {
 
 class _ChatPane extends StatefulWidget {
   const _ChatPane({
+    super.key,
     required this.bridge,
     required this.conversation,
     required this.onChanged,
@@ -1320,8 +1337,7 @@ class _ChatPaneState extends State<_ChatPane> {
         ),
       );
       if (!mounted || member == null || widget.conversation.id != id) return;
-      final mention =
-          '@${(member['name'] as String).replaceAll(RegExp(r'\s+'), '_')}';
+      final mention = memberMention(member['name'] as String);
       _composerController.text = '${_composerController.text}$mention ';
       _composerController.selection = TextSelection.collapsed(
         offset: _composerController.text.length,
@@ -1332,6 +1348,111 @@ class _ChatPaneState extends State<_ChatPane> {
           context,
         ).showSnackBar(SnackBar(content: Text(groupError(error))));
       }
+    }
+  }
+
+  bool _mentionOpen = false;
+
+  Future<void> _openMention(String mention) async {
+    if (_mentionOpen) return;
+    _mentionOpen = true;
+    final conversation = widget.conversation;
+    try {
+      final List<Map> members;
+      if (conversation.isGroup) {
+        final bridge = _management;
+        if (bridge == null) return;
+        final details = await bridge
+            .groupDetails(conversation.id)
+            .timeout(const Duration(seconds: 15));
+        members = (details['members'] as List? ?? []).cast<Map>();
+      } else {
+        members = [
+          {'id': conversation.id, 'name': conversation.name},
+        ];
+      }
+      if (!mounted || widget.conversation.id != conversation.id) return;
+      final matches = members
+          .where(
+            (member) =>
+                memberMention(member['name'] as String).toLowerCase() ==
+                mention.toLowerCase(),
+          )
+          .toList();
+      if (matches.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Persona non trovata tra i membri attuali.'),
+          ),
+        );
+        return;
+      }
+      final member = matches.length == 1
+          ? matches.single
+          : await showModalBottomSheet<Map>(
+              context: context,
+              builder: (context) => SafeArea(
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    const ListTile(title: Text('Scegli la persona menzionata')),
+                    for (final member in matches)
+                      ListTile(
+                        title: Text(member['name'] as String),
+                        subtitle: Text(member['id'] as String),
+                        onTap: () => Navigator.pop(context, member),
+                      ),
+                  ],
+                ),
+              ),
+            );
+      if (member == null ||
+          !mounted ||
+          widget.conversation.id != conversation.id) {
+        return;
+      }
+      await showModalBottomSheet<void>(
+        context: context,
+        showDragHandle: true,
+        builder: (context) => SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const CircleAvatar(
+                    child: Icon(Icons.person_rounded),
+                  ),
+                  title: Text(member['name'] as String),
+                  subtitle: Text(
+                    conversation.isGroup
+                        ? member['is_owner'] == true
+                              ? 'Proprietario del gruppo'
+                              : member['is_admin'] == true
+                              ? 'Amministratore del gruppo'
+                              : 'Membro del gruppo'
+                        : 'Contatto',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Text('Identificativo'),
+                SelectableText(member['id'] as String),
+              ],
+            ),
+          ),
+        ),
+      );
+    } on Object catch (error) {
+      if (mounted && widget.conversation.id == conversation.id) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(groupError(error))));
+      }
+    } finally {
+      _mentionOpen = false;
     }
   }
 
@@ -1983,6 +2104,9 @@ class _ChatPaneState extends State<_ChatPane> {
               conversation: widget.conversation,
               bridge: widget.bridge,
               onChanged: widget.onChanged,
+              onOpenGroup: widget.conversation.isGroup && _management != null
+                  ? _manageGroup
+                  : null,
             ),
           if (_management != null)
             Row(
@@ -2072,6 +2196,7 @@ class _ChatPaneState extends State<_ChatPane> {
                               onSecondaryTap: () => _messageActions(message),
                               child: _MessageBubble(
                                 message: message,
+                                onMention: _openMention,
                                 showAuthor: widget.conversation.isGroup,
                                 onRestoreDraft:
                                     message.deliveryState ==
@@ -2164,16 +2289,47 @@ class _ChatPaneState extends State<_ChatPane> {
   }
 }
 
+class _GroupHeaderButton extends StatelessWidget {
+  const _GroupHeaderButton({required this.child, this.onTap});
+
+  final Widget child;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    if (onTap == null) return child;
+    return Tooltip(
+      message: 'Impostazioni del gruppo',
+      child: Semantics(
+        button: true,
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(8),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 48),
+              child: child,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _ChatHeader extends StatelessWidget {
   const _ChatHeader({
     required this.conversation,
     required this.bridge,
     required this.onChanged,
+    this.onOpenGroup,
   });
 
   final Conversation conversation;
   final SecureMessagingBridge bridge;
   final VoidCallback onChanged;
+  final VoidCallback? onOpenGroup;
 
   @override
   Widget build(BuildContext context) {
@@ -2187,30 +2343,39 @@ class _ChatHeader extends StatelessWidget {
       ),
       child: Row(
         children: [
-          _ContactAvatar(conversation: conversation, radius: 22),
-          const SizedBox(width: 12),
           Expanded(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  conversation.name,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.w700,
+            child: _GroupHeaderButton(
+              onTap: onOpenGroup,
+              child: Row(
+                children: [
+                  _ContactAvatar(conversation: conversation, radius: 22),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          conversation.name,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          _presenceLabel(conversation),
+                          style: const TextStyle(
+                            color: Color(0xFF9DA5B2),
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  _presenceLabel(conversation),
-                  style: const TextStyle(
-                    color: Color(0xFF9DA5B2),
-                    fontSize: 13,
-                  ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
           _SafetyBadge(safety: conversation.safety),
@@ -2826,6 +2991,7 @@ class _MessageBubble extends StatelessWidget {
     required this.message,
     required this.showReceipt,
     this.onRestoreDraft,
+    this.onMention,
     this.showAuthor = false,
   });
 
@@ -2833,6 +2999,7 @@ class _MessageBubble extends StatelessWidget {
   final bool showAuthor;
   final bool showReceipt;
   final VoidCallback? onRestoreDraft;
+  final ValueChanged<String>? onMention;
 
   bool get _isImageAttachment {
     final name = message.attachmentName?.toLowerCase();
@@ -3046,8 +3213,10 @@ class _MessageBubble extends StatelessWidget {
                 ),
               )
             else
-              Text.rich(
-                messageTextSpan(message.body, outgoing: outgoing),
+              MessageText(
+                message.body,
+                outgoing: outgoing,
+                onMention: onMention,
                 style: TextStyle(color: foreground, fontSize: 15, height: 1.3),
               ),
             if (message.deliveryState == DeliveryState.notRestored) ...[

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
@@ -14,6 +15,8 @@ import 'core/platform/message_notifications.dart';
 import 'core/veilid/veilid_service.dart';
 import 'features/messenger/messenger_home.dart';
 import 'features/onboarding/profile_onboarding.dart';
+import 'core/updates/app_updates.dart';
+import 'features/updates/update_host.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -47,7 +50,12 @@ Future<void> main() async {
     result: nativeCore == null ? 'unavailable' : 'abi_${nativeCore.abiVersion}',
     force: nativeCore == null,
   );
-  runApp(SylphyApp(nativeCore: nativeCore));
+  runApp(
+    SylphyApp(
+      nativeCore: nativeCore,
+      updates: AppUpdateController.production(),
+    ),
+  );
 }
 
 class SylphyApp extends StatefulWidget {
@@ -60,6 +68,7 @@ class SylphyApp extends StatefulWidget {
     this.photoPicker,
     this.identityService,
     this.privacySettings,
+    this.updates,
   });
 
   final SecureMessagingBridge? bridge;
@@ -69,12 +78,14 @@ class SylphyApp extends StatefulWidget {
   final ProfilePhotoPicker? photoPicker;
   final IdentityService? identityService;
   final PrivacySettingsController? privacySettings;
+  final AppUpdateController? updates;
 
   @override
   State<SylphyApp> createState() => _SylphyAppState();
 }
 
 class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
+  final _navigatorKey = GlobalKey<NavigatorState>();
   late final SecureMessagingBridge _bridge;
   late final VeilidService _veilidService;
   late final bool _ownsVeilidService;
@@ -346,6 +357,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    widget.updates?.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _privacySettings.removeListener(_onPrivacyChanged);
     _veilidService.removeListener(_onRouteChanged);
@@ -404,6 +416,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     );
 
     return MaterialApp(
+      navigatorKey: _navigatorKey,
       title: 'Sylphy',
       debugShowCheckedModeBanner: false,
       navigatorObservers: [_DiagnosticNavigatorObserver()],
@@ -414,7 +427,19 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
             disableAnimations:
                 media.disableAnimations || _privacySettings.value.reduceMotion,
           ),
-          child: child ?? const SizedBox.shrink(),
+          child: widget.updates == null
+              ? child ?? const SizedBox.shrink()
+              : UpdateHost(
+                  controller: widget.updates!,
+                  navigatorKey: _navigatorKey,
+                  onRestart: () async {
+                    if (await widget.updates!.prepareRestart()) {
+                      await _veilidService.stop();
+                      exit(0);
+                    }
+                  },
+                  child: child ?? const SizedBox.shrink(),
+                ),
         );
       },
       theme: ThemeData(

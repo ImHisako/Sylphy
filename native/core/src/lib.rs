@@ -1,6 +1,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod account_backup;
+mod append_log;
 mod atomic_file;
 pub mod bundle;
 mod device_sync;

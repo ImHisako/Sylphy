@@ -1,9 +1,82 @@
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:file_selector/file_selector.dart';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sylphy/core/identity/account_transfer_service.dart';
 
 void main() {
+  final exceedsLimit = throwsA(
+    isA<AccountTransferException>().having(
+      (error) => error.code,
+      'code',
+      'limit_exceeded',
+    ),
+  );
+
+  test('rejects oversized backup metadata before opening the stream', () async {
+    final file = _BackupFile(length: 131 * 1024 * 1024, chunks: []);
+    await expectLater(readBackupFile(file), exceedsLimit);
+    expect(file.opened, false);
+  });
+
+  test(
+    'stops reading a growing backup before retaining the excess chunk',
+    () async {
+      final file = _BackupFile(
+        length: 2,
+        chunks: [
+          [1, 2],
+          [3, 4, 5],
+          [6],
+        ],
+      );
+      await expectLater(readBackupFile(file, maxBytes: 4), exceedsLimit);
+      expect(file.yielded, 2);
+      expect(file.cancelled, true);
+    },
+  );
+
+  test(
+    'accepts the exact limit and handles unknown or stale empty metadata',
+    () async {
+      for (final length in [0, 4]) {
+        final file = _BackupFile(
+          length: length,
+          chunks: [
+            [1, 2],
+            [3, 4],
+          ],
+        );
+        expect(await readBackupFile(file, maxBytes: 4), [1, 2, 3, 4]);
+      }
+      await expectLater(
+        readBackupFile(_BackupFile(length: 0, chunks: [])),
+        exceedsLimit,
+      );
+      await expectLater(
+        readBackupFile(_BackupFile(length: 3, chunks: [])),
+        exceedsLimit,
+      );
+    },
+  );
+
+  test('reads a real backup file as a bounded stream', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'sylphy-backup-read-',
+    );
+    addTearDown(() => directory.delete(recursive: true));
+    final file = File('${directory.path}/account.sylphy-account');
+    await file.writeAsBytes([1, 2, 3, 4]);
+    expect(await readBackupFile(XFile(file.path), maxBytes: 4), [1, 2, 3, 4]);
+    await expectLater(
+      readBackupFile(XFile(file.path), maxBytes: 3),
+      exceedsLimit,
+    );
+  });
+
   String payloadFor(String url) =>
       jsonEncode({'format': 'sylphy-account-qr', 'version': 1, 'url': url});
 
@@ -76,4 +149,32 @@ void main() {
       'AccountTransferException(qr_download_failed)',
     );
   });
+}
+
+class _BackupFile extends XFile {
+  _BackupFile({required int length, required this.chunks})
+    : _length = length,
+      super('test-backup');
+
+  final int _length;
+  final List<List<int>> chunks;
+  bool opened = false;
+  bool cancelled = false;
+  int yielded = 0;
+
+  @override
+  Future<int> length() async => _length;
+
+  @override
+  Stream<Uint8List> openRead([int? start, int? end]) async* {
+    opened = true;
+    try {
+      for (final chunk in chunks) {
+        yielded++;
+        yield Uint8List.fromList(chunk);
+      }
+    } finally {
+      cancelled = true;
+    }
+  }
 }

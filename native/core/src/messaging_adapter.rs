@@ -1949,7 +1949,7 @@ fn persist_inbound_payload_with(
                 let group = group.clone();
                 drop(store);
                 let (text, _) = groups::text_metadata(&body)?;
-                groups::enforce(
+                groups::enforce_inbound(
                     &group,
                     &sender_id,
                     &text,
@@ -3125,6 +3125,7 @@ fn load_legacy_messages(path: &Path) -> CoreResult<Vec<StoredMessage>> {
 }
 
 fn load_message_log(path: &Path) -> CoreResult<(Vec<StoredMessage>, usize)> {
+    crate::append_log::recover(path)?;
     if fs::metadata(path).map_err(|_| CoreError::Internal)?.len() > MAX_MESSAGE_STORE_BYTES {
         return Err(CoreError::LimitExceeded);
     }
@@ -3163,7 +3164,7 @@ fn load_message_log(path: &Path) -> CoreResult<(Vec<StoredMessage>, usize)> {
         OpenOptions::new()
             .write(true)
             .open(path)
-            .and_then(|file| file.set_len(cursor as u64))
+            .and_then(|file| file.set_len(cursor as u64).and_then(|_| file.sync_data()))
             .map_err(|_| CoreError::Internal)?;
     }
     Ok((messages, event_count))
@@ -3211,8 +3212,9 @@ fn append_message_event_with_limit(
     limit: u64,
 ) -> CoreResult<()> {
     if !path.exists() {
-        atomic_file::replace(path, MESSAGE_LOG_MAGIC)?;
+        crate::append_log::replace(path, MESSAGE_LOG_MAGIC)?;
     }
+    crate::append_log::recover(path)?;
     let encoded = serde_json::to_vec(event).map_err(|_| CoreError::Internal)?;
     let encrypted = vault::seal_with_key(&identity::active_identity()?.storage_key()?, &encoded)?;
     let length = u32::try_from(encrypted.len()).map_err(|_| CoreError::LimitExceeded)?;
@@ -3232,18 +3234,10 @@ fn append_message_event_with_limit(
             },
         );
     }
-    let mut options = OpenOptions::new();
-    options.append(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).map_err(|_| CoreError::Internal)?;
-    file.write_all(&length.to_be_bytes())
-        .and_then(|_| file.write_all(&encrypted))
-        .map_err(|_| CoreError::Internal)?;
-    file.sync_data().map_err(|_| CoreError::Internal)
+    let mut frame = Vec::with_capacity(4 + encrypted.len());
+    frame.extend_from_slice(&length.to_be_bytes());
+    frame.extend_from_slice(&encrypted);
+    crate::append_log::append(path, &frame)
 }
 
 fn compact_message_log_if_needed(store: &mut ContactStore) -> CoreResult<()> {
@@ -3288,7 +3282,7 @@ fn write_message_snapshot_with_limit(
             return Err(CoreError::LimitExceeded);
         }
     }
-    atomic_file::replace(path, &output)
+    crate::append_log::replace(path, &output)
 }
 
 fn persist_bytes(path: &Path, bytes: &[u8]) -> CoreResult<()> {
@@ -3651,6 +3645,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load_message_log(&path).unwrap().0.len(), 1);
+        // Startup truncates an interrupted tail before accepting another append.
+        let committed_len = fs::metadata(&path).unwrap().len();
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(&[0, 0]).unwrap();
+        file.sync_data().unwrap();
+        drop(file);
+        assert_eq!(load_message_log(&path).unwrap().0.len(), 1);
+        assert_eq!(fs::metadata(&path).unwrap().len(), committed_len);
+        append_message_event(
+            &path,
+            &MessageEvent::Upsert {
+                message: history_message(3),
+            },
+        )
+        .unwrap();
+        assert_eq!(load_message_log(&path).unwrap().0.len(), 2);
         fs::remove_dir_all(directory).unwrap();
     }
 

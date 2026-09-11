@@ -9,8 +9,84 @@ import 'package:sylphy/core/messaging/secure_messaging_bridge.dart';
 import 'package:sylphy/core/profile/user_profile.dart';
 import 'package:sylphy/core/platform/message_notifications.dart';
 import 'package:sylphy/main.dart';
+import 'package:sylphy/features/messenger/message_text.dart';
 
 void main() {
+  testWidgets('tapping a mention opens the matching group member', (
+    tester,
+  ) async {
+    final bridge = _MenuMessagingBridge()..injectIncoming('@Alice_Rossi');
+    bridge.details.complete({
+      'members': [
+        {'id': 'alice-id', 'name': 'Alice Rossi', 'is_admin': true},
+        {'id': 'bob-id', 'name': 'Bob'},
+      ],
+    });
+    await tester.pumpWidget(
+      SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Contatto di test'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(MessageText));
+    await tester.pumpAndSettle();
+    expect(find.text('Alice Rossi'), findsOneWidget);
+    expect(find.text('Amministratore del gruppo'), findsOneWidget);
+    expect(find.text('alice-id'), findsOneWidget);
+    expect(find.text('bob-id'), findsNothing);
+  });
+
+  testWidgets('duplicate mention names require choosing a member', (
+    tester,
+  ) async {
+    final bridge = _MenuMessagingBridge()..injectIncoming('@Alice');
+    bridge.details.complete({
+      'members': [
+        {'id': 'alice-one', 'name': 'Alice', 'is_owner': true},
+        {'id': 'alice-two', 'name': 'Alice'},
+      ],
+    });
+    await tester.pumpWidget(
+      SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Contatto di test'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(MessageText));
+    await tester.pumpAndSettle();
+    expect(find.text('Scegli la persona menzionata'), findsOneWidget);
+    await tester.tap(find.text('alice-two'));
+    await tester.pumpAndSettle();
+    expect(find.text('Membro del gruppo'), findsOneWidget);
+    expect(find.text('alice-two'), findsOneWidget);
+    expect(find.text('alice-one'), findsNothing);
+  });
+
+  testWidgets(
+    'missing mention gives feedback instead of opening another person',
+    (tester) async {
+      final bridge = _MenuMessagingBridge()..injectIncoming('@Alice');
+      bridge.details.complete({
+        'members': [
+          {'id': 'bob-id', 'name': 'Bob'},
+        ],
+      });
+      await tester.pumpWidget(
+        SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Contatto di test'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(MessageText));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Persona non trovata tra i membri attuali.'),
+        findsOneWidget,
+      );
+      expect(find.text('bob-id'), findsNothing);
+    },
+  );
+
   testWidgets(
     'link moderation preserves existing member restrictions and submits once',
     (tester) async {

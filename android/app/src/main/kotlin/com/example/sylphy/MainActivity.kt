@@ -37,6 +37,12 @@ private class VeilidAndroidContext(base: Context) : ContextWrapper(base) {
 }
 
 class MainActivity : FlutterActivity() {
+    private var apkUpdates: ApkUpdateHandler? = null
+
+    override fun onDestroy() {
+        apkUpdates?.close()
+        super.onDestroy()
+    }
     private external fun initializeVeilid(context: Context)
     private var nativeLibraryLoaded = false
     private var veilidBootstrapReady = false
@@ -63,6 +69,9 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        apkUpdates = ApkUpdateHandler(this)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "sylphy/updates")
+            .setMethodCallHandler(apkUpdates)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, PLATFORM_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {

@@ -14,6 +14,8 @@ pub enum CoreError {
     GroupPermissionDenied,
     #[error("group slow mode active")]
     SlowModeActive,
+    #[error("inbound group message deferred by receive rate limit")]
+    InboundDeferred,
     #[error("group spam filter rejected message")]
     SpamRejected,
     #[error("group is closed or membership revoked")]

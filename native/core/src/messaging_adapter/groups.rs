@@ -573,6 +573,25 @@ pub(super) fn can_write(group: &StoredGroup) -> CoreResult<bool> {
 }
 
 pub(super) fn enforce(group: &StoredGroup, actor: &str, text: &str, media: bool) -> CoreResult<()> {
+    enforce_with(group, actor, text, media, false)
+}
+
+pub(super) fn enforce_inbound(
+    group: &StoredGroup,
+    actor: &str,
+    text: &str,
+    media: bool,
+) -> CoreResult<()> {
+    enforce_with(group, actor, text, media, true)
+}
+
+fn enforce_with(
+    group: &StoredGroup,
+    actor: &str,
+    text: &str,
+    media: bool,
+    inbound: bool,
+) -> CoreResult<()> {
     if group.management.closed || group.management.removed {
         return Err(CoreError::GroupClosed);
     }
@@ -596,6 +615,11 @@ pub(super) fn enforce(group: &StoredGroup, actor: &str, text: &str, media: bool)
         || (has_link && (!base.send_links || !restriction.send_links))
     {
         return Err(CoreError::GroupPermissionDenied);
+    }
+    // Content violations remain permanent. Timing alone cannot establish
+    // abuse: a legitimate offline backlog can arrive in a single batch.
+    if base.aggressive_antispam && text.matches('@').count() > 5 {
+        return Err(CoreError::SpamRejected);
     }
     let now = current_time_ms()?;
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
@@ -624,15 +648,18 @@ pub(super) fn enforce(group: &StoredGroup, actor: &str, text: &str, media: bool)
             .iter()
             .any(|message| now < observed_at(message).saturating_add(slow))
     {
-        return Err(CoreError::SlowModeActive);
+        return Err(if inbound {
+            CoreError::InboundDeferred
+        } else {
+            CoreError::SlowModeActive
+        });
     }
     if base.aggressive_antispam
-        && (text.matches('@').count() > 5
-            || recent
-                .iter()
-                .filter(|message| now.saturating_sub(observed_at(message)) < 10_000)
-                .count()
-                >= 5
+        && (recent
+            .iter()
+            .filter(|message| now.saturating_sub(observed_at(message)) < 10_000)
+            .count()
+            >= 5
             || recent.iter().any(|message| {
                 now.saturating_sub(observed_at(message)) < 60_000
                     && !media
@@ -640,7 +667,11 @@ pub(super) fn enforce(group: &StoredGroup, actor: &str, text: &str, media: bool)
                         .is_ok_and(|(body, _)| body.eq_ignore_ascii_case(text))
             }))
     {
-        return Err(CoreError::SpamRejected);
+        return Err(if inbound {
+            CoreError::InboundDeferred
+        } else {
+            CoreError::SpamRejected
+        });
     }
     Ok(())
 }

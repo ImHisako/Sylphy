@@ -23,6 +23,25 @@ modifica informazioni, inviti, nomina admin, messaggi fissati e gestione permess
 Un delegato non può conferire privilegi che non possiede né modificare un altro
 admin; solo il proprietario può eliminare il gruppo per tutti.
 
+La modalità lenta e le finestre temporali dell'antispam limitano anche il ritmo
+di elaborazione in ricezione. Il superamento di queste finestre produce però
+`inbound_deferred`: il pacchetto cifrato non viene confermato alla mailbox e viene
+ritentato dalla normale sincronizzazione. La decifratura non ancora confermata
+viene annullata, così il medesimo pacchetto può essere elaborato successivamente.
+Questo consente di ricevere un arretrato arrivato in blocco o fuori ordine senza
+scartarlo soltanto per il momento di arrivo. Non si usa l'orologio del mittente
+per autorizzare gli invii. Si applicano ancora la retention e i limiti della rete.
+
+I divieti su membership, messaggi, media, link e contenuti con troppe menzioni
+restano rifiuti definitivi. L'invio locale conserva gli errori `slow_mode_active`
+e `spam_rejected`. Non cambia il formato dei messaggi né la versione del protocollo.
+Le regressioni verificano ricezione fuori ordine, rinvio e retry dello stesso
+ciphertext, persistenza al riavvio, deduplicazione e distinzione tra limiti
+temporanei e divieti di contenuto.
+
+Il nome e l'avatar del gruppo nell'intestazione della chat aprono le impostazioni,
+sia su desktop sia su mobile. Al ritorno dalla gestione viene aggiornata la chat.
+
 Nella schermata di gestione, i comandi per informazioni, permessi e inviti mostrano
 un lucchetto quando manca il privilegio necessario. Un clic spiega quale permesso
 chiedere al proprietario, senza inviare azioni al core. Per un gruppo chiuso o
@@ -77,9 +96,17 @@ e minuscole; query brevi usano la lista della conversazione. I risultati sono
 paginati a 50 elementi; `id:` risolve un messaggio nella sola chat richiesta.
 
 Le risposte conservano un ID nel payload testuale versionato e cifrato.
-Menzioni testuali e hashtag sono cliccabili e ricercabili; il selettore dei membri
-inserisce `@nome`. Non sono tag d'identità immutabili: omonimi e cambi di nome
-non vengono risolti automaticamente. I pin sono visibili in alto e nella gestione
+Il selettore dei membri inserisce `@nome`, sostituendo spazi e punteggiatura con
+underscore. Le menzioni sono cliccabili: aprono la scheda del membro attuale
+corrispondente, con nome, ruolo e identificativo. Gli omonimi richiedono una scelta;
+un nome non più presente mostra un avviso. Non sono tag d'identità immutabili.
+Menzioni e hashtag restano ricercabili tramite la ricerca della chat.
+I link HTTP/HTTPS nei messaggi, inclusi quelli dei video e i domini senza schema,
+sono cliccabili. Un dialogo mostra la destinazione completa e richiede «Apri nel
+browser» prima di passarla al gestore esterno del sistema. Annullamento e chiusura
+non aprono nulla; schemi non web e URL con credenziali non vengono aperti. Non
+vengono scaricate anteprime né inviato il testo del messaggio al browser.
+I pin sono visibili in alto e nella gestione
 del gruppo. Alla ricezione di nuovi pin viene mostrato un avviso specifico;
 Android usa una notifica generica "Messaggio fissato", senza contenuto della chat.
 

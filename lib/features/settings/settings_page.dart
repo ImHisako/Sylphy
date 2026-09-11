@@ -10,6 +10,7 @@ import '../../core/profile/user_profile.dart';
 import '../../core/privacy/privacy_settings.dart';
 import '../../core/veilid/veilid_service.dart';
 import 'account_qr_scanner_page.dart';
+import '../updates/update_host.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({
@@ -595,6 +596,8 @@ class _SettingsPageState extends State<SettingsPage> {
                   ],
                 ),
               ),
+              const SizedBox(height: 16),
+              const UpdateSettings(),
               const SizedBox(height: 16),
               Text(
                 'DEVELOPER OPTIONS',

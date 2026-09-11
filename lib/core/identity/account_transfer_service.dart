@@ -128,11 +128,7 @@ class AccountTransferService {
       ],
     );
     if (selected == null) return null;
-    final bytes = await selected.readAsBytes();
-    if (bytes.isEmpty || bytes.length > _maxDocumentBytes) {
-      throw const AccountTransferException('limit_exceeded');
-    }
-    return bytes;
+    return readBackupFile(selected);
   }
 
   Future<UserProfile> importFromDocument({
@@ -248,6 +244,30 @@ class AccountTransferService {
   void _requireSuccess(NativeCoreResponse response) {
     if (!response.ok) throw AccountTransferException(response.code);
   }
+}
+
+/// Bounds actual bytes as well as provider metadata, which can become stale.
+@visibleForTesting
+Future<Uint8List> readBackupFile(
+  XFile file, {
+  int maxBytes = AccountTransferService._maxDocumentBytes,
+}) async {
+  final length = await file.length();
+  if (maxBytes <= 0 || length < 0 || length > maxBytes) {
+    throw const AccountTransferException('limit_exceeded');
+  }
+  final builder = BytesBuilder(copy: false);
+  // Stop the subscription before retaining a chunk that exceeds the budget.
+  await for (final chunk in file.openRead()) {
+    if (chunk.length > maxBytes - builder.length) {
+      throw const AccountTransferException('limit_exceeded');
+    }
+    builder.add(chunk);
+  }
+  if (builder.isEmpty) {
+    throw const AccountTransferException('limit_exceeded');
+  }
+  return builder.takeBytes();
 }
 
 enum AccountQrTransferState { waiting, transferred, expired, error }

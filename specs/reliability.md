@@ -1,5 +1,32 @@
 # Correzioni di affidabilità — settembre 2026
 
+## Scritture parziali e lettura dei backup — 11 settembre
+
+Un append del log conserva l'offset iniziale e annulla la scrittura se fallisce
+il corpo del frame o il flush. Se anche il troncamento o il suo flush falliscono,
+il core conserva l'handle del file e blocca ulteriori append e snapshot finché
+il recupero non riesce. L'handle identifica il vecchio file anche se un'importazione
+installa un altro account nello stesso percorso. Non vengono aggiunti file
+ausiliari o flush alle scritture riuscite. Le operazioni sul log sono serializzate.
+Su Windows si usa un handle scrivibile con posizionamento alla fine: un handle
+aperto solo per append non permette di troncare il file.
+
+Al riavvio, il parser rimuove e sincronizza un frame finale incompleto prima di
+accettare nuove scritture. Restano invariati formato del log, cifratura e ABI.
+Questa correzione previene nuove concatenazioni dopo un frame parziale; non
+ricostruisce automaticamente log già corrotti da versioni precedenti.
+
+Il selettore dei backup controlla la dimensione dichiarata prima di aprire il
+flusso e accumula al massimo 130 MiB. Un chunk che supererebbe il limite viene
+rifiutato prima di aggiungerlo al buffer, interrompendo la lettura anche se il
+file cresce o il provider dichiara una dimensione inferiore a quella effettiva.
+I file vuoti vengono rifiutati; il contenuto viene validato come prima.
+
+Le regressioni coprono errori di scrittura a ogni confine del frame, errori di
+flush e rollback ripetuti, sostituzione dell'account, recupero della coda al
+riavvio, dimensioni dichiarate e reali discordanti, cancellazione del flusso al
+superamento del limite e lettura di un file reale.
+
 ## Ricezione e sincronizzazione
 
 La capacità locale esaurita produce `storage_full`, distinto dai limiti del

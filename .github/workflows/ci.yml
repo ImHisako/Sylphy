@@ -23,6 +23,15 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release version and increasing build number
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: python3 tool/release.py validate --tag "$GITHUB_REF_NAME"
+
+      - name: Test release packaging
+        run: python3 -m unittest discover -s tool -p 'test_*.py'
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
@@ -159,6 +168,24 @@ jobs:
         shell: pwsh
         run: if (-not (Test-Path build/windows/x64/runner/Release/sylphy_core.dll)) { throw 'sylphy_core.dll non inclusa' }
 
+      - name: Build Windows update installer
+        shell: pwsh
+        run: |
+          $versionLine = (Select-String -Path pubspec.yaml -Pattern '^version: (\d+\.\d+\.\d+)\+(\d+)$').Matches
+          $appVersion = $versionLine.Groups[1].Value
+          $buildNumber = $versionLine.Groups[2].Value
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path -LiteralPath $compiler)) { throw 'Inno Setup 6 missing on build runner.' }
+          & $compiler "/DAppVersion=$appVersion" "/DBuildNumber=$buildNumber" tool/windows-installer.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Windows installer compilation failed.' }
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: sylphy-windows-installer
+          path: release-assets/*-setup.exe
+          if-no-files-found: error
+
       - name: Upload Windows bundle
         uses: actions/upload-artifact@v4
         with:
@@ -238,6 +265,12 @@ jobs:
       - name: Build Android application
         run: flutter build apk --release
 
+      - name: Verify APK can update the previous public release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tool/verify_android_release.py
+
       - name: Upload Android APK
         uses: actions/upload-artifact@v4
         with:
@@ -287,13 +320,22 @@ jobs:
           name: sylphy-android
           path: release/android
 
+      - name: Download Windows installer
+        uses: actions/download-artifact@v4
+        with:
+          name: sylphy-windows-installer
+          path: release-assets
+
       - name: Package release files
         shell: bash
         run: |
           mkdir -p release-assets
+          chmod +x release/linux/sylphy
           tar -C release/linux -czf "release-assets/sylphy-${GITHUB_REF_NAME}-linux-x64.tar.gz" .
           (cd release/windows && zip -r "../../release-assets/sylphy-${GITHUB_REF_NAME}-windows-x64.zip" .)
           cp release/android/app-release.apk "release-assets/sylphy-${GITHUB_REF_NAME}-android.apk"
+          python3 tool/release.py linux --bundle release/linux --output "release-assets/sylphy-${GITHUB_REF_NAME}-linux-x64.run"
+          python3 tool/release.py metadata --output release-assets/sylphy-update.json
           (cd release-assets && sha256sum sylphy-* > SHA256SUMS.txt)
 
       - name: Create or update GitHub Release
@@ -301,8 +343,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          # Publish only after every asset exists. Never replace public binaries
+          # underneath clients that have already read their SHA-256 digests.
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+            test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true || {
+              echo 'Release already public. Create a new version/tag instead of replacing its files.' >&2
+              exit 1
+            }
           else
-            gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --generate-notes --title "Sylphy $GITHUB_REF_NAME"
+            gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes --title "Sylphy $GITHUB_REF_NAME"
           fi
+          gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
