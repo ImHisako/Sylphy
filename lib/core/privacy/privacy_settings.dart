@@ -18,6 +18,7 @@ class PrivacySettings {
     this.allowUnknownContacts = true,
     this.reduceMotion = false,
     this.incognitoKeyboard = false,
+    this.streamProof = false,
     this.themeName = 'sylphy',
   });
 
@@ -30,6 +31,7 @@ class PrivacySettings {
   final bool allowUnknownContacts;
   final bool reduceMotion;
   final bool incognitoKeyboard;
+  final bool streamProof;
   final String themeName;
 
   static const failClosed = PrivacySettings(
@@ -52,6 +54,7 @@ class PrivacySettings {
     bool? allowUnknownContacts,
     bool? reduceMotion,
     bool? incognitoKeyboard,
+    bool? streamProof,
     String? themeName,
   }) => PrivacySettings(
     shareProfilePhoto: shareProfilePhoto ?? this.shareProfilePhoto,
@@ -63,6 +66,7 @@ class PrivacySettings {
     allowUnknownContacts: allowUnknownContacts ?? this.allowUnknownContacts,
     reduceMotion: reduceMotion ?? this.reduceMotion,
     incognitoKeyboard: incognitoKeyboard ?? this.incognitoKeyboard,
+    streamProof: streamProof ?? this.streamProof,
     themeName: themeName ?? this.themeName,
   );
 
@@ -77,6 +81,7 @@ class PrivacySettings {
     'allow_unknown_contacts': allowUnknownContacts,
     'reduce_motion': reduceMotion,
     'incognito_keyboard': incognitoKeyboard,
+    'stream_proof': streamProof,
     'theme_name': themeName,
   };
 
@@ -101,6 +106,7 @@ class PrivacySettings {
           : value('allow_unknown_contacts', true),
       reduceMotion: value('reduce_motion', false),
       incognitoKeyboard: value('incognito_keyboard', false),
+      streamProof: value('stream_proof', false),
       themeName: json['theme_name'] is String
           ? json['theme_name'] as String
           : 'sylphy',
@@ -162,7 +168,9 @@ class PrivacySettingsController extends ChangeNotifier {
     _updateTail = operation.onError((error, _) {
       _storageError = error;
       if (_value.toJson().toString() == value.toJson().toString()) {
-        _value = PrivacySettings.failClosed;
+        _value = PrivacySettings.failClosed.copyWith(
+          streamProof: value.streamProof,
+        );
       }
       notifyListeners();
     });

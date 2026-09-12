@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart' show FontLoader;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sylphy/core/diagnostics/app_log.dart';
 import 'package:sylphy/core/messaging/models.dart';
@@ -16,6 +17,238 @@ import 'package:sylphy/main.dart';
 import 'package:sylphy/features/messenger/message_text.dart';
 
 void main() {
+  setUpAll(() async {
+    if (Platform.environment['SYLPHY_CAPTURE_CHANNELS'] != '1') return;
+    final fontDirectory = Platform.environment['SYLPHY_TEST_FONTS'];
+    if (fontDirectory == null) return;
+    for (final entry in {
+      'Roboto': 'roboto-regular.ttf',
+      'MaterialIcons': 'materialicons-regular.otf',
+    }.entries) {
+      final loader = FontLoader(entry.key)
+        ..addFont(
+          File(
+            '$fontDirectory/${entry.value}',
+          ).readAsBytes().then(ByteData.sublistView),
+        );
+      await loader.load();
+    }
+  });
+  for (final width in [390.0, 900.0, 1266.0]) {
+    testWidgets(
+      'group channel navigation and conversation rail at width $width',
+      (tester) async {
+        await tester.binding.setSurfaceSize(Size(width, 820));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final bridge = _ChannelTestBridge(
+          includePrivate: true,
+          channels: [
+            {'id': 'development', 'name': 'Sviluppo'},
+            {'id': 'announcements', 'name': 'Annunci'},
+            {'id': 'last', 'name': 'Ultimo canale'},
+          ],
+        );
+        final boundaryKey = GlobalKey();
+        await tester.pumpWidget(
+          RepaintBoundary(
+            key: boundaryKey,
+            child: SylphyApp(
+              bridge: bridge,
+              profileStore: _completedProfileStore(),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        if (width < 900) {
+          await tester.tap(find.text('Contatto di test'));
+          await tester.pumpAndSettle();
+        }
+        final list = find.byKey(const ValueKey('group-channel-list'));
+        final rail = find.byKey(const ValueKey('conversation-rail'));
+        expect(list, findsOneWidget);
+        expect(
+          tester.getRect(rail).right,
+          lessThanOrEqualTo(tester.getRect(list).left),
+        );
+        expect(find.byKey(const ValueKey('message-composer')), findsNothing);
+        expect(bridge.readChannels, isEmpty);
+        expect(
+          MessageNotifications.isConversationVisible('test-contact'),
+          isFalse,
+        );
+        var previousTop = -1.0;
+        for (final id in ['general', 'development', 'announcements', 'last']) {
+          final top = tester
+              .getTopLeft(find.byKey(ValueKey('group-channel-$id')))
+              .dy;
+          expect(top, greaterThan(previousTop));
+          previousTop = top;
+        }
+        if (Platform.environment['SYLPHY_CAPTURE_CHANNELS'] == '1') {
+          final boundary =
+              boundaryKey.currentContext!.findRenderObject()!
+                  as RenderRepaintBoundary;
+          await tester.runAsync(() async {
+            final image = await boundary.toImage();
+            final bytes = await image.toByteData(
+              format: ui.ImageByteFormat.png,
+            );
+            await File(
+              'build/channel-navigation-${width.toInt()}.png',
+            ).writeAsBytes(bytes!.buffer.asUint8List());
+            image.dispose();
+          });
+        }
+        await tester.tap(
+          find.byKey(const ValueKey('group-channel-development')),
+        );
+        await tester.pumpAndSettle();
+        expect(bridge.readChannels.last, 'development');
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('chat-message-list')),
+            matching: find.text('Messaggio sviluppo'),
+          ),
+          findsOneWidget,
+        );
+        final composer = find.byKey(const ValueKey('message-composer'));
+        await tester.enterText(composer, 'Bozza sviluppo');
+        if (width < 900) {
+          await tester.binding.handlePopRoute();
+        } else {
+          await tester.tap(find.byKey(const ValueKey('back-to-channels')));
+        }
+        await tester.pumpAndSettle();
+        expect(list, findsOneWidget);
+        expect(composer, findsNothing);
+        await tester.tap(find.byKey(const ValueKey('group-channel-general')));
+        await tester.pumpAndSettle();
+        expect(tester.widget<TextField>(composer).controller!.text, isEmpty);
+        await tester.tap(find.byKey(const ValueKey('back-to-channels')));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('group-channel-development')),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<TextField>(composer).controller!.text,
+          'Bozza sviluppo',
+        );
+        await tester.tap(find.byKey(const ValueKey('back-to-channels')));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('conversation-rail-private-contact')),
+        );
+        await tester.pumpAndSettle();
+        expect(list, findsNothing);
+        expect(composer, findsOneWidget);
+        if (width < 900) {
+          await tester.pageBack();
+          await tester.pumpAndSettle();
+        }
+        await tester.tap(find.text('Contatto di test'));
+        await tester.pumpAndSettle();
+        expect(list, findsOneWidget);
+        expect(composer, findsNothing);
+        if (width < 900) {
+          await tester.pageBack();
+          await tester.pumpAndSettle();
+          expect(list, findsNothing);
+          expect(find.text('CONVERSAZIONI'), findsOneWidget);
+        }
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+        bridge.inboxChanges.dispose();
+      },
+    );
+  }
+
+  testWidgets(
+    'returning from a channel preserves the mobile list scroll position',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(390, 820));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final bridge = _ChannelTestBridge(
+        channels: [
+          for (var i = 0; i < 40; i++)
+            {'id': 'channel-$i', 'name': 'Canale $i'},
+        ],
+      );
+      await tester.pumpWidget(
+        SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Contatto di test'));
+      await tester.pumpAndSettle();
+      final scrollable = find.descendant(
+        of: find.byKey(const ValueKey('group-channel-list')),
+        matching: find.byType(Scrollable),
+      );
+      final target = find.byKey(const ValueKey('group-channel-channel-30'));
+      await tester.scrollUntilVisible(target, 350, scrollable: scrollable);
+      final offset = tester.state<ScrollableState>(scrollable).position.pixels;
+      await tester.tap(target);
+      await tester.pumpAndSettle();
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(
+        tester.state<ScrollableState>(scrollable).position.pixels,
+        closeTo(offset, 1),
+      );
+      expect(target, findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+      bridge.inboxChanges.dispose();
+    },
+  );
+
+  testWidgets('failed channel lookup offers retry without opening General', (
+    tester,
+  ) async {
+    final bridge = _FailingChannelTestBridge();
+    await tester.pumpWidget(
+      SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Contatto di test'));
+    await tester.pumpAndSettle();
+    expect(find.text('Riprova a caricare i canali'), findsOneWidget);
+    expect(find.byKey(const ValueKey('message-composer')), findsNothing);
+    expect(bridge.readChannels, isEmpty);
+    bridge.fail = false;
+    await tester.tap(find.text('Riprova a caricare i canali'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('group-channel-list')), findsOneWidget);
+    expect(bridge.readChannels, isEmpty);
+    await tester.pumpWidget(const SizedBox());
+    bridge.inboxChanges.dispose();
+  });
+
+  testWidgets(
+    'single-chat groups open directly and delayed groups do not mark messages read',
+    (tester) async {
+      final bridge = _ChannelTestBridge(deferDetails: true);
+      await tester.pumpWidget(
+        SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Contatto di test'));
+      await tester.pump();
+      expect(find.byKey(const ValueKey('message-composer')), findsNothing);
+      expect(bridge.readChannels, isEmpty);
+      bridge.details.complete({
+        'channels': [],
+        'members': [],
+        'permissions': {},
+      });
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('group-channel-list')), findsNothing);
+      expect(find.byKey(const ValueKey('message-composer')), findsOneWidget);
+      expect(bridge.readChannels, contains(null));
+      await tester.pumpWidget(const SizedBox());
+      bridge.inboxChanges.dispose();
+    },
+  );
+
   testWidgets(
     'themes keep chat readable and incognito disables keyboard learning',
     (tester) async {
@@ -157,9 +390,16 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Contatto di test'));
       await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('group-channel-list')), findsOneWidget);
+      expect(find.byKey(const ValueKey('message-composer')), findsNothing);
+      expect(bridge.readChannels, isEmpty);
+      await tester.tap(find.byKey(const ValueKey('group-channel-general')));
+      await tester.pumpAndSettle();
       expect(find.text('Messaggio generale'), findsOneWidget);
       expect(find.text('Messaggio sviluppo'), findsNothing);
-      await tester.tap(find.text('# Sviluppo'));
+      await tester.tap(find.byKey(const ValueKey('back-to-channels')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('group-channel-development')));
       await tester.pumpAndSettle();
       expect(find.text('Messaggio sviluppo'), findsOneWidget);
       expect(find.text('Messaggio generale'), findsNothing);
@@ -563,17 +803,23 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Impostazioni'), findsOneWidget);
-    await tester.scrollUntilVisible(find.text('DEVELOPER OPTIONS'), 400);
+    await tester.scrollUntilVisible(
+      find.text('DEVELOPER OPTIONS'),
+      400,
+      scrollable: find.byType(Scrollable).first,
+    );
     expect(find.text('DEVELOPER OPTIONS'), findsOneWidget);
     await tester.scrollUntilVisible(
       find.byKey(const ValueKey('developer-log-viewer')),
       300,
+      scrollable: find.byType(Scrollable).first,
     );
     expect(find.byKey(const ValueKey('developer-log-viewer')), findsOneWidget);
 
     await tester.scrollUntilVisible(
       find.byKey(const ValueKey('developer-logging-switch')),
       -250,
+      scrollable: find.byType(Scrollable).first,
     );
     await tester.tap(find.byKey(const ValueKey('developer-logging-switch')));
     await tester.pump();
@@ -1043,14 +1289,22 @@ class _ChannelTestBridge extends _MenuMessagingBridge
     implements GroupChannelBridge, InboxRevisionNotifications {
   @override
   final ValueNotifier<int> inboxChanges = ValueNotifier(0);
-  _ChannelTestBridge() {
-    details.complete({
-      'channels': [
-        {'id': 'development', 'name': 'Sviluppo'},
-      ],
-      'permissions': {},
-      'members': [],
-    });
+  _ChannelTestBridge({
+    this.includePrivate = false,
+    bool deferDetails = false,
+    List<Map<String, String>>? channels,
+  }) {
+    if (!deferDetails) {
+      details.complete({
+        'channels':
+            channels ??
+            [
+              {'id': 'development', 'name': 'Sviluppo'},
+            ],
+        'permissions': {},
+        'members': [],
+      });
+    }
     _messages.addAll([
       ChatMessage(
         id: 'general-message',
@@ -1070,6 +1324,29 @@ class _ChannelTestBridge extends _MenuMessagingBridge
     ]);
   }
   final readChannels = <String?>[];
+  final bool includePrivate;
+
+  @override
+  List<Conversation> listConversations() => [
+    ...super.listConversations(),
+    if (includePrivate)
+      Conversation(
+        id: 'private-contact',
+        name: 'Chat privata',
+        initials: 'CP',
+        accentValue: 0xFFA5E5D3,
+        lastMessage: '',
+        lastActivity: DateTime(2026),
+        safety: ContactSafety.verified,
+        fingerprint: 'PRIVATE',
+      ),
+  ];
+
+  @override
+  List<ChatMessage> listMessages(String conversationId) =>
+      conversationId == 'private-contact'
+      ? []
+      : super.listMessages(conversationId);
   String? sentChannel;
   String? sentReply;
   @override
@@ -1107,6 +1384,15 @@ class _ChannelTestBridge extends _MenuMessagingBridge
     String fileName,
     List<int> bytes,
   ) async {}
+}
+
+class _FailingChannelTestBridge extends _ChannelTestBridge {
+  bool fail = true;
+
+  @override
+  Future<Map<String, dynamic>> groupDetails(String conversationId) => fail
+      ? Future.error(StateError('offline'))
+      : super.groupDetails(conversationId);
 }
 
 class _WidgetPrivacyCipher implements LocalDataCipher {

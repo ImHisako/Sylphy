@@ -13,6 +13,7 @@ import 'core/native/native_core.dart';
 import 'core/profile/user_profile.dart';
 import 'core/privacy/privacy_settings.dart';
 import 'core/platform/message_notifications.dart';
+import 'core/platform/stream_proof_host.dart';
 import 'core/veilid/veilid_service.dart';
 import 'features/messenger/messenger_home.dart';
 import 'features/onboarding/profile_onboarding.dart';
@@ -427,19 +428,22 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
             disableAnimations:
                 media.disableAnimations || _privacySettings.value.reduceMotion,
           ),
-          child: widget.updates == null
-              ? child ?? SizedBox.shrink()
-              : UpdateHost(
-                  controller: widget.updates!,
-                  navigatorKey: _navigatorKey,
-                  onRestart: () async {
-                    if (await widget.updates!.prepareRestart()) {
-                      await _veilidService.stop();
-                      exit(0);
-                    }
-                  },
-                  child: child ?? SizedBox.shrink(),
-                ),
+          child: StreamProofHost(
+            settings: _privacySettings,
+            child: widget.updates == null
+                ? child ?? SizedBox.shrink()
+                : UpdateHost(
+                    controller: widget.updates!,
+                    navigatorKey: _navigatorKey,
+                    onRestart: () async {
+                      if (await widget.updates!.prepareRestart()) {
+                        await _veilidService.stop();
+                        exit(0);
+                      }
+                    },
+                    child: child ?? SizedBox.shrink(),
+                  ),
+          ),
         );
       },
       theme: ThemeData(

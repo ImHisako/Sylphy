@@ -56,8 +56,10 @@ class MessengerHome extends StatefulWidget {
 class _MessengerHomeState extends State<MessengerHome>
     with WidgetsBindingObserver {
   String? _activeConversationId;
+  int _conversationSelectionRevision = 0;
   Timer? _inboxTimer;
   List<Conversation> _conversations = const [];
+  final _conversationUpdates = ValueNotifier<List<Conversation>>([]);
   String _conversationSignature = '';
   bool _storageWarningShown = false;
   Map<String, int> _unreadCounts = const {};
@@ -79,6 +81,7 @@ class _MessengerHomeState extends State<MessengerHome>
       _conversations = _readConversations();
     }
     _conversationSignature = _signatureForConversations(_conversations);
+    _conversationUpdates.value = _conversations;
     _unreadCounts = {
       for (final conversation in _conversations)
         conversation.id: conversation.unreadCount,
@@ -163,6 +166,7 @@ class _MessengerHomeState extends State<MessengerHome>
     }
     setState(() {
       _conversations = conversations;
+      _conversationUpdates.value = conversations;
       _conversationSignature = signature;
       _isLoadingConversations = false;
       _unreadCounts = {
@@ -289,6 +293,7 @@ class _MessengerHomeState extends State<MessengerHome>
     }
     setState(() {
       _conversations = conversations;
+      _conversationUpdates.value = conversations;
       _conversationSignature = signature;
       _isLoadingConversations = false;
       _unreadCounts = {
@@ -307,6 +312,7 @@ class _MessengerHomeState extends State<MessengerHome>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _conversationUpdates.dispose();
     widget.identityService.removeListener(_onIdentityChanged);
     _inboxTimer?.cancel();
     super.dispose();
@@ -320,8 +326,11 @@ class _MessengerHomeState extends State<MessengerHome>
       action: 'conversation_selected',
       verbose: true,
     );
-    if (mounted && _activeConversationId != conversationId) {
-      setState(() => _activeConversationId = conversationId);
+    if (mounted) {
+      setState(() {
+        _activeConversationId = conversationId;
+        _conversationSelectionRevision++;
+      });
     }
     if (!(widget.bridge is GroupChannelBridge &&
         _conversations.any(
@@ -524,6 +533,7 @@ class _MessengerHomeState extends State<MessengerHome>
             : conversations.first;
         if (constraints.maxWidth >= 900) {
           return _DesktopMessenger(
+            selectionRevision: _conversationSelectionRevision,
             bridge: widget.bridge,
             nativeCore: widget.nativeCore,
             veilidService: widget.veilidService,
@@ -544,6 +554,7 @@ class _MessengerHomeState extends State<MessengerHome>
           );
         }
         return _MobileConversationList(
+          conversationUpdates: _conversationUpdates,
           bridge: widget.bridge,
           nativeCore: widget.nativeCore,
           veilidService: widget.veilidService,
@@ -564,6 +575,7 @@ class _MessengerHomeState extends State<MessengerHome>
 
 class _DesktopMessenger extends StatelessWidget {
   const _DesktopMessenger({
+    required this.selectionRevision,
     required this.bridge,
     required this.nativeCore,
     required this.veilidService,
@@ -583,6 +595,7 @@ class _DesktopMessenger extends StatelessWidget {
   });
 
   final SecureMessagingBridge bridge;
+  final int selectionRevision;
   final NativeCoreApi? nativeCore;
   final VeilidService veilidService;
   final UserProfile profile;
@@ -601,6 +614,8 @@ class _DesktopMessenger extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final compactConversations =
+        activeConversation?.isGroup == true && bridge is GroupChannelBridge;
     return Scaffold(
       body: SafeArea(
         child: Row(
@@ -625,14 +640,20 @@ class _DesktopMessenger extends StatelessWidget {
             ),
             VerticalDivider(width: 1),
             SizedBox(
-              width: 328,
-              child: _ConversationSidebar(
-                veilidSnapshot: veilidService.snapshot,
-                conversations: conversations,
-                activeConversationId: activeConversation?.id,
-                onConversationSelected: onConversationSelected,
-                onAddContact: onAddContact,
-              ),
+              width: compactConversations ? 76 : 328,
+              child: compactConversations
+                  ? _ConversationRail(
+                      conversations: conversations,
+                      activeConversationId: activeConversation?.id,
+                      onSelected: onConversationSelected,
+                    )
+                  : _ConversationSidebar(
+                      veilidSnapshot: veilidService.snapshot,
+                      conversations: conversations,
+                      activeConversationId: activeConversation?.id,
+                      onConversationSelected: onConversationSelected,
+                      onAddContact: onAddContact,
+                    ),
             ),
             VerticalDivider(width: 1),
             Expanded(
@@ -642,15 +663,20 @@ class _DesktopMessenger extends StatelessWidget {
                       hasNativeCore: nativeCore != null,
                     )
                   : _ChatPane(
+                      selectionRevision: selectionRevision,
                       bridge: bridge,
                       conversation: activeConversation!,
                       onChanged: onChanged,
                       showHeader: true,
-                      onToggleDetails: canShowDetails ? onToggleDetails : null,
+                      onToggleDetails: canShowDetails && !compactConversations
+                          ? onToggleDetails
+                          : null,
                       privacySettings: privacySettings,
                     ),
             ),
-            if (showDetails && activeConversation != null) ...[
+            if (showDetails &&
+                activeConversation != null &&
+                !compactConversations) ...[
               VerticalDivider(width: 1),
               SizedBox(
                 width: 292,
@@ -907,6 +933,76 @@ class _RailButton extends StatelessWidget {
   }
 }
 
+class _ConversationRail extends StatelessWidget {
+  const _ConversationRail({
+    required this.conversations,
+    required this.activeConversationId,
+    required this.onSelected,
+  });
+
+  final List<Conversation> conversations;
+  final String? activeConversationId;
+  final Future<void> Function(String) onSelected;
+
+  @override
+  Widget build(BuildContext context) => Material(
+    key: ValueKey('conversation-rail'),
+    color: AppPalette.color(0xFF15181E),
+    child: ListView.builder(
+      padding: EdgeInsets.symmetric(vertical: 8),
+      itemCount: conversations.length,
+      itemBuilder: (context, index) {
+        final conversation = conversations[index];
+        final selected = conversation.id == activeConversationId;
+        return Tooltip(
+          message: conversation.name,
+          child: Semantics(
+            label: conversation.name,
+            selected: selected,
+            button: true,
+            child: InkWell(
+              key: ValueKey('conversation-rail-${conversation.id}'),
+              onTap: () => onSelected(conversation.id),
+              child: Container(
+                padding: EdgeInsets.symmetric(vertical: 10),
+                decoration: BoxDecoration(
+                  color: selected
+                      ? Theme.of(
+                          context,
+                        ).colorScheme.primary.withValues(alpha: 0.12)
+                      : null,
+                  border: Border(
+                    left: BorderSide(
+                      width: 3,
+                      color: selected
+                          ? Theme.of(context).colorScheme.primary
+                          : Colors.transparent,
+                    ),
+                  ),
+                ),
+                child: Center(
+                  child: Badge(
+                    isLabelVisible: conversation.unreadCount > 0,
+                    label: Text(
+                      conversation.unreadCount > 99
+                          ? '99+'
+                          : '${conversation.unreadCount}',
+                    ),
+                    child: _ContactAvatar(
+                      conversation: conversation,
+                      radius: 23,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    ),
+  );
+}
+
 class _ConversationSidebar extends StatefulWidget {
   const _ConversationSidebar({
     required this.conversations,
@@ -1026,6 +1122,7 @@ class _ConversationSidebarState extends State<_ConversationSidebar> {
 
 class _MobileConversationList extends StatelessWidget {
   const _MobileConversationList({
+    required this.conversationUpdates,
     required this.bridge,
     required this.nativeCore,
     required this.veilidService,
@@ -1041,6 +1138,7 @@ class _MobileConversationList extends StatelessWidget {
   });
 
   final SecureMessagingBridge bridge;
+  final ValueListenable<List<Conversation>> conversationUpdates;
   final NativeCoreApi? nativeCore;
   final VeilidService veilidService;
   final UserProfile profile;
@@ -1138,12 +1236,20 @@ class _MobileConversationList extends StatelessWidget {
                 Navigator.of(context)
                     .push<void>(
                       MaterialPageRoute(
-                        builder: (context) => _MobileChatScreen(
-                          bridge: bridge,
-                          conversation: conversation,
-                          onChanged: onChanged,
-                          privacySettings: privacySettings,
-                        ),
+                        builder: (context) =>
+                            ValueListenableBuilder<List<Conversation>>(
+                              valueListenable: conversationUpdates,
+                              builder: (context, currentConversations, _) =>
+                                  _MobileChatScreen(
+                                    bridge: bridge,
+                                    conversation: conversation,
+                                    conversations: currentConversations,
+                                    onConversationSelected:
+                                        onConversationSelected,
+                                    onChanged: onChanged,
+                                    privacySettings: privacySettings,
+                                  ),
+                            ),
                       ),
                     )
                     .then((_) => onChanged());
@@ -1184,12 +1290,16 @@ class _MobileChatScreen extends StatefulWidget {
     required this.conversation,
     required this.onChanged,
     required this.privacySettings,
+    required this.conversations,
+    required this.onConversationSelected,
   });
 
   final SecureMessagingBridge bridge;
   final Conversation conversation;
   final VoidCallback onChanged;
   final PrivacySettingsController privacySettings;
+  final List<Conversation> conversations;
+  final Future<void> Function(String) onConversationSelected;
 
   @override
   State<_MobileChatScreen> createState() => _MobileChatScreenState();
@@ -1197,11 +1307,15 @@ class _MobileChatScreen extends StatefulWidget {
 
 class _MobileChatScreenState extends State<_MobileChatScreen> {
   final _chatPaneKey = GlobalKey<_ChatPaneState>();
+  String? _selectedConversationId;
 
   @override
   Widget build(BuildContext context) {
     final bridge = widget.bridge;
-    final conversation = widget.conversation;
+    final conversation = widget.conversations.firstWhere(
+      (item) => item.id == (_selectedConversationId ?? widget.conversation.id),
+      orElse: () => widget.conversation,
+    );
     final onChanged = widget.onChanged;
     return Scaffold(
       appBar: AppBar(
@@ -1233,6 +1347,8 @@ class _MobileChatScreenState extends State<_MobileChatScreen> {
                     ),
                     Text(
                       _presenceLabel(conversation),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontSize: 12,
                         color: AppPalette.color(0xFF9DA5B2),
@@ -1275,6 +1391,18 @@ class _MobileChatScreenState extends State<_MobileChatScreen> {
         conversation: conversation,
         onChanged: onChanged,
         showHeader: false,
+        conversationRail: _ConversationRail(
+          conversations: widget.conversations,
+          activeConversationId: conversation.id,
+          onSelected: (id) async {
+            if (id == conversation.id) {
+              _chatPaneKey.currentState?._returnToChannels();
+            } else {
+              setState(() => _selectedConversationId = id);
+            }
+            await widget.onConversationSelected(id);
+          },
+        ),
         privacySettings: widget.privacySettings,
       ),
     );
@@ -1289,6 +1417,8 @@ class _ChatPane extends StatefulWidget {
     required this.onChanged,
     required this.showHeader,
     this.onToggleDetails,
+    this.conversationRail,
+    this.selectionRevision = 0,
     required this.privacySettings,
   });
 
@@ -1297,6 +1427,8 @@ class _ChatPane extends StatefulWidget {
   final VoidCallback onChanged;
   final bool showHeader;
   final VoidCallback? onToggleDetails;
+  final Widget? conversationRail;
+  final int selectionRevision;
   final PrivacySettingsController privacySettings;
 
   @override
@@ -1308,7 +1440,22 @@ class _ChatPaneState extends State<_ChatPane> {
   final Set<String> _pendingMessageActions = {};
   List<Map> _channels = [];
   String? _channelId;
+  bool _channelsLoaded = false;
+  bool _channelSelected = false;
+  bool _channelLoadFailed = false;
+  int _channelLoadGeneration = 0;
+  final _channelListController = ScrollController();
+  final Map<String?, String> _channelDrafts = {};
   Map<String, dynamic>? _groupDetails;
+
+  bool get _supportsChannels =>
+      widget.conversation.isGroup &&
+      _management != null &&
+      widget.bridge is GroupChannelBridge;
+  bool get _hasChannelList => _supportsChannels && _channels.isNotEmpty;
+  bool get _isShowingMessages =>
+      !_supportsChannels ||
+      (_channelsLoaded && (!_hasChannelList || _channelSelected));
 
   bool get _canSendMessages =>
       _groupDetails?['can_send'] as bool? ??
@@ -1323,23 +1470,39 @@ class _ChatPaneState extends State<_ChatPane> {
       );
 
   Future<void> _loadChannels() async {
-    if (!widget.conversation.isGroup ||
-        _management == null ||
-        widget.bridge is! GroupChannelBridge) {
-      return;
-    }
+    if (!_supportsChannels) return;
     final id = widget.conversation.id;
+    final generation = ++_channelLoadGeneration;
     try {
       final details = await _management!.groupDetails(id);
-      if (!mounted || widget.conversation.id != id) return;
+      if (!mounted ||
+          widget.conversation.id != id ||
+          generation != _channelLoadGeneration) {
+        return;
+      }
       setState(() {
+        // A channel added while General is open must not discard its draft or
+        // interrupt the conversation. New group visits still start at the list.
+        if (_channelsLoaded && _channels.isEmpty) _channelSelected = true;
         _groupDetails = details;
         _channels = (details['channels'] as List? ?? []).cast<Map>();
-        if (!_channels.any((channel) => channel['id'] == _channelId)) {
+        if (_channelId != null &&
+            !_channels.any((channel) => channel['id'] == _channelId)) {
           _channelId = null;
+          _channelSelected = false;
+          _composerController.clear();
+          _replyTo = null;
         }
+        _channelsLoaded = true;
+        _channelLoadFailed = false;
       });
+      if (_isShowingMessages) unawaited(_markConversationReadSafely());
     } on Object catch (error) {
+      if (mounted &&
+          widget.conversation.id == id &&
+          generation == _channelLoadGeneration) {
+        setState(() => _channelLoadFailed = true);
+      }
       AppLog.instance.recordError(
         category: 'messenger',
         action: 'channels_load_failed',
@@ -1350,12 +1513,29 @@ class _ChatPaneState extends State<_ChatPane> {
 
   void _selectChannel(String? id) {
     setState(() {
+      if (_isShowingMessages) {
+        _channelDrafts[_channelId] = _composerController.text;
+      }
       _channelId = id;
+      _channelSelected = true;
+      _composerController.text = _channelDrafts[id] ?? '';
       _replyTo = null;
       _lastAcknowledgedIncomingId = null;
     });
     unawaited(_markConversationReadSafely());
     _scheduleScrollToBottom();
+  }
+
+  void _returnToChannels() {
+    if (!_hasChannelList || !_channelSelected) return;
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() {
+      _channelDrafts[_channelId] = _composerController.text;
+      _composerController.clear();
+      _replyTo = null;
+      _channelSelected = false;
+      _lastAcknowledgedIncomingId = null;
+    });
   }
 
   GroupManagementBridge? get _management =>
@@ -1752,7 +1932,7 @@ class _ChatPaneState extends State<_ChatPane> {
     super.initState();
     MessageNotifications.trackConversation(
       this,
-      () => mounted && _chatRoute?.isCurrent == true
+      () => mounted && _chatRoute?.isCurrent == true && _isShowingMessages
           ? widget.conversation.id
           : null,
     );
@@ -1810,6 +1990,10 @@ class _ChatPaneState extends State<_ChatPane> {
   @override
   void didUpdateWidget(covariant _ChatPane oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.conversation.id == widget.conversation.id &&
+        oldWidget.selectionRevision != widget.selectionRevision) {
+      _returnToChannels();
+    }
     if (oldWidget.conversation.groupRevision !=
         widget.conversation.groupRevision) {
       unawaited(_loadChannels());
@@ -1823,6 +2007,10 @@ class _ChatPaneState extends State<_ChatPane> {
       _messageLoadGeneration++;
       _conversationGeneration++;
       _channels = [];
+      _channelsLoaded = false;
+      _channelSelected = false;
+      _channelLoadFailed = false;
+      _channelDrafts.clear();
       _groupDetails = null;
       _channelId = null;
       unawaited(_loadChannels());
@@ -1886,6 +2074,7 @@ class _ChatPaneState extends State<_ChatPane> {
   @override
   void dispose() {
     MessageNotifications.untrackConversation(this);
+    _channelListController.dispose();
     _messageTimer?.cancel();
     _inboxChanges?.removeListener(_onInboxRevisionChanged);
     _messageScrollController.dispose();
@@ -2018,7 +2207,8 @@ class _ChatPaneState extends State<_ChatPane> {
   }
 
   Future<void> _markConversationReadSafely() async {
-    if (!MessageNotifications.isConversationVisible(widget.conversation.id)) {
+    if (!_isShowingMessages ||
+        !MessageNotifications.isConversationVisible(widget.conversation.id)) {
       _lastAcknowledgedIncomingId = null;
       return;
     }
@@ -2230,6 +2420,65 @@ class _ChatPaneState extends State<_ChatPane> {
     }
   }
 
+  String get _selectedChannelName => _channelId == null
+      ? 'Generale'
+      : _channels.firstWhere(
+              (channel) => channel['id'] == _channelId,
+              orElse: () => {'name': 'Canale'},
+            )['name']
+            as String;
+
+  Widget _buildChannelList() => Column(
+    key: ValueKey('group-channel-list'),
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Padding(
+        padding: EdgeInsets.fromLTRB(16, 20, 16, 12),
+        child: Text(
+          'CANALI DEL GRUPPO',
+          style: Theme.of(context).textTheme.labelMedium,
+        ),
+      ),
+      Expanded(
+        child: ListView.builder(
+          key: PageStorageKey('group-channels-${widget.conversation.id}'),
+          controller: _channelListController,
+          itemCount: _channels.length + 1,
+          itemBuilder: (context, index) {
+            final id = index == 0 ? null : _channels[index - 1]['id'] as String;
+            final name = index == 0
+                ? 'Generale'
+                : _channels[index - 1]['name'] as String;
+            ChatMessage? latest;
+            for (final message in _messages) {
+              if (message.channelId == id &&
+                  (latest == null || message.orderAt.isAfter(latest.orderAt))) {
+                latest = message;
+              }
+            }
+            return ListTile(
+              key: ValueKey('group-channel-${id ?? 'general'}'),
+              selected: _channelSelected && _channelId == id,
+              selectedTileColor: Theme.of(
+                context,
+              ).colorScheme.primary.withValues(alpha: 0.12),
+              leading: Icon(
+                index == 0 ? Icons.forum_outlined : Icons.tag_rounded,
+              ),
+              title: Text(name, maxLines: 2, overflow: TextOverflow.ellipsis),
+              subtitle: Text(
+                latest?.attachmentName ?? latest?.body ?? 'Apri la chat',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              onTap: () => _selectChannel(id),
+            );
+          },
+        ),
+      ),
+    ],
+  );
+
   @override
   Widget build(BuildContext context) {
     final visibleMessages =
@@ -2246,227 +2495,264 @@ class _ChatPaneState extends State<_ChatPane> {
         : null;
     final hasOlder =
         cachedBridge?.hasOlderMessages(widget.conversation.id) ?? false;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [AppPalette.color(0xFF11151B), AppPalette.color(0xFF0C0F14)],
-        ),
-      ),
-      child: Column(
-        children: [
-          if (widget.showHeader)
-            _ChatHeader(
-              conversation: widget.conversation,
-              bridge: widget.bridge,
-              onChanged: widget.onChanged,
-              onOpenProfile: widget.onToggleDetails,
-              onOpenGroup: widget.conversation.isGroup && _management != null
-                  ? _manageGroup
-                  : null,
+    final messagePane = Column(
+      children: [
+        if (_hasChannelList)
+          ListTile(
+            leading: IconButton(
+              key: ValueKey('back-to-channels'),
+              tooltip: 'Torna ai canali',
+              onPressed: _returnToChannels,
+              icon: Icon(Icons.arrow_back_rounded),
             ),
-          if (widget.conversation.isGroup && _channels.isNotEmpty)
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.all(6),
-                    child: ChoiceChip(
-                      label: const Text('Generale'),
-                      selected: _channelId == null,
-                      onSelected: (_) => _selectChannel(null),
-                    ),
-                  ),
-                  for (final channel in _channels)
-                    Padding(
-                      padding: const EdgeInsets.all(6),
-                      child: ChoiceChip(
-                        label: Text('# ${channel['name']}'),
-                        selected: _channelId == channel['id'],
-                        onSelected: (_) =>
-                            _selectChannel(channel['id'] as String),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          if (_management != null)
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                if (widget.conversation.isGroup) ...[
-                  IconButton(
-                    key: ValueKey('group-settings'),
-                    tooltip: 'Gestisci gruppo',
-                    onPressed: _manageGroup,
-                    icon: Icon(Icons.tune),
-                  ),
-                  IconButton(
-                    tooltip: 'Menziona un membro',
-                    onPressed: _canSendMessages ? _mentionMember : null,
-                    icon: Icon(Icons.alternate_email),
-                  ),
-                ],
+            title: Text(_selectedChannelName),
+          ),
+        if (_management != null)
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              if (widget.conversation.isGroup) ...[
                 IconButton(
-                  key: ValueKey('search-chat'),
-                  tooltip: 'Cerca nella chat',
-                  onPressed: () => _searchChat(),
-                  icon: Icon(Icons.search),
+                  key: ValueKey('group-settings'),
+                  tooltip: 'Gestisci gruppo',
+                  onPressed: _manageGroup,
+                  icon: Icon(Icons.tune),
                 ),
-                if (_pinnedMessageIds.isNotEmpty)
-                  IconButton(
-                    key: ValueKey('pinned-messages'),
-                    tooltip: 'Messaggi fissati',
-                    onPressed: () => _searchChat('', _pinnedMessageIds),
-                    icon: Text('📌'),
-                  ),
+                IconButton(
+                  tooltip: 'Menziona un membro',
+                  onPressed: _canSendMessages ? _mentionMember : null,
+                  icon: Icon(Icons.alternate_email),
+                ),
               ],
-            ),
-          Expanded(
-            child: _isLoadingMessages && _messages.isEmpty
-                ? Center(child: CircularProgressIndicator())
-                : ListView.builder(
-                    key: ValueKey('chat-message-list'),
-                    controller: _messageScrollController,
-                    reverse: true,
-                    padding: EdgeInsets.fromLTRB(22, 20, 22, 12),
-                    itemCount: visibleMessages.length + (hasOlder ? 1 : 0),
-                    itemBuilder: (context, index) {
-                      if (index < visibleMessages.length) {
-                        final message =
-                            visibleMessages[visibleMessages.length - 1 - index];
-                        final previousIndex =
-                            visibleMessages.length - 2 - index;
-                        final startsDay =
-                            previousIndex < 0 ||
-                            !DateUtils.isSameDay(
-                              visibleMessages[previousIndex].orderAt,
-                              message.orderAt,
-                            );
-                        return Column(
-                          children: [
-                            if (startsDay) _DaySeparator(date: message.orderAt),
-                            if (message.replyTo != null)
-                              Align(
-                                alignment: message.isOutgoing
-                                    ? Alignment.centerRight
-                                    : Alignment.centerLeft,
-                                child: TextButton.icon(
-                                  onPressed: () =>
-                                      _searchChat('id:${message.replyTo}'),
-                                  icon: Icon(Icons.reply, size: 16),
-                                  label: Text(
-                                    visibleMessages
-                                            .where(
-                                              (original) =>
-                                                  original.id ==
-                                                  message.replyTo,
-                                            )
-                                            .firstOrNull
-                                            ?.body ??
-                                        'Visualizza messaggio originale',
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
+              IconButton(
+                key: ValueKey('search-chat'),
+                tooltip: 'Cerca nella chat',
+                onPressed: () => _searchChat(),
+                icon: Icon(Icons.search),
+              ),
+              if (_pinnedMessageIds.isNotEmpty)
+                IconButton(
+                  key: ValueKey('pinned-messages'),
+                  tooltip: 'Messaggi fissati',
+                  onPressed: () => _searchChat('', _pinnedMessageIds),
+                  icon: Text('📌'),
+                ),
+            ],
+          ),
+        Expanded(
+          child: _isLoadingMessages && _messages.isEmpty
+              ? Center(child: CircularProgressIndicator())
+              : ListView.builder(
+                  key: ValueKey('chat-message-list'),
+                  controller: _messageScrollController,
+                  reverse: true,
+                  padding: EdgeInsets.fromLTRB(22, 20, 22, 12),
+                  itemCount: visibleMessages.length + (hasOlder ? 1 : 0),
+                  itemBuilder: (context, index) {
+                    if (index < visibleMessages.length) {
+                      final message =
+                          visibleMessages[visibleMessages.length - 1 - index];
+                      final previousIndex = visibleMessages.length - 2 - index;
+                      final startsDay =
+                          previousIndex < 0 ||
+                          !DateUtils.isSameDay(
+                            visibleMessages[previousIndex].orderAt,
+                            message.orderAt,
+                          );
+                      return Column(
+                        children: [
+                          if (startsDay) _DaySeparator(date: message.orderAt),
+                          if (message.replyTo != null)
+                            Align(
+                              alignment: message.isOutgoing
+                                  ? Alignment.centerRight
+                                  : Alignment.centerLeft,
+                              child: TextButton.icon(
+                                onPressed: () =>
+                                    _searchChat('id:${message.replyTo}'),
+                                icon: Icon(Icons.reply, size: 16),
+                                label: Text(
+                                  visibleMessages
+                                          .where(
+                                            (original) =>
+                                                original.id == message.replyTo,
+                                          )
+                                          .firstOrNull
+                                          ?.body ??
+                                      'Visualizza messaggio originale',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
                                 ),
-                              ),
-                            GestureDetector(
-                              onLongPress: () => _messageActions(message),
-                              onSecondaryTap: () => _messageActions(message),
-                              child: _MessageBubble(
-                                message: message,
-                                isPinned: _pinnedMessageIds.contains(
-                                  message.id,
-                                ),
-                                actionPending: _actionPending(message.id),
-                                onMention: _openMention,
-                                showAuthor: widget.conversation.isGroup,
-                                onRestoreDraft:
-                                    message.deliveryState ==
-                                            DeliveryState.notRestored &&
-                                        message.attachmentName == null
-                                    ? () {
-                                        if (_composerController.text.isEmpty) {
-                                          _composerController.text =
-                                              message.body;
-                                        } else {
-                                          ScaffoldMessenger.of(
-                                            context,
-                                          ).showSnackBar(
-                                            SnackBar(
-                                              content: Text(
-                                                'Completa la bozza attuale prima di recuperare questo messaggio.',
-                                              ),
-                                            ),
-                                          );
-                                        }
-                                      }
-                                    : null,
-                                showReceipt: true,
                               ),
                             ),
-                          ],
-                        );
-                      }
-                      if (hasOlder) {
-                        return Center(
-                          child: TextButton.icon(
-                            onPressed: _isLoadingOlder
-                                ? null
-                                : _loadOlderMessages,
-                            icon: _isLoadingOlder
-                                ? SizedBox.square(
-                                    dimension: 16,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : Icon(Icons.history_rounded),
-                            label: Text('Carica messaggi precedenti'),
+                          GestureDetector(
+                            onLongPress: () => _messageActions(message),
+                            onSecondaryTap: () => _messageActions(message),
+                            child: _MessageBubble(
+                              message: message,
+                              isPinned: _pinnedMessageIds.contains(message.id),
+                              actionPending: _actionPending(message.id),
+                              onMention: _openMention,
+                              showAuthor: widget.conversation.isGroup,
+                              onRestoreDraft:
+                                  message.deliveryState ==
+                                          DeliveryState.notRestored &&
+                                      message.attachmentName == null
+                                  ? () {
+                                      if (_composerController.text.isEmpty) {
+                                        _composerController.text = message.body;
+                                      } else {
+                                        ScaffoldMessenger.of(
+                                          context,
+                                        ).showSnackBar(
+                                          SnackBar(
+                                            content: Text(
+                                              'Completa la bozza attuale prima di recuperare questo messaggio.',
+                                            ),
+                                          ),
+                                        );
+                                      }
+                                    }
+                                  : null,
+                              showReceipt: true,
+                            ),
                           ),
-                        );
-                      }
-                      return SizedBox.shrink();
-                    },
-                  ),
-          ),
-          if (_replyTo != null)
-            ListTile(
-              dense: true,
-              leading: Icon(Icons.reply),
-              title: Text('Risposta a un messaggio'),
-              subtitle: Text(
-                _replyTo!.body,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-              trailing: IconButton(
-                tooltip: 'Annulla risposta',
-                onPressed: () => setState(() => _replyTo = null),
-                icon: Icon(Icons.close),
-              ),
-            ),
-          if (!_canSendMessages)
-            SafeArea(
-              top: false,
-              child: Padding(
-                padding: EdgeInsets.all(18),
-                child: Text(
-                  'Non puoi scrivere in questo gruppo con i permessi attuali.',
+                        ],
+                      );
+                    }
+                    if (hasOlder) {
+                      return Center(
+                        child: TextButton.icon(
+                          onPressed: _isLoadingOlder
+                              ? null
+                              : _loadOlderMessages,
+                          icon: _isLoadingOlder
+                              ? SizedBox.square(
+                                  dimension: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : Icon(Icons.history_rounded),
+                          label: Text('Carica messaggi precedenti'),
+                        ),
+                      );
+                    }
+                    return SizedBox.shrink();
+                  },
                 ),
-              ),
-            )
-          else
-            _Composer(
-              controller: _composerController,
-              onSend: _sendMessage,
-              isSendingAttachment: _isSendingAttachment,
-              incognitoKeyboard: widget.privacySettings.value.incognitoKeyboard,
-              onAttachmentPressed: _pickAndSendAttachment,
+        ),
+        if (_replyTo != null)
+          ListTile(
+            dense: true,
+            leading: Icon(Icons.reply),
+            title: Text('Risposta a un messaggio'),
+            subtitle: Text(
+              _replyTo!.body,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
             ),
-        ],
+            trailing: IconButton(
+              tooltip: 'Annulla risposta',
+              onPressed: () => setState(() => _replyTo = null),
+              icon: Icon(Icons.close),
+            ),
+          ),
+        if (!_canSendMessages)
+          SafeArea(
+            top: false,
+            child: Padding(
+              padding: EdgeInsets.all(18),
+              child: Text(
+                'Non puoi scrivere in questo gruppo con i permessi attuali.',
+              ),
+            ),
+          )
+        else
+          _Composer(
+            controller: _composerController,
+            onSend: _sendMessage,
+            isSendingAttachment: _isSendingAttachment,
+            incognitoKeyboard: widget.privacySettings.value.incognitoKeyboard,
+            onAttachmentPressed: _pickAndSendAttachment,
+          ),
+      ],
+    );
+    return PopScope(
+      canPop: widget.showHeader || !_hasChannelList || !_channelSelected,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) _returnToChannels();
+      },
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              AppPalette.color(0xFF11151B),
+              AppPalette.color(0xFF0C0F14),
+            ],
+          ),
+        ),
+        child: Column(
+          children: [
+            if (widget.showHeader)
+              _ChatHeader(
+                conversation: widget.conversation,
+                bridge: widget.bridge,
+                onChanged: widget.onChanged,
+                onOpenProfile: widget.onToggleDetails,
+                onOpenGroup: widget.conversation.isGroup && _management != null
+                    ? _manageGroup
+                    : null,
+              ),
+            Expanded(
+              child: _supportsChannels && !_channelsLoaded
+                  ? Center(
+                      child: _channelLoadFailed
+                          ? TextButton.icon(
+                              onPressed: _loadChannels,
+                              icon: Icon(Icons.refresh_rounded),
+                              label: Text('Riprova a caricare i canali'),
+                            )
+                          : CircularProgressIndicator(),
+                    )
+                  : !_hasChannelList
+                  ? messagePane
+                  : widget.showHeader
+                  ? Row(
+                      children: [
+                        SizedBox(width: 280, child: _buildChannelList()),
+                        VerticalDivider(width: 1),
+                        Expanded(
+                          child: _channelSelected
+                              ? messagePane
+                              : Center(
+                                  child: Padding(
+                                    padding: EdgeInsets.all(24),
+                                    child: Text(
+                                      'Seleziona un canale per iniziare a messaggiare',
+                                      textAlign: TextAlign.center,
+                                    ),
+                                  ),
+                                ),
+                        ),
+                      ],
+                    )
+                  : _channelSelected
+                  ? messagePane
+                  : Row(
+                      children: [
+                        if (widget.conversationRail != null) ...[
+                          SizedBox(width: 76, child: widget.conversationRail),
+                          VerticalDivider(width: 1),
+                        ],
+                        Expanded(child: _buildChannelList()),
+                      ],
+                    ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -2559,6 +2845,8 @@ class _ChatHeader extends StatelessWidget {
                         SizedBox(height: 3),
                         Text(
                           _presenceLabel(conversation),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             color: AppPalette.color(0xFF9DA5B2),
                             fontSize: 13,
@@ -2961,7 +3249,10 @@ class _ComposerState extends State<_Composer> {
             Expanded(
               child: TextField(
                 key: ValueKey('message-composer'),
-                enableIMEPersonalizedLearning: !widget.incognitoKeyboard,
+                enableIMEPersonalizedLearning:
+                    kIsWeb ||
+                    defaultTargetPlatform != TargetPlatform.android ||
+                    !widget.incognitoKeyboard,
                 controller: widget.controller,
                 minLines: 1,
                 maxLines: 4,

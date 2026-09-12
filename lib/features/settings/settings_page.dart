@@ -9,8 +9,10 @@ import '../../core/identity/account_transfer_service.dart';
 import '../../core/native/native_core.dart';
 import '../../core/profile/user_profile.dart';
 import '../../core/privacy/privacy_settings.dart';
+import '../../core/platform/stream_proof_host.dart';
 import '../../core/veilid/veilid_service.dart';
 import 'account_qr_scanner_page.dart';
+import 'android_notification_settings.dart';
 import '../updates/update_host.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -571,61 +573,99 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
               ),
               SizedBox(height: 16),
-              _SectionTitle('ASPETTO E TASTIERA'),
+              _SectionTitle(
+                _isAndroidPlatform ? 'ASPETTO E TASTIERA' : 'ASPETTO',
+              ),
+              SizedBox(height: 8),
               _SettingsCard(
                 child: Column(
                   children: [
-                    DropdownButtonFormField<String>(
-                      key: ValueKey('app-theme'),
-                      initialValue:
-                          [
-                            'sylphy',
-                            'black',
-                            'cyan',
-                            'pink',
-                            'amoled',
-                            'white',
-                          ].contains(privacy.themeName)
-                          ? privacy.themeName
-                          : 'sylphy',
-                      decoration: InputDecoration(labelText: 'Tema di Sylphy'),
-                      items: [
-                        DropdownMenuItem(
-                          value: 'sylphy',
-                          child: Text('Sylphy'),
+                    Padding(
+                      padding: EdgeInsets.fromLTRB(16, 20, 16, 16),
+                      child: DropdownButtonFormField<String>(
+                        key: ValueKey('app-theme'),
+                        initialValue:
+                            [
+                              'sylphy',
+                              'black',
+                              'cyan',
+                              'pink',
+                              'amoled',
+                              'white',
+                            ].contains(privacy.themeName)
+                            ? privacy.themeName
+                            : 'sylphy',
+                        decoration: InputDecoration(
+                          labelText: 'Tema di Sylphy',
+                          floatingLabelBehavior: FloatingLabelBehavior.always,
                         ),
-                        DropdownMenuItem(value: 'black', child: Text('Black')),
-                        DropdownMenuItem(value: 'cyan', child: Text('Cyan')),
-                        DropdownMenuItem(value: 'pink', child: Text('Pink')),
-                        DropdownMenuItem(
-                          value: 'amoled',
-                          child: Text('AMOLED'),
+                        isExpanded: true,
+                        items: [
+                          DropdownMenuItem(
+                            value: 'sylphy',
+                            child: Text('Sylphy'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'black',
+                            child: Text('Black'),
+                          ),
+                          DropdownMenuItem(value: 'cyan', child: Text('Cyan')),
+                          DropdownMenuItem(value: 'pink', child: Text('Pink')),
+                          DropdownMenuItem(
+                            value: 'amoled',
+                            child: Text('AMOLED'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'white',
+                            child: Text('White'),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value != null) {
+                            widget.privacySettings.update(
+                              privacy.copyWith(themeName: value),
+                            );
+                          }
+                        },
+                      ),
+                    ),
+                    if (_isAndroidPlatform)
+                      SwitchListTile(
+                        key: ValueKey('incognito-keyboard'),
+                        secondary: Icon(Icons.keyboard_outlined),
+                        title: Text('Tastiera in incognito'),
+                        subtitle: Text(
+                          'Chiede a Gboard e alle tastiere compatibili di non memorizzare ciò che scrivi in chat.',
                         ),
-                        DropdownMenuItem(value: 'white', child: Text('White')),
-                      ],
-                      onChanged: (value) {
-                        if (value != null) {
-                          widget.privacySettings.update(
-                            privacy.copyWith(themeName: value),
-                          );
-                        }
-                      },
-                    ),
-                    SwitchListTile(
-                      key: ValueKey('incognito-keyboard'),
-                      secondary: Icon(Icons.keyboard_outlined),
-                      title: Text('Tastiera in incognito'),
-                      subtitle: Text(
-                        'Chiede a Gboard e alle tastiere compatibili di non memorizzare ciò che scrivi in chat.',
+                        value: privacy.incognitoKeyboard,
+                        onChanged: (value) => widget.privacySettings.update(
+                          privacy.copyWith(incognitoKeyboard: value),
+                        ),
                       ),
-                      value: privacy.incognitoKeyboard,
-                      onChanged: (value) => widget.privacySettings.update(
-                        privacy.copyWith(incognitoKeyboard: value),
-                      ),
-                    ),
                   ],
                 ),
               ),
+              if (supportsStreamProof) ...[
+                SizedBox(height: 16),
+                _SectionTitle('CONDIVISIONE SCHERMO'),
+                SizedBox(height: 8),
+                _SettingsCard(
+                  child: SwitchListTile(
+                    key: ValueKey('stream-proof'),
+                    secondary: Icon(Icons.screenshot_monitor_outlined),
+                    title: Text('Stream proof'),
+                    subtitle: Text(
+                      'Esclude Sylphy dalle catture e dalle condivisioni compatibili, '
+                      'lasciandolo visibile a te. Richiede Windows 10 versione 2004 o successiva. '
+                      'Verifica l’anteprima del programma di condivisione.',
+                    ),
+                    value: privacy.streamProof,
+                    onChanged: (value) => widget.privacySettings.update(
+                      privacy.copyWith(streamProof: value),
+                    ),
+                  ),
+                ),
+              ],
               SizedBox(height: 16),
               _SectionTitle('CONTATTI E ACCESSIBILITÀ'),
               SizedBox(height: 8),
@@ -656,6 +696,12 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
               ),
               SizedBox(height: 16),
+              if (_isAndroidPlatform) ...[
+                _SectionTitle('NOTIFICHE E VIBRAZIONE'),
+                SizedBox(height: 8),
+                _SettingsCard(child: AndroidNotificationSettings()),
+                SizedBox(height: 16),
+              ],
               UpdateSettings(),
               SizedBox(height: 16),
               Text(
@@ -914,3 +960,6 @@ bool get _isMobilePlatform =>
     !kIsWeb &&
     (defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS);
+
+bool get _isAndroidPlatform =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.android;

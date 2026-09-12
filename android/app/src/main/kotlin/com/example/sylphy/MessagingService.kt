@@ -45,16 +45,8 @@ class MessagingService : Service() {
             }
             getSystemService(NotificationManager::class.java)
                 .createNotificationChannel(channel)
-            val messageChannel = NotificationChannel(
-                MESSAGE_CHANNEL_ID,
-                "Nuovi messaggi",
-                NotificationManager.IMPORTANCE_DEFAULT,
-            ).apply {
-                description = "Notifiche private per i nuovi messaggi Sylphy"
-            }
-            getSystemService(NotificationManager::class.java)
-                .createNotificationChannel(messageChannel)
         }
+        MessageNotificationSettings.createChannel(this)
         val launchIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
@@ -108,7 +100,8 @@ class MessagingService : Service() {
             launchIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notification = NotificationCompat.Builder(this, MESSAGE_CHANNEL_ID)
+        val notification = NotificationCompat.Builder(this, MessageNotificationSettings.CHANNEL_ID)
+            .setDefaults(android.app.Notification.DEFAULT_SOUND or android.app.Notification.DEFAULT_VIBRATE)
             .setSmallIcon(R.drawable.sylphy_notification)
             .setContentTitle(if (pinned) "Messaggio fissato" else "Nuovo messaggio")
             .setContentText(if (pinned) "Un messaggio è stato fissato in un gruppo Sylphy" else "Apri Sylphy per leggerlo")
@@ -117,14 +110,12 @@ class MessagingService : Service() {
             .setContentIntent(pendingIntent)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .build()
-        getSystemService(NotificationManager::class.java)
-            .notify(INCOMING_NOTIFICATION_ID, notification)
+        MessageNotificationSettings.post(this, null, notification)
     }
 
     companion object {
         @Volatile internal var uiResumed = false
         const val CHANNEL_ID = "sylphy_background_messaging"
-        const val MESSAGE_CHANNEL_ID = "sylphy_messages"
         const val NOTIFICATION_ID = 4104
         const val INCOMING_NOTIFICATION_ID = 4105
         const val POLL_INTERVAL_MS = 10_000L

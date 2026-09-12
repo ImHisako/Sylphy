@@ -19,6 +19,7 @@ void main() {
     await settings.update(
       settings.value.copyWith(
         incognitoKeyboard: true,
+        streamProof: true,
         themeName: 'pink',
         sendReadReceipts: false,
       ),
@@ -29,6 +30,7 @@ void main() {
     );
     await restored.load();
     expect(restored.value.incognitoKeyboard, isTrue);
+    expect(restored.value.streamProof, isTrue);
     expect(restored.value.themeName, 'pink');
     expect(restored.value.sendReadReceipts, isFalse);
     expect(restored.value.showReadReceipts, isTrue);
@@ -47,6 +49,7 @@ void main() {
   );
   test('accepts the first authenticated contact request by default', () {
     expect(const PrivacySettings().allowUnknownContacts, isTrue);
+    expect(PrivacySettings.fromJson({'version': 2}).streamProof, isFalse);
   });
 
   test('migrates the version 1 incoming-contact default to enabled', () {

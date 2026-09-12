@@ -17,6 +17,11 @@ server holding accounts, contacts and conversations.
 
 - Signed Sylphy identities shared through an ID or a `sylphy:` invitation.
 - Peer-to-peer contacts with names, profile pictures and verifiable fingerprints.
+- Groups with additional channels open an ordered channel list before showing
+  messages: General first, followed by channels in creation order. Desktop keeps
+  conversations in a compact avatar column on the left, channels beside it and
+  messages on the right. Mobile shows the avatar column beside the channel list;
+  Back from a channel returns to that list, preserving its scroll position.
 - End-to-end encrypted messages with direct delivery and encrypted offline
   storage on Veilid, using separate capabilities for each contact, direction and
   device.
@@ -24,6 +29,19 @@ server holding accounts, contacts and conversations.
   acknowledgements issued only after local persistence.
 - An Android foreground service and notifications without message previews when
   the app interface is closed.
+- Android notification settings with a persistent message-alert switch shared
+  by the app and background service, plus direct access to Android's message
+  sound, vibration and notification permissions. Channel choices refresh when
+  returning to Sylphy; disabling message alerts keeps background reception active.
+- Android-only incognito keyboard mode for keyboards that support disabling
+  personalized learning.
+- Windows-only Stream proof in Settings, using
+  [Windows capture exclusion](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity)
+  on Windows 10 version 2004 or later. The saved preference is applied before
+  showing private content on startup. If activation fails, content stays covered
+  until the user retries or explicitly continues without protection. Capture
+  tools must honor Windows display affinity; check the sharing preview before
+  relying on it. Linux and Android do not expose this setting.
 - Encrypted attachments, download controls and inline image previews.
 - Encrypted computer-to-phone account linking through a password-protected
   account file containing identity, contacts and history. Each device creates

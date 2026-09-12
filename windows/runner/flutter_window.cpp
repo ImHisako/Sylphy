@@ -1,6 +1,8 @@
 #include "flutter_window.h"
 
 #include <optional>
+#include <dwmapi.h>
+#include <flutter/standard_method_codec.h>
 
 #include "flutter/generated_plugin_registrant.h"
 
@@ -27,6 +29,53 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
+  screen_capture_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), "sylphy/screen_capture",
+          &flutter::StandardMethodCodec::GetInstance());
+  screen_capture_channel_->SetMethodCallHandler(
+      [this](const auto& call, auto result) {
+        if (call.method_name() != "setStreamProof") {
+          result->NotImplemented();
+          return;
+        }
+        const auto* enabled = call.arguments()
+            ? std::get_if<bool>(call.arguments()) : nullptr;
+        if (!enabled) {
+          result->Error("invalid_arguments", "Expected a boolean.");
+          return;
+        }
+        if (*enabled) {
+          // Older Windows versions silently downgrade exclusion to a black
+          // rectangle. Require the version that actually supports exclusion.
+          OSVERSIONINFOEXW version = {};
+          version.dwOSVersionInfoSize = sizeof(version);
+          version.dwMajorVersion = 10;
+          version.dwBuildNumber = 19041;
+          DWORDLONG conditions = 0;
+          VER_SET_CONDITION(conditions, VER_MAJORVERSION, VER_GREATER_EQUAL);
+          VER_SET_CONDITION(conditions, VER_MINORVERSION, VER_GREATER_EQUAL);
+          VER_SET_CONDITION(conditions, VER_BUILDNUMBER, VER_GREATER_EQUAL);
+          BOOL composition = FALSE;
+          if (!VerifyVersionInfoW(&version,
+                  VER_MAJORVERSION | VER_MINORVERSION | VER_BUILDNUMBER,
+                  conditions) ||
+              FAILED(DwmIsCompositionEnabled(&composition)) || !composition) {
+            result->Error("unsupported", "Requires Windows 10 2004 and DWM.");
+            return;
+          }
+        }
+        constexpr DWORD kExcludeFromCapture = 0x00000011;
+        const DWORD affinity = *enabled ? kExcludeFromCapture : WDA_NONE;
+        // Affinity belongs to the top-level HWND, not Flutter's child view.
+        if (!SetWindowDisplayAffinity(GetHandle(), affinity)) {
+          result->Error("capture_protection_failed",
+                        std::to_string(GetLastError()));
+          return;
+        }
+        result->Success();
+      });
+
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
   });
@@ -40,6 +89,10 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  if (screen_capture_channel_) {
+    screen_capture_channel_->SetMethodCallHandler(nullptr);
+    screen_capture_channel_.reset();
+  }
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }

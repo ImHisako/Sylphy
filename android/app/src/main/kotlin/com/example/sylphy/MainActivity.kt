@@ -4,13 +4,13 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.Manifest
 import android.app.Activity
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.net.Uri
+import android.provider.Settings
 import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -64,7 +64,7 @@ class MainActivity : FlutterActivity() {
         ensureVeilidInitialized()
         // Veilid needs Android's Context/JVM before Flutter can invoke FFI.
         super.onCreate(savedInstanceState)
-        createMessageChannel()
+        MessageNotificationSettings.createChannel(this)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -87,6 +87,30 @@ class MainActivity : FlutterActivity() {
                     "requestNotificationPermission" -> {
                         requestNotificationPermission()
                         result.success(true)
+                    }
+                    "getNotificationSettings" -> {
+                        result.success(MessageNotificationSettings.snapshot(this))
+                    }
+                    "setNotificationsEnabled" -> {
+                        val enabled = call.arguments as? Boolean
+                        if (enabled == null) {
+                            result.error("invalid_arguments", "Valore notifiche non valido.", null)
+                        } else {
+                            try {
+                                MessageNotificationSettings.setEnabled(this, enabled)
+                                result.success(MessageNotificationSettings.snapshot(this))
+                            } catch (_: Exception) {
+                                result.error("notification_settings_failed", "Impossibile salvare le preferenze notifiche.", null)
+                            }
+                        }
+                    }
+                    "openNotificationSettings" -> {
+                        try {
+                            openNotificationSettings(call.arguments == true)
+                            result.success(null)
+                        } catch (_: Exception) {
+                            result.error("notification_settings_unavailable", "Impossibile aprire le impostazioni Android.", null)
+                        }
                     }
                     "showMessageNotification" -> {
                         showMessageNotification(call.argument<Boolean>("pinned") == true, call.argument<String>("conversation_id"))
@@ -172,22 +196,26 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun createMessageChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                MESSAGE_CHANNEL_ID,
-                "Nuovi messaggi",
-                NotificationManager.IMPORTANCE_HIGH,
-            ).apply {
-                description = "Notifiche private per i nuovi messaggi Sylphy"
-                enableVibration(true)
+    private fun openNotificationSettings(channel: Boolean) {
+        MessageNotificationSettings.createChannel(this)
+        val details = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:$packageName"))
+        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Intent(if (channel) Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS
+                else Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                if (channel) putExtra(Settings.EXTRA_CHANNEL_ID, MessageNotificationSettings.CHANNEL_ID)
             }
-            getSystemService(NotificationManager::class.java)
-                .createNotificationChannel(channel)
+        } else details
+        try {
+            startActivity(intent)
+        } catch (_: android.content.ActivityNotFoundException) {
+            startActivity(details)
         }
     }
 
     private fun requestNotificationPermission() {
+        if (!MessageNotificationSettings.enabled(this)) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
                 PackageManager.PERMISSION_GRANTED
@@ -215,7 +243,8 @@ class MainActivity : FlutterActivity() {
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notification = NotificationCompat.Builder(this, MESSAGE_CHANNEL_ID)
+        val notification = NotificationCompat.Builder(this, MessageNotificationSettings.CHANNEL_ID)
+            .setDefaults(android.app.Notification.DEFAULT_SOUND or android.app.Notification.DEFAULT_VIBRATE)
             .setSmallIcon(R.drawable.sylphy_notification)
             .setContentTitle(if (pinned) "Messaggio fissato" else "Nuovo messaggio")
             .setContentText(if (pinned) "Un messaggio è stato fissato in un gruppo Sylphy" else "Hai ricevuto un nuovo messaggio su Sylphy")
@@ -225,8 +254,7 @@ class MainActivity : FlutterActivity() {
             .setContentIntent(pendingIntent)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .build()
-        NotificationManagerCompat.from(this)
-            .notify("conversation:${conversationId ?: "unknown"}", MessagingService.INCOMING_NOTIFICATION_ID, notification)
+        MessageNotificationSettings.post(this, "conversation:${conversationId ?: "unknown"}", notification)
     }
 
     @Synchronized
@@ -265,7 +293,6 @@ class MainActivity : FlutterActivity() {
 
     private companion object {
         const val PLATFORM_CHANNEL = "sylphy/platform"
-        const val MESSAGE_CHANNEL_ID = "sylphy_messages"
         const val NOTIFICATION_PERMISSION_REQUEST = 4102
         const val SAVE_FILE_REQUEST = 4103
         val REQUIRED_PROTECTED_STORE_CLASSES = listOf(
