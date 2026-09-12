@@ -30,6 +30,7 @@ class ChatMessage {
     this.attachmentName,
     this.attachmentBytes,
     this.replyTo,
+    this.channelId,
     this.authorName,
   }) : orderAt = orderAt ?? sentAt;
 
@@ -44,6 +45,7 @@ class ChatMessage {
   final String? attachmentName;
   final Uint8List? attachmentBytes;
   final String? replyTo;
+  final String? channelId;
 
   ChatMessage copyWith({DeliveryState? deliveryState}) {
     return ChatMessage(
@@ -58,6 +60,7 @@ class ChatMessage {
       attachmentName: attachmentName,
       attachmentBytes: attachmentBytes,
       replyTo: replyTo,
+      channelId: channelId,
     );
   }
 }

@@ -17,6 +17,8 @@ class PrivacySettings {
     this.showLastSeen = true,
     this.allowUnknownContacts = true,
     this.reduceMotion = false,
+    this.incognitoKeyboard = false,
+    this.themeName = 'sylphy',
   });
 
   final bool shareProfilePhoto;
@@ -27,6 +29,8 @@ class PrivacySettings {
   final bool showLastSeen;
   final bool allowUnknownContacts;
   final bool reduceMotion;
+  final bool incognitoKeyboard;
+  final String themeName;
 
   static const failClosed = PrivacySettings(
     shareProfilePhoto: false,
@@ -47,6 +51,8 @@ class PrivacySettings {
     bool? showLastSeen,
     bool? allowUnknownContacts,
     bool? reduceMotion,
+    bool? incognitoKeyboard,
+    String? themeName,
   }) => PrivacySettings(
     shareProfilePhoto: shareProfilePhoto ?? this.shareProfilePhoto,
     shareDisplayName: shareDisplayName ?? this.shareDisplayName,
@@ -56,6 +62,8 @@ class PrivacySettings {
     showLastSeen: showLastSeen ?? this.showLastSeen,
     allowUnknownContacts: allowUnknownContacts ?? this.allowUnknownContacts,
     reduceMotion: reduceMotion ?? this.reduceMotion,
+    incognitoKeyboard: incognitoKeyboard ?? this.incognitoKeyboard,
+    themeName: themeName ?? this.themeName,
   );
 
   Map<String, Object> toJson() => {
@@ -68,6 +76,8 @@ class PrivacySettings {
     'show_last_seen': showLastSeen,
     'allow_unknown_contacts': allowUnknownContacts,
     'reduce_motion': reduceMotion,
+    'incognito_keyboard': incognitoKeyboard,
+    'theme_name': themeName,
   };
 
   factory PrivacySettings.fromJson(Map<String, dynamic> json) {
@@ -76,7 +86,9 @@ class PrivacySettings {
     return PrivacySettings(
       shareProfilePhoto: value('share_profile_photo', true),
       shareDisplayName: value('share_display_name', true),
-      sendReadReceipts: value('send_read_receipts', true),
+      sendReadReceipts:
+          value('send_read_receipts', true) &&
+          value('show_read_receipts', true),
       showReadReceipts: value('show_read_receipts', true),
       showOnlineStatus: value('show_online_status', true),
       showLastSeen: value('show_last_seen', true),
@@ -88,6 +100,10 @@ class PrivacySettings {
           ? true
           : value('allow_unknown_contacts', true),
       reduceMotion: value('reduce_motion', false),
+      incognitoKeyboard: value('incognito_keyboard', false),
+      themeName: json['theme_name'] is String
+          ? json['theme_name'] as String
+          : 'sylphy',
     );
   }
 }

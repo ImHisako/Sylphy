@@ -1,3 +1,4 @@
+import 'core/privacy/app_palette.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui';
@@ -114,7 +115,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     _bridge =
         widget.bridge ??
         (widget.nativeCore == null
-            ? const UnavailableMessagingBridge()
+            ? UnavailableMessagingBridge()
             : SylphyMessagingBridge(core: widget.nativeCore!));
     _ownsVeilidService = widget.veilidService == null;
     _veilidService =
@@ -124,7 +125,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
             core: widget.nativeCore! as NativeCoreClient,
             password: PlatformDeviceSecretStore().getOrCreate,
           )
-        : const UnavailableLocalDataCipher();
+        : UnavailableLocalDataCipher();
     _profileStore =
         widget.profileStore ?? FileUserProfileStore(cipher: profileCipher);
     _ownsIdentityService = widget.identityService == null;
@@ -151,7 +152,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   Future<void> _initializeNativeServices() async {
     try {
       _runGuarded(
-        const MessageNotifications().initialize(),
+        MessageNotifications().initialize(),
         category: 'notifications',
         action: 'initialization_failed',
       );
@@ -196,7 +197,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     }
     final now = DateTime.now();
     if (_lastRouteRefresh != null &&
-        now.difference(_lastRouteRefresh!) < const Duration(seconds: 15)) {
+        now.difference(_lastRouteRefresh!) < Duration(seconds: 15)) {
       return;
     }
     _lastRouteRefresh = now;
@@ -213,9 +214,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       _identityRepublishTimer = null;
       return;
     }
-    _identityRepublishTimer ??= Timer.periodic(const Duration(seconds: 6), (
-      timer,
-    ) {
+    _identityRepublishTimer ??= Timer.periodic(Duration(seconds: 6), (timer) {
       if (!mounted || _identityService.snapshot.hasShortInvitation) {
         timer.cancel();
         _identityRepublishTimer = null;
@@ -401,15 +400,16 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    const surface = Color(0xFF0C0F14);
-    const primary = Color(0xFFCFF36A);
-    const onSurface = Color(0xFFF4F7F2);
-    const outline = Color(0xFF323943);
+    AppPalette.themeName = _privacySettings.value.themeName;
+    final surface = AppPalette.color(0xFF0C0F14);
+    final primary = AppPalette.color(0xFFCFF36A);
+    final onSurface = AppPalette.color(0xFFF4F7F2);
+    final outline = AppPalette.color(0xFF323943);
     final colorScheme = ColorScheme.fromSeed(
-      brightness: Brightness.dark,
+      brightness: AppPalette.isLight ? Brightness.light : Brightness.dark,
       seedColor: primary,
       primary: primary,
-      onPrimary: const Color(0xFF1B2500),
+      onPrimary: AppPalette.color(0xFF1B2500),
       surface: surface,
       onSurface: onSurface,
       outline: outline,
@@ -428,7 +428,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
                 media.disableAnimations || _privacySettings.value.reduceMotion,
           ),
           child: widget.updates == null
-              ? child ?? const SizedBox.shrink()
+              ? child ?? SizedBox.shrink()
               : UpdateHost(
                   controller: widget.updates!,
                   navigatorKey: _navigatorKey,
@@ -438,7 +438,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
                       exit(0);
                     }
                   },
-                  child: child ?? const SizedBox.shrink(),
+                  child: child ?? SizedBox.shrink(),
                 ),
         );
       },
@@ -449,7 +449,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
         dividerColor: outline.withValues(alpha: 0.65),
         visualDensity: VisualDensity.standard,
         splashFactory: InkSparkle.splashFactory,
-        appBarTheme: const AppBarTheme(
+        appBarTheme: AppBarTheme(
           centerTitle: false,
           backgroundColor: surface,
           foregroundColor: onSurface,
@@ -457,8 +457,8 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
         ),
         inputDecorationTheme: InputDecorationTheme(
           filled: true,
-          fillColor: const Color(0xFF171C24),
-          hintStyle: const TextStyle(color: Color(0xFF9299A5)),
+          fillColor: AppPalette.color(0xFF171C24),
+          hintStyle: TextStyle(color: AppPalette.color(0xFF9299A5)),
           border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(16),
             borderSide: BorderSide.none,
@@ -469,11 +469,11 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
           ),
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(16),
-            borderSide: const BorderSide(color: primary, width: 1.4),
+            borderSide: BorderSide(color: primary, width: 1.4),
           ),
         ),
         cardTheme: CardThemeData(
-          color: const Color(0xFF151A21),
+          color: AppPalette.color(0xFF151A21),
           elevation: 0,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(20),
@@ -482,21 +482,21 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
         ),
         snackBarTheme: SnackBarThemeData(
           behavior: SnackBarBehavior.floating,
-          backgroundColor: const Color(0xFF252B34),
-          contentTextStyle: const TextStyle(
-            color: Color(0xFFF4F7F2),
+          backgroundColor: AppPalette.color(0xFF252B34),
+          contentTextStyle: TextStyle(
+            color: AppPalette.color(0xFFF4F7F2),
             fontSize: 14,
             fontWeight: FontWeight.w600,
           ),
           actionTextColor: primary,
-          disabledActionTextColor: const Color(0xFF9299A5),
+          disabledActionTextColor: AppPalette.color(0xFF9299A5),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(14),
           ),
         ),
       ),
       home: !_profileLoaded
-          ? const Scaffold(body: Center(child: CircularProgressIndicator()))
+          ? Scaffold(body: Center(child: CircularProgressIndicator()))
           : _profile == null || _isEditingProfile
           ? ProfileOnboarding(
               profileStore: _profileStore,

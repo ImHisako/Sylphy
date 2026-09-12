@@ -9,7 +9,7 @@ import 'package:ffi/ffi.dart';
 
 import '../diagnostics/app_log.dart';
 
-const _expectedAbiVersion = 11;
+const _expectedAbiVersion = 12;
 
 typedef _NativeAbiVersion = Uint32 Function();
 typedef _DartAbiVersion = int Function();
@@ -489,6 +489,11 @@ class NativeCoreClient
   bool _isUrgentCommand(Object? command) =>
       command == 'send_text' ||
       command == 'send_attachment' ||
+      command == 'send_reply' ||
+      command == 'send_channel_text' ||
+      command == 'send_channel_attachment' ||
+      command == 'group_action' ||
+      command == 'mark_channel_read' ||
       command == 'mark_conversation_read' ||
       command == 'ensure_identity';
 

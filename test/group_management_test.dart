@@ -5,6 +5,28 @@ import 'package:sylphy/core/messaging/secure_messaging_bridge.dart';
 import 'package:sylphy/features/messenger/group_management_page.dart';
 
 void main() {
+  testWidgets('group notices can be disabled and named channels created', (
+    tester,
+  ) async {
+    final bridge = _Groups();
+    await tester.binding.setSurfaceSize(const Size(800, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GroupManagementPage(bridge: bridge, conversationId: 'group'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('group-action-notices')));
+    await tester.pumpAndSettle();
+    expect(bridge.actions.first, {'kind': 'action_notices', 'enabled': false});
+    await tester.tap(find.byTooltip('Crea canale'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Progetti');
+    await tester.tap(find.text('Salva'));
+    await tester.pumpAndSettle();
+    expect(bridge.actions.last, {'kind': 'create_channel', 'name': 'Progetti'});
+  });
   testWidgets(
     'saving zero privileges preserves admin; only revoke removes it',
     (tester) async {
@@ -370,7 +392,13 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.byTooltip('Rimuovi dai fissati'));
+    await tester.ensureVisible(
+      find.ancestor(
+        of: find.byTooltip('Rimuovi dai fissati'),
+        matching: find.byType(IconButton),
+      ),
+    );
+    await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Rimuovi dai fissati'));
     await tester.pumpAndSettle();
     expect(bridge.actions.single, {

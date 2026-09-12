@@ -1,5 +1,23 @@
 # Contratto del client Flutter
 
+## Preferenze e chat (settembre 2026)
+
+- Il titolo della chat privata apre il profilo del contatto. Su desktop ampio
+  il pannello dei dettagli si chiude con la X e si riapre dal titolo o dal pulsante
+  del profilo; sulle finestre più strette i dettagli si aprono in un foglio.
+- I messaggi fissati mostrano una puntina nella bolla e restano ricercabili.
+- “Mostra spunte ricevute” controlla `send_read_receipts`: disattivandolo gli altri
+  non ricevono conferme di lettura. Le proprie spunte di consegna restano visibili.
+  Un precedente `show_read_receipts: false` migra all'invio delle letture disattivato.
+- `incognito_keyboard` imposta `enableIMEPersonalizedLearning: false` nel campo
+  dei messaggi. Gboard e altre tastiere compatibili possono rispettare questa
+  richiesta; la preferenza non forza il comportamento di tastiere esterne.
+- `theme_name` seleziona Sylphy, Black, Cyan, Pink, AMOLED o White. Tema e preferenza
+  della tastiera sono salvati nel record cifrato delle impostazioni.
+- Le notifiche Android in primo piano hanno un tag per conversazione e vengono
+  cancellate dopo la lettura. La notifica riepilogativa del servizio viene rimossa
+  quando non rimangono messaggi non letti; la notifica del servizio resta attiva.
+
 ## Responsabilità
 
 Il client Flutter mostra solo dati già disponibili localmente e passa il testo appena composto al bridge di sicurezza. Non conserva password, chiavi private, root key, chain key, bundle di prekey non protetti o envelope decifrati più a lungo del necessario per il rendering.

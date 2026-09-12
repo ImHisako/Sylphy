@@ -1,5 +1,332 @@
 use super::*;
 
+#[test]
+fn moderation_deduplicates_requests_and_single_member_groups_keep_working() {
+    let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+    struct Cleanup;
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            TEST_BLOBS.with(|value| *value.borrow_mut() = None);
+        }
+    }
+    let _cleanup = Cleanup;
+    TEST_BLOBS.with(|value| *value.borrow_mut() = Some(HashMap::new()));
+    let directory = std::env::temp_dir().join(format!("sylphy-moderation-regression-{}", new_id()));
+    let admin = fixture(&directory, "Admin");
+    let member = fixture(&directory, "Member");
+    activate(&directory, "Admin");
+    let mut local = group(&admin, vec![member.clone()], "group");
+    local.admin_id = "me".to_owned();
+    local.management.coordinator = Some(admin.identity.clone());
+    save(local.clone()).unwrap();
+    act(
+        &local.id,
+        Action::SetAdmin {
+            member_id: member.id.clone(),
+            permissions: Some(AdminPermissions::all()),
+        },
+    )
+    .unwrap();
+    let packets = take_controls();
+    activate(&directory, "Member");
+    deliver_controls(&packets);
+    let deletion = Action::DeleteMessage {
+        message_id: new_id(),
+    };
+    assert_eq!(
+        act(&local.id, deletion.clone()).unwrap()["state"],
+        "pending_owner"
+    );
+    assert_eq!(
+        act(&local.id, deletion.clone()).unwrap()["state"],
+        "pending_owner"
+    );
+    assert_eq!(
+        details(&local.id).unwrap()["pending_actions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let packets = take_controls();
+    activate(&directory, "Admin");
+    deliver_controls(&packets);
+    process_requests();
+    let revision = details(&local.id).unwrap()["revision"].clone();
+    act(&local.id, deletion).unwrap();
+    assert_eq!(details(&local.id).unwrap()["revision"], revision);
+    let messages = list_messages(&local.id, None, None, None).unwrap();
+    assert_eq!(
+        messages["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["body"] == "Un messaggio è stato eliminato per tutti")
+            .count(),
+        1
+    );
+    let packets = take_controls();
+    activate(&directory, "Member");
+    deliver_controls(&packets);
+    assert!(
+        details(&local.id).unwrap()["pending_actions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    activate(&directory, "Admin");
+    act(&local.id, Action::ActionNotices { enabled: false }).unwrap();
+    let before = list_messages(&local.id, None, None, None).unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .len();
+    act(
+        &local.id,
+        Action::RemoveMember {
+            member_id: member.id.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        list_messages(&local.id, None, None, None).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        before
+    );
+    assert_eq!(
+        details(&local.id).unwrap()["members"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let packets = take_controls();
+    activate(&directory, "Member");
+    deliver_controls(&packets);
+    let removed = details(&local.id).unwrap();
+    assert_eq!(removed["closed"], true);
+    assert!(
+        !removed["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == member.id)
+    );
+    assert!(matches!(
+        send_text(&local.id, "non autorizzato"),
+        Err(CoreError::GroupClosed)
+    ));
+    activate(&directory, "Admin");
+    assert_eq!(
+        send_text(&local.id, "Posso ancora scrivere").unwrap()["delivery_state"],
+        "delivered"
+    );
+    activate(&directory, "Admin");
+    assert!(
+        list_messages(&local.id, None, None, None).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["body"] == "Posso ancora scrivere")
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn channels_preserve_rich_metadata_permissions_and_read_boundaries() {
+    let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+    struct Cleanup;
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            TEST_BLOBS.with(|value| *value.borrow_mut() = None);
+        }
+    }
+    let _cleanup = Cleanup;
+    TEST_BLOBS.with(|value| *value.borrow_mut() = Some(HashMap::new()));
+    let directory = std::env::temp_dir().join(format!("sylphy-channels-regression-{}", new_id()));
+    let admin = fixture(&directory, "Admin");
+    let member = fixture(&directory, "Member");
+    activate(&directory, "Admin");
+    let mut local = group(&admin, vec![], "group");
+    local.admin_id = "me".to_owned();
+    local.management.coordinator = Some(admin.identity.clone());
+    save(local.clone()).unwrap();
+    assert!(matches!(
+        authorized(
+            &local,
+            &member.id,
+            &Action::CreateChannel {
+                name: "Vietato".to_owned()
+            }
+        ),
+        Err(CoreError::GroupPermissionDenied)
+    ));
+    act(
+        &local.id,
+        Action::CreateChannel {
+            name: "Progetti".to_owned(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        act(
+            &local.id,
+            Action::CreateChannel {
+                name: "progetti".to_owned()
+            }
+        ),
+        Err(CoreError::InvalidInput)
+    ));
+    let channel = details(&local.id).unwrap()["channels"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first = send_channel_text(&local.id, "Nel canale", &channel, None).unwrap();
+    send_channel_text(
+        &local.id,
+        "Risposta",
+        &channel,
+        first["message_id"].as_str(),
+    )
+    .unwrap();
+    act(
+        &local.id,
+        Action::RenameChannel {
+            channel_id: channel.clone(),
+            name: "Sviluppo".to_owned(),
+        },
+    )
+    .unwrap();
+    activate(&directory, "Admin");
+    let messages = list_messages(&local.id, None, None, None).unwrap();
+    let reply = messages["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["body"] == "Risposta")
+        .unwrap();
+    assert_eq!(reply["channel_id"], channel);
+    assert_eq!(reply["reply_to"], first["message_id"]);
+    assert_eq!(
+        send_attachment_in_channel(
+            &local.id,
+            "note.txt",
+            &STANDARD.encode(b"file nel canale"),
+            Some(&channel)
+        )
+        .unwrap()["delivery_state"],
+        "delivered"
+    );
+    let files = list_messages(&local.id, None, None, None).unwrap();
+    let file = files["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["attachment_name"] == "note.txt")
+        .unwrap();
+    assert_eq!(file["channel_id"], channel);
+    assert_eq!(
+        file["attachment_base64"],
+        STANDARD.encode(b"file nel canale")
+    );
+    assert!(
+        !list_conversations().unwrap()["conversations"][0]["last_message"]
+            .as_str()
+            .unwrap()
+            .contains("sylphy-group-text")
+    );
+    assert!(matches!(
+        send_channel_text(&local.id, "Rifiutato", "missing", None),
+        Err(CoreError::InvalidInput)
+    ));
+    {
+        let mut store = contact_store().lock().unwrap();
+        let original = store
+            .messages
+            .iter()
+            .find(|message| message.id == first["message_id"].as_str().unwrap())
+            .unwrap()
+            .clone();
+        let mut channel_message = original.clone();
+        channel_message.id = new_id();
+        channel_message.is_outgoing = false;
+        channel_message.is_read = false;
+        let mut general = original;
+        general.id = new_id();
+        general.body = "Generale".to_owned();
+        general.is_outgoing = false;
+        general.is_read = false;
+        store.messages.extend([channel_message, general]);
+        write_message_snapshot(store.message_path.as_ref().unwrap(), &store.messages).unwrap();
+    }
+    assert_eq!(
+        mark_channel_read(&local.id, None).unwrap()["all_read"],
+        false
+    );
+    activate(&directory, "Admin");
+    {
+        let mut store = contact_store().lock().unwrap();
+        ensure_messages_loaded(&mut store).unwrap();
+        assert!(store.messages.iter().any(|message| !message.is_outgoing
+            && !message.is_read
+            && rich_metadata(&message.body).unwrap().2 == Some(channel.clone())));
+    }
+    assert_eq!(
+        mark_channel_read(&local.id, Some(&channel)).unwrap()["all_read"],
+        true
+    );
+    // The authenticated snapshot and channel text can arrive in either order.
+    let mut with_member = current_group(&local.id).unwrap().unwrap();
+    with_member.members.push(member.clone());
+    save(with_member).unwrap();
+    act(
+        &local.id,
+        Action::RenameChannel {
+            channel_id: channel.clone(),
+            name: "Condiviso".to_owned(),
+        },
+    )
+    .unwrap();
+    let snapshots = take_controls();
+    let mut packets = Vec::new();
+    send_text_with(
+        &local.id,
+        &encode_channel_text("Messaggio cifrato del canale", None, Some(&channel)).unwrap(),
+        |recipient, body, id| {
+            let device = recipient.delivery_devices()?.remove(0);
+            let (payload, message_id) = secure_packet::seal_for_test_with_id(&device, body, id)?;
+            packets.push(payload.clone());
+            Ok((
+                vec![secure_packet::SealedDelivery {
+                    payload,
+                    route_blob: vec![1; 512],
+                    offline_keys: None,
+                }],
+                message_id,
+            ))
+        },
+    )
+    .unwrap();
+    activate(&directory, "Member");
+    assert!(matches!(
+        persist_inbound_payload(&packets[0]),
+        Err(CoreError::FeatureUnavailable)
+    ));
+    deliver_controls(&snapshots);
+    assert!(persist_inbound_payload(&packets[0]).unwrap());
+    assert!(!persist_inbound_payload(&packets[0]).unwrap());
+    let received = list_messages(&local.id, None, None, None).unwrap();
+    let received = received["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["body"] == "Messaggio cifrato del canale")
+        .unwrap();
+    assert_eq!(received["channel_id"], channel);
+    fs::remove_dir_all(directory).unwrap();
+}
+
 fn fixture(directory: &Path, name: &str) -> GroupMember {
     let root = directory.join(name).to_string_lossy().into_owned();
     identity::ensure_identity(&root, "group-management-tests", None, None).unwrap();

@@ -1,3 +1,4 @@
+import '../../core/privacy/app_palette.dart';
 import 'dart:typed_data';
 
 import 'package:file_selector/file_selector.dart';
@@ -106,16 +107,16 @@ class _ProfileOnboardingState extends State<ProfileOnboarding> {
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
+            padding: EdgeInsets.all(24),
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 480),
+              constraints: BoxConstraints(maxWidth: 480),
               child: Form(
                 key: _formKey,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const Center(child: SylphyLogo(size: 88)),
-                    const SizedBox(height: 20),
+                    Center(child: SylphyLogo(size: 88)),
+                    SizedBox(height: 20),
                     Text(
                       _isEditing
                           ? 'Modifica il tuo profilo'
@@ -126,31 +127,34 @@ class _ProfileOnboardingState extends State<ProfileOnboarding> {
                         fontWeight: FontWeight.w900,
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    SizedBox(height: 8),
                     Text(
                       _isEditing
                           ? 'Aggiorna il nome o la foto mostrati nella home e ai tuoi contatti.'
                           : 'Scegli il nome che vedranno i tuoi contatti. Potrai aggiungere una foto, ma non è obbligatoria.',
                       textAlign: TextAlign.center,
-                      style: TextStyle(color: Color(0xFFAEB7C3), height: 1.45),
+                      style: TextStyle(
+                        color: AppPalette.color(0xFFAEB7C3),
+                        height: 1.45,
+                      ),
                     ),
-                    const SizedBox(height: 28),
+                    SizedBox(height: 28),
                     Center(
                       child: Stack(
                         clipBehavior: Clip.none,
                         children: [
                           CircleAvatar(
-                            key: const ValueKey('onboarding-avatar'),
+                            key: ValueKey('onboarding-avatar'),
                             radius: 54,
-                            backgroundColor: const Color(0xFF252C35),
+                            backgroundColor: AppPalette.color(0xFF252C35),
                             backgroundImage: _photoBytes == null
                                 ? null
                                 : MemoryImage(_photoBytes!),
                             child: _photoBytes == null
-                                ? const Icon(
+                                ? Icon(
                                     Icons.person_outline_rounded,
                                     size: 48,
-                                    color: Color(0xFFB8C1CC),
+                                    color: AppPalette.color(0xFFB8C1CC),
                                   )
                                 : null,
                           ),
@@ -158,32 +162,32 @@ class _ProfileOnboardingState extends State<ProfileOnboarding> {
                             right: -6,
                             bottom: -4,
                             child: IconButton.filled(
-                              key: const ValueKey('choose-profile-photo'),
+                              key: ValueKey('choose-profile-photo'),
                               tooltip: 'Scegli foto profilo',
                               onPressed: _isSaving ? null : _pickPhoto,
-                              icon: const Icon(Icons.add_a_photo_outlined),
+                              icon: Icon(Icons.add_a_photo_outlined),
                             ),
                           ),
                         ],
                       ),
                     ),
                     if (_photoBytes != null) ...[
-                      const SizedBox(height: 8),
+                      SizedBox(height: 8),
                       TextButton(
                         onPressed: _isSaving
                             ? null
                             : () => setState(() => _photoBytes = null),
-                        child: const Text('Rimuovi foto'),
+                        child: Text('Rimuovi foto'),
                       ),
                     ],
-                    const SizedBox(height: 24),
+                    SizedBox(height: 24),
                     TextFormField(
-                      key: const ValueKey('profile-name'),
+                      key: ValueKey('profile-name'),
                       controller: _nameController,
                       autofocus: true,
                       textCapitalization: TextCapitalization.words,
                       maxLength: 64,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: 'Nome',
                         hintText: 'Come vuoi essere chiamato?',
                         prefixIcon: Icon(Icons.badge_outlined),
@@ -195,41 +199,44 @@ class _ProfileOnboardingState extends State<ProfileOnboarding> {
                       onFieldSubmitted: (_) => _complete(),
                     ),
                     if (_errorText != null) ...[
-                      const SizedBox(height: 8),
+                      SizedBox(height: 8),
                       Text(
                         _errorText!,
                         textAlign: TextAlign.center,
-                        style: const TextStyle(color: Color(0xFFFF9D95)),
+                        style: TextStyle(color: AppPalette.color(0xFFFF9D95)),
                       ),
                     ],
-                    const SizedBox(height: 18),
+                    SizedBox(height: 18),
                     FilledButton.icon(
-                      key: const ValueKey('complete-onboarding'),
+                      key: ValueKey('complete-onboarding'),
                       onPressed: _isSaving ? null : _complete,
                       icon: _isSaving
-                          ? const SizedBox(
+                          ? SizedBox(
                               width: 18,
                               height: 18,
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
-                          : const Icon(Icons.arrow_forward_rounded),
+                          : Icon(Icons.arrow_forward_rounded),
                       label: Text(
                         _isEditing ? 'Salva modifiche' : 'Entra in Sylphy',
                       ),
                     ),
                     if (_isEditing) ...[
-                      const SizedBox(height: 8),
+                      SizedBox(height: 8),
                       TextButton(
-                        key: const ValueKey('cancel-profile-edit'),
+                        key: ValueKey('cancel-profile-edit'),
                         onPressed: _isSaving ? null : widget.onCancelled,
-                        child: const Text('Annulla'),
+                        child: Text('Annulla'),
                       ),
                     ],
-                    const SizedBox(height: 12),
-                    const Text(
+                    SizedBox(height: 12),
+                    Text(
                       'La foto originale rimane locale; se la condivisione è attiva, ai contatti viene pubblicata una copia ridotta e firmata.',
                       textAlign: TextAlign.center,
-                      style: TextStyle(color: Color(0xFF858F9D), fontSize: 12),
+                      style: TextStyle(
+                        color: AppPalette.color(0xFF858F9D),
+                        fontSize: 12,
+                      ),
                     ),
                   ],
                 ),
@@ -248,6 +255,6 @@ Future<Uint8List?> _pickImageFile() async {
     extensions: ['jpg', 'jpeg', 'png', 'webp'],
     mimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
   );
-  final file = await openFile(acceptedTypeGroups: const [imageTypes]);
+  final file = await openFile(acceptedTypeGroups: [imageTypes]);
   return file?.readAsBytes();
 }

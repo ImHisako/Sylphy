@@ -1,5 +1,42 @@
 # Gestione dei gruppi · protocollo v1
 
+## Canali e moderazione (ABI 12)
+
+Il gruppo contiene sempre la chat Generale. Gli amministratori con `change_info`
+possono creare e rinominare fino a 50 canali, con ID stabili e nomi univoci
+ignorando maiuscole/minuscole. I canali ereditano membri, cifratura e permessi
+del gruppo. La capability firmata `group-channels-v1` deve essere presente su
+tutti gli endpoint prima di usare i canali o aggiungere nuovi membri a un gruppo
+che li contiene.
+
+`create_channel` e `rename_channel` sono azioni coordinate dal proprietario.
+`send_channel_text`, `send_channel_attachment` e `mark_channel_read` completano
+il bridge. Il testo ricco e i puntatori degli allegati hanno un `channel_id`
+opzionale: assente significa Generale. Le risposte mantengono il canale
+dell'originale; leggere un canale lascia non letti gli altri. Il log cifrato
+conserva anche la lettura per canale. Snapshot amministrativi e messaggi possono
+arrivare fuori ordine: il contenuto di un canale ancora sconosciuto resta in attesa.
+
+`action_notices` permette a chi ha `manage_permissions` di impostare
+`show_action_notices`, inizialmente attivo. Disattivarlo sopprime i nuovi avvisi
+in chat sui client aggiornati; permessi, cancellazioni e fissaggi sono comunque
+applicati e sincronizzati. La cronologia degli avvisi precedenti resta invariata.
+
+Le richieste delegate equivalenti restano una sola richiesta persistente fino
+allo snapshot o al rifiuto del proprietario. Ripetere una cancellazione già
+applicata non produce un altro avviso. La conferma remota dipende ancora dalla
+raggiungibilità del proprietario; il client distingue lo stato in attesa da una
+modifica applicata e impedisce la ripetizione dal menu del messaggio.
+
+Un membro rimosso non viene reinserito come “Tu” nell'elenco membri. Il
+proprietario rimasto solo può conservare messaggi e allegati nel vault senza
+destinatari di rete; l'assenza di membri non aggira i controlli sui gruppi chiusi
+o sui partecipanti rimossi. Le anteprime delle chat decodificano il testo ricco
+e mostrano autore e azione per le risposte, senza prefissi di protocollo.
+
+Flutter e libreria nativa vanno ricompilati e distribuiti insieme (ABI 12).
+La dipendenza Veilid rimane invariata.
+
 ## Comportamento e compatibilità
 
 L'ABI 11 introduce `group_details`, `group_action`, `join_group`, `search_messages`

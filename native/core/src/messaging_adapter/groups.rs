@@ -140,8 +140,12 @@ impl AdminPermissions {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Management {
+    #[serde(default = "yes")]
+    pub show_action_notices: bool,
+    #[serde(default)]
+    pub channels: Vec<GroupChannel>,
     pub revision: u64,
     pub policy: Policy,
     pub admins: HashMap<String, AdminPermissions>,
@@ -176,6 +180,22 @@ pub struct Management {
     outbound: Vec<PendingDelivery>,
     #[serde(default)]
     pending_effect: Option<Effect>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GroupChannel {
+    pub id: String,
+    pub name: String,
+}
+
+impl Default for Management {
+    fn default() -> Self {
+        serde_json::from_value(json!({
+            "revision": 0, "policy": Policy::default(), "admins": {},
+            "restrictions": {}, "pinned": [], "deleted_messages": [], "closed": false
+        }))
+        .expect("valid default group management")
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -263,6 +283,16 @@ struct JoinLink {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
+    ActionNotices {
+        enabled: bool,
+    },
+    CreateChannel {
+        name: String,
+    },
+    RenameChannel {
+        channel_id: String,
+        name: String,
+    },
     Info {
         name: String,
         description: String,
@@ -342,6 +372,8 @@ struct RichText {
     version: u8,
     text: String,
     reply_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    channel_id: Option<String>,
 }
 
 pub(super) fn new_id() -> String {
@@ -408,6 +440,8 @@ fn authorized(group: &StoredGroup, actor: &str, action: &Action) -> CoreResult<(
     }
     let rights = permissions(group, actor)?;
     let permitted = match action {
+        Action::ActionNotices { .. } => rights.manage_permissions,
+        Action::CreateChannel { .. } | Action::RenameChannel { .. } => rights.change_info,
         Action::Info { .. } => rights.change_info,
         Action::Policy { .. } => rights.manage_permissions,
         Action::AddMembers { .. } => rights.invite_members,
@@ -461,6 +495,18 @@ pub(super) fn validate(group: &StoredGroup) -> CoreResult<()> {
             return Err(CoreError::VerificationFailed);
         }
     }
+    if value.channels.len() > 50 {
+        return Err(CoreError::LimitExceeded);
+    }
+    let mut channel_ids = HashSet::new();
+    let mut channel_names = HashSet::new();
+    for channel in &value.channels {
+        validate_conversation_id(&channel.id)?;
+        validate_display_name(&channel.name)?;
+        if !channel_ids.insert(&channel.id) || !channel_names.insert(channel.name.to_lowercase()) {
+            return Err(CoreError::InvalidInput);
+        }
+    }
     if value.policy.slow_mode_seconds > 3600
         || value.admins.len() > MAX_GROUP_MEMBERS
         || value.restrictions.len() > MAX_GROUP_MEMBERS
@@ -500,6 +546,9 @@ pub(super) fn validate(group: &StoredGroup) -> CoreResult<()> {
 }
 
 pub(super) fn require_updated(group: &StoredGroup) -> CoreResult<()> {
+    if !group.management.channels.is_empty() {
+        require_channels(group)?;
+    }
     for member in &group.members {
         if member.identity.delivery_devices()?.iter().any(|device| {
             !device
@@ -538,17 +587,22 @@ pub fn details(id: &str) -> CoreResult<Value> {
             })
         })
         .collect::<Vec<_>>();
-    members.push(
-        json!({"id": local, "name": "Tu", "is_owner": local == owner,
+    if !group.management.removed {
+        members.push(
+            json!({"id": local, "name": "Tu", "is_owner": local == owner,
         "permissions": group.management.admins.get(&local),
         "is_admin": local == owner || group.management.admins.contains_key(&local),
         "restriction": group.management.restrictions.get(&local)}),
-    );
+        );
+    }
     Ok(
         json!({"id": group.id, "name": group.name, "description": group.description,
         "revision": group.management.revision, "policy": group.management.policy,
         "permissions": permissions(&group, &local)?, "is_owner": local == owner,
         "members": members, "pinned": group.management.pinned,
+        "show_action_notices": group.management.show_action_notices,
+        "channels": group.management.channels,
+        "pending_actions": group.management.requests.iter().filter(|request| request.actor == local).map(|request| &request.action).collect::<Vec<_>>(),
         "closed": group.management.closed || group.management.removed,
         "can_send": can_write(&group)?, "pending_requests": group.management.requests.len(),
         "invite_link": if permissions(&group, &local)?.invite_members {
@@ -713,11 +767,36 @@ fn contains_link(text: &str) -> bool {
             })
         })
 }
+fn already_applied(group: &StoredGroup, action: &Action) -> bool {
+    match action {
+        Action::DeleteMessage { message_id } => {
+            group.management.deleted_messages.contains(message_id)
+        }
+        Action::Pin { message_id, pinned } => {
+            group.management.pinned.contains(message_id) == *pinned
+        }
+        Action::ActionNotices { enabled } => group.management.show_action_notices == *enabled,
+        _ => false,
+    }
+}
+
 pub fn act(id: &str, action: Action) -> CoreResult<Value> {
     let group = current_group(id)?.ok_or(CoreError::InvalidInput)?;
     let local = local_id()?;
     authorized(&group, &local, &action)?;
     require_updated(&group)?;
+    if already_applied(&group, &action) {
+        return Ok(json!({"state": "applied"}));
+    }
+    if group.management.requests.iter().any(|request| {
+        request.actor == local
+            && serde_json::to_value(&request.action).ok() == serde_json::to_value(&action).ok()
+    }) {
+        return Ok(json!({"state": "pending_owner"}));
+    }
+    if group.management.requests.len() >= MAX_CONTROLS {
+        return Err(CoreError::StorageFull);
+    }
     let request = Request {
         id: new_id(),
         actor: local.clone(),
@@ -745,11 +824,12 @@ pub fn act(id: &str, action: Action) -> CoreResult<Value> {
         };
         let control = Control::Request {
             group_id: id.to_owned(),
-            request,
+            request: request.clone(),
         };
         let deliveries = seal_control(&control, std::slice::from_ref(&owner))?;
         let mut group = group;
         group.management.outbound.extend(deliveries);
+        group.management.requests.push(request);
         save(group)?;
         transfer_outbound()?;
         Ok(json!({"state": "pending_owner"}))
@@ -768,7 +848,31 @@ fn apply_request(mut group: StoredGroup, request: &Request) -> CoreResult<()> {
     }
     let mut recipients = group.members.clone();
     let mut private_invite = None;
+    let no_change = already_applied(&group, &request.action);
     let notice = match &request.action {
+        Action::ActionNotices { enabled } => {
+            group.management.show_action_notices = *enabled;
+            "Avvisi delle azioni aggiornati"
+        }
+        Action::CreateChannel { name } => {
+            require_channels(&group)?;
+            group.management.channels.push(GroupChannel {
+                id: new_id(),
+                name: validate_display_name(name)?,
+            });
+            "Un canale è stato creato"
+        }
+        Action::RenameChannel { channel_id, name } => {
+            require_channels(&group)?;
+            let channel = group
+                .management
+                .channels
+                .iter_mut()
+                .find(|channel| channel.id == *channel_id)
+                .ok_or(CoreError::InvalidInput)?;
+            channel.name = validate_display_name(name)?;
+            "Un canale è stato rinominato"
+        }
         Action::Info { name, description } => {
             group.name = validate_display_name(name)?;
             group.description = description.trim().to_owned();
@@ -823,6 +927,7 @@ fn apply_request(mut group: StoredGroup, request: &Request) -> CoreResult<()> {
             group.members.retain(|member| member.id != *member_id);
             group.management.admins.remove(member_id);
             group.management.restrictions.remove(member_id);
+            group.management.departed.insert(member_id.clone());
             "Un membro è stato rimosso dal gruppo"
         }
         Action::SetAdmin {
@@ -925,6 +1030,7 @@ fn apply_request(mut group: StoredGroup, request: &Request) -> CoreResult<()> {
         }
     }
     .to_owned();
+    let notice = if no_change { String::new() } else { notice };
     group.management.revision = group
         .management
         .revision
@@ -1483,6 +1589,10 @@ fn receive_control(control: Control, sender: &PublishedIdentity) -> CoreResult<b
                 return Err(CoreError::GroupPermissionDenied);
             }
             validate_conversation_id(&request_id)?;
+            group
+                .management
+                .requests
+                .retain(|request| request.id != request_id);
             group.management.pending_effect = Some(Effect {
                 notice: "La richiesta di modifica del gruppo è stata rifiutata".to_owned(),
                 event_id: request_id,
@@ -1598,6 +1708,14 @@ fn receive_control(control: Control, sender: &PublishedIdentity) -> CoreResult<b
                 group
                     .members
                     .retain(|member| !group.management.departed.contains(&member.id));
+                group.management.requests = existing
+                    .management
+                    .requests
+                    .into_iter()
+                    .filter(|request| {
+                        request.id != event_id && !already_applied(&group, &request.action)
+                    })
+                    .collect();
                 group.management.outbound = existing.management.outbound;
                 group.management.shared_invite = existing.management.shared_invite;
             }
@@ -1660,7 +1778,9 @@ fn apply_local_effects(
         )?;
         store.outbox = outbox;
     }
-    if !group.management.closed
+    if group.management.show_action_notices
+        && !notice.is_empty()
+        && !group.management.closed
         && !group.management.left
         && !store.messages.iter().any(|message| message.id == event_id)
     {
@@ -1696,7 +1816,18 @@ fn apply_local_effects(
 }
 
 pub(super) fn encode_text(text: &str, reply_to: Option<&str>) -> CoreResult<String> {
+    encode_channel_text(text, reply_to, None)
+}
+
+pub(super) fn encode_channel_text(
+    text: &str,
+    reply_to: Option<&str>,
+    channel_id: Option<&str>,
+) -> CoreResult<String> {
     if let Some(id) = reply_to {
+        validate_conversation_id(id)?;
+    }
+    if let Some(id) = channel_id {
         validate_conversation_id(id)?;
     }
     Ok(format!(
@@ -1705,7 +1836,8 @@ pub(super) fn encode_text(text: &str, reply_to: Option<&str>) -> CoreResult<Stri
             serde_json::to_vec(&RichText {
                 version: 1,
                 text: text.to_owned(),
-                reply_to: reply_to.map(str::to_owned)
+                reply_to: reply_to.map(str::to_owned),
+                channel_id: channel_id.map(str::to_owned)
             })
             .map_err(|_| CoreError::Internal)?
         )
@@ -1713,8 +1845,13 @@ pub(super) fn encode_text(text: &str, reply_to: Option<&str>) -> CoreResult<Stri
 }
 
 pub(super) fn text_metadata(body: &str) -> CoreResult<(String, Option<String>)> {
+    let (text, reply, _) = rich_metadata(body)?;
+    Ok((text, reply))
+}
+
+pub(super) fn rich_metadata(body: &str) -> CoreResult<(String, Option<String>, Option<String>)> {
     let Some(encoded) = body.strip_prefix(RICH) else {
-        return Ok((body.to_owned(), None));
+        return Ok((body.to_owned(), None, None));
     };
     if encoded.len() > MAX_MESSAGE_BODY_BYTES {
         return Err(CoreError::LimitExceeded);
@@ -1731,7 +1868,66 @@ pub(super) fn text_metadata(body: &str) -> CoreResult<(String, Option<String>)> 
     if let Some(id) = &rich.reply_to {
         validate_conversation_id(id)?;
     }
-    Ok((rich.text, rich.reply_to))
+    if let Some(id) = &rich.channel_id {
+        validate_conversation_id(id)?;
+    }
+    Ok((rich.text, rich.reply_to, rich.channel_id))
+}
+
+fn require_channels(group: &StoredGroup) -> CoreResult<()> {
+    for member in &group.members {
+        if member.identity.delivery_devices()?.iter().any(|device| {
+            !device
+                .bundle
+                .capabilities
+                .iter()
+                .any(|capability| capability == "group-channels-v1")
+        }) {
+            return Err(CoreError::UnsupportedVersion);
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn enforce_channel(group: &StoredGroup, channel_id: Option<&str>) -> CoreResult<()> {
+    if let Some(id) = channel_id {
+        if !group
+            .management
+            .channels
+            .iter()
+            .any(|channel| channel.id == id)
+        {
+            return Err(CoreError::InvalidInput);
+        }
+    }
+    Ok(())
+}
+
+pub fn send_channel_text(
+    id: &str,
+    text: &str,
+    channel_id: &str,
+    reply_to: Option<&str>,
+) -> CoreResult<Value> {
+    let group = current_group(id)?.ok_or(CoreError::InvalidInput)?;
+    enforce_channel(&group, Some(channel_id))?;
+    require_channels(&group)?;
+    if text.trim().is_empty() {
+        return Err(CoreError::InvalidInput);
+    }
+    if let Some(reply) = reply_to {
+        let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+        ensure_messages_loaded(&mut store)?;
+        let original = store
+            .messages
+            .iter()
+            .find(|message| message.conversation_id == id && message.id == reply)
+            .ok_or(CoreError::InvalidInput)?;
+        if rich_metadata(&original.body)?.2.as_deref() != Some(channel_id) {
+            return Err(CoreError::InvalidInput);
+        }
+    }
+    send_text(id, &encode_channel_text(text, reply_to, Some(channel_id))?)
 }
 
 pub fn search(id: &str, query: &str, offset: usize) -> CoreResult<Value> {

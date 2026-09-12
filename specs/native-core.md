@@ -2,13 +2,13 @@
 
 ## ABI
 
-Il confine Flutter/Rust è una singola ABI C JSON, attualmente alla versione 11. Le richieste sono UTF-8; le risposte di stato non riportano password, chiavi, plaintext o diagnostica crittografica. I comandi messaging possono restituire soltanto read model già autenticati e decrittati dal core. Ogni stringa restituita viene liberata esclusivamente tramite `sylphy_core_free_string`.
+Il confine Flutter/Rust è una singola ABI C JSON, attualmente alla versione 12. Le richieste sono UTF-8; le risposte di stato non riportano password, chiavi, plaintext o diagnostica crittografica. I comandi messaging possono restituire soltanto read model già autenticati e decrittati dal core. Ogni stringa restituita viene liberata esclusivamente tramite `sylphy_core_free_string`.
 
 `ensure_identity` crea o riapre un record Argon2id/XChaCha20-Poly1305 contenente la chiave Ed25519 stabile, la prekey privata X25519 e il seed ML-KEM-768. Le prekey pubbliche sono firmate e ruotate alla scadenza, mentre il fingerprint Ed25519 rimane stabile. Il boundary restituisce esclusivamente fingerprint, scadenza e invito pubblico `sylphy:`; il segreto del vault è device-bound e proviene dal secure storage della piattaforma.
 
 ## Verifica del bundle Android
 
-`native/build-android.ps1` registra ABI 11 e hash SHA-256 in `sylphy-core.properties`.
+`native/build-android.ps1` registra ABI 12 e hash SHA-256 in `sylphy-core.properties`.
 Prima del packaging, `verifySylphyNativeCore` verifica ABI, sorgenti e librerie per
 le tre architetture Android. Entrambi i passaggi calcolano l'impronta su `Cargo.toml`,
 `Cargo.lock` e i file `src/**/*.rs`, ordinati con confronto ordinale case-sensitive

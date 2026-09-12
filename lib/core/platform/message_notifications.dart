@@ -43,11 +43,43 @@ class MessageNotifications {
     }
   }
 
-  Future<void> showIncomingMessage({bool pinned = false}) async {
+  Future<void> clearConversation(String conversationId) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod<void>('clearConversationNotification', {
+        'conversation_id': conversationId,
+      });
+    } on Object catch (error) {
+      AppLog.instance.recordError(
+        category: 'notifications',
+        action: 'clear_failed',
+        error: error,
+      );
+    }
+  }
+
+  Future<void> clearSummaryIfRead({required bool hasUnreadMessages}) async {
+    if (!Platform.isAndroid || hasUnreadMessages) return;
+    try {
+      await _channel.invokeMethod<void>('clearMessageSummary');
+    } on Object catch (error) {
+      AppLog.instance.recordError(
+        category: 'notifications',
+        action: 'summary_clear_failed',
+        error: error,
+      );
+    }
+  }
+
+  Future<void> showIncomingMessage({
+    bool pinned = false,
+    required String conversationId,
+  }) async {
     if (!Platform.isAndroid) return;
     try {
       await _channel.invokeMethod<void>('showMessageNotification', {
         'pinned': pinned,
+        'conversation_id': conversationId,
       });
     } on Object catch (error) {
       AppLog.instance.recordError(

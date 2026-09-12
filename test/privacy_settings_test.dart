@@ -6,6 +6,45 @@ import 'package:sylphy/core/privacy/privacy_settings.dart';
 import 'package:sylphy/core/profile/user_profile.dart';
 
 void main() {
+  test('keyboard and theme preferences survive encrypted reload', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'sylphy-appearance-',
+    );
+    addTearDown(() => directory.delete(recursive: true));
+    final settings = PrivacySettingsController(
+      cipher: const _TestCipher(),
+      supportDirectory: () async => directory,
+    );
+    await settings.load();
+    await settings.update(
+      settings.value.copyWith(
+        incognitoKeyboard: true,
+        themeName: 'pink',
+        sendReadReceipts: false,
+      ),
+    );
+    final restored = PrivacySettingsController(
+      cipher: const _TestCipher(),
+      supportDirectory: () async => directory,
+    );
+    await restored.load();
+    expect(restored.value.incognitoKeyboard, isTrue);
+    expect(restored.value.themeName, 'pink');
+    expect(restored.value.sendReadReceipts, isFalse);
+    expect(restored.value.showReadReceipts, isTrue);
+  });
+
+  test(
+    'legacy hidden checkmarks migrate to disabled outgoing read receipts',
+    () {
+      final settings = PrivacySettings.fromJson({
+        'version': 2,
+        'show_read_receipts': false,
+        'send_read_receipts': true,
+      });
+      expect(settings.sendReadReceipts, isFalse);
+    },
+  );
   test('accepts the first authenticated contact request by default', () {
     expect(const PrivacySettings().allowUnknownContacts, isTrue);
   });

@@ -1,17 +1,195 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sylphy/core/diagnostics/app_log.dart';
 import 'package:sylphy/core/messaging/models.dart';
 import 'package:sylphy/core/messaging/secure_messaging_bridge.dart';
 import 'package:sylphy/core/profile/user_profile.dart';
 import 'package:sylphy/core/platform/message_notifications.dart';
+import 'package:sylphy/core/privacy/privacy_settings.dart';
 import 'package:sylphy/main.dart';
 import 'package:sylphy/features/messenger/message_text.dart';
 
 void main() {
+  testWidgets(
+    'themes keep chat readable and incognito disables keyboard learning',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1440, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final directory = Directory.systemTemp.createTempSync(
+        'sylphy-theme-widget-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      late PrivacySettingsController privacy;
+      await tester.runAsync(() async {
+        privacy = PrivacySettingsController(
+          cipher: _WidgetPrivacyCipher(),
+          supportDirectory: () async => directory,
+        );
+        await privacy.load();
+        await privacy.update(privacy.value.copyWith(incognitoKeyboard: true));
+      });
+      final bridge = _TestMessagingBridge()
+        ..injectIncoming('Un messaggio privato, in ogni tema.');
+      await bridge.sendText(
+        conversationId: 'test-contact',
+        plaintext: 'Risposta di prova',
+      );
+      final boundaryKey = GlobalKey();
+      await tester.pumpWidget(
+        RepaintBoundary(
+          key: boundaryKey,
+          child: SylphyApp(
+            bridge: bridge,
+            profileStore: _completedProfileStore(),
+            privacySettings: privacy,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      for (final name in [
+        'sylphy',
+        'black',
+        'cyan',
+        'pink',
+        'amoled',
+        'white',
+      ]) {
+        await tester.runAsync(
+          () => privacy.update(privacy.value.copyWith(themeName: name)),
+        );
+        await tester.pumpAndSettle();
+        final field = tester.widget<TextField>(
+          find.byKey(const ValueKey('message-composer')),
+        );
+        expect(field.enableIMEPersonalizedLearning, isFalse);
+        final theme = Theme.of(
+          tester.element(find.byKey(const ValueKey('message-composer'))),
+        );
+        expect(
+          theme.brightness,
+          name == 'white' ? Brightness.light : Brightness.dark,
+        );
+        final light = theme.colorScheme.onSurface.computeLuminance();
+        final dark = theme.colorScheme.surface.computeLuminance();
+        expect(
+          ((light > dark ? light : dark) + .05) /
+              ((light > dark ? dark : light) + .05),
+          greaterThan(4.5),
+        );
+        expect(tester.takeException(), isNull);
+        if (const bool.fromEnvironment('SAVE_THEME_PREVIEWS')) {
+          final boundary =
+              boundaryKey.currentContext!.findRenderObject()!
+                  as RenderRepaintBoundary;
+          await tester.runAsync(() async {
+            final image = await boundary.toImage();
+            final bytes = await image.toByteData(
+              format: ui.ImageByteFormat.png,
+            );
+            await File(
+              'diagnostics/theme-$name.png',
+            ).writeAsBytes(bytes!.buffer.asUint8List());
+            image.dispose();
+          });
+        }
+      }
+    },
+  );
+
+  testWidgets('desktop details close and reopen from the chat header', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1440, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      SylphyApp(
+        bridge: _TestMessagingBridge(),
+        profileStore: _completedProfileStore(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('DETTAGLI'), findsOneWidget);
+    await tester.tap(find.byTooltip('Chiudi dettagli'));
+    await tester.pumpAndSettle();
+    expect(find.text('DETTAGLI'), findsNothing);
+    await tester.tap(find.byTooltip('Apri o chiudi dettagli'));
+    await tester.pumpAndSettle();
+    expect(find.text('DETTAGLI'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('private chat header opens and closes the other profile', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(430, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      SylphyApp(
+        bridge: _TestMessagingBridge(),
+        profileStore: _completedProfileStore(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Contatto di test'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Contatto di test'));
+    await tester.pumpAndSettle();
+    expect(find.text('Fingerprint'), findsOneWidget);
+    await tester.tap(find.byTooltip('Chiudi profilo'));
+    await tester.pumpAndSettle();
+    expect(find.text('Fingerprint'), findsNothing);
+    expect(find.byKey(const ValueKey('message-composer')), findsOneWidget);
+  });
+
+  testWidgets(
+    'channels filter messages and send replies to the selected channel',
+    (tester) async {
+      final bridge = _ChannelTestBridge();
+      await tester.pumpWidget(
+        SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Contatto di test'));
+      await tester.pumpAndSettle();
+      expect(find.text('Messaggio generale'), findsOneWidget);
+      expect(find.text('Messaggio sviluppo'), findsNothing);
+      await tester.tap(find.text('# Sviluppo'));
+      await tester.pumpAndSettle();
+      expect(find.text('Messaggio sviluppo'), findsOneWidget);
+      expect(find.text('Messaggio generale'), findsNothing);
+      expect(bridge.readChannels.last, 'development');
+      await tester.longPress(find.text('Messaggio sviluppo'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Rispondi'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('message-composer')),
+        'Risposta nel canale',
+      );
+      await tester.tap(find.byKey(const ValueKey('send-message')));
+      await tester.pumpAndSettle();
+      expect(bridge.sentChannel, 'development');
+      expect(bridge.sentReply, 'channel-message');
+      expect(find.text('Risposta nel canale'), findsOneWidget);
+      final details = await bridge.groupDetails('test-contact');
+      details['pinned'] = ['channel-message'];
+      details['can_send'] = false;
+      bridge.inboxChanges.value++;
+      await tester.pumpAndSettle();
+      expect(find.text('Fissato'), findsOneWidget);
+      expect(find.byKey(const ValueKey('message-composer')), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+      bridge.inboxChanges.dispose();
+    },
+  );
+
   testWidgets('tapping a mention opens the matching group member', (
     tester,
   ) async {
@@ -859,6 +1037,83 @@ class _MenuMessagingBridge extends _TestMessagingBridge
   ) async {}
   @override
   Future<String> joinGroup(String invitationCode) async => 'test-contact';
+}
+
+class _ChannelTestBridge extends _MenuMessagingBridge
+    implements GroupChannelBridge, InboxRevisionNotifications {
+  @override
+  final ValueNotifier<int> inboxChanges = ValueNotifier(0);
+  _ChannelTestBridge() {
+    details.complete({
+      'channels': [
+        {'id': 'development', 'name': 'Sviluppo'},
+      ],
+      'permissions': {},
+      'members': [],
+    });
+    _messages.addAll([
+      ChatMessage(
+        id: 'general-message',
+        authorId: 'test-contact',
+        body: 'Messaggio generale',
+        sentAt: DateTime(2026),
+        isOutgoing: false,
+      ),
+      ChatMessage(
+        id: 'channel-message',
+        authorId: 'test-contact',
+        body: 'Messaggio sviluppo',
+        sentAt: DateTime(2026),
+        isOutgoing: false,
+        channelId: 'development',
+      ),
+    ]);
+  }
+  final readChannels = <String?>[];
+  String? sentChannel;
+  String? sentReply;
+  @override
+  Future<bool> markChannelRead(String conversationId, String? channelId) async {
+    readChannels.add(channelId);
+    return true;
+  }
+
+  @override
+  Future<void> sendChannelText(
+    String conversationId,
+    String channelId,
+    String text, {
+    String? replyTo,
+  }) async {
+    sentChannel = channelId;
+    sentReply = replyTo;
+    _messages.add(
+      ChatMessage(
+        id: 'channel-reply',
+        authorId: 'me',
+        body: text,
+        sentAt: DateTime(2026, 2),
+        isOutgoing: true,
+        channelId: channelId,
+        replyTo: replyTo,
+      ),
+    );
+  }
+
+  @override
+  Future<void> sendChannelAttachment(
+    String conversationId,
+    String channelId,
+    String fileName,
+    List<int> bytes,
+  ) async {}
+}
+
+class _WidgetPrivacyCipher implements LocalDataCipher {
+  @override
+  Future<Uint8List> open(Uint8List record) async => record;
+  @override
+  Future<Uint8List> protect(Uint8List plaintext) async => plaintext;
 }
 
 class _TestMessagingBridge

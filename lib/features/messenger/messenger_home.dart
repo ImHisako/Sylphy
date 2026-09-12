@@ -1,3 +1,4 @@
+import '../../core/privacy/app_palette.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -72,7 +73,7 @@ class _MessengerHomeState extends State<MessengerHome>
     widget.identityService.addListener(_onIdentityChanged);
     final cachedBridge = widget.bridge;
     if (cachedBridge is CachedMessagingBridge) {
-      _conversations = cachedBridge.cachedConversations ?? const [];
+      _conversations = cachedBridge.cachedConversations ?? [];
       _isLoadingConversations = cachedBridge.cachedConversations == null;
     } else {
       _conversations = _readConversations();
@@ -89,10 +90,7 @@ class _MessengerHomeState extends State<MessengerHome>
     if (bridge is InboxRefreshingBridge) {
       _lastInboxRevision = (bridge as InboxRefreshingBridge).inboxRevision;
     }
-    _inboxTimer = Timer.periodic(
-      const Duration(seconds: 3),
-      (_) => _refreshInbox(),
-    );
+    _inboxTimer = Timer.periodic(Duration(seconds: 3), (_) => _refreshInbox());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) unawaited(_initialRefresh());
     });
@@ -204,7 +202,7 @@ class _MessengerHomeState extends State<MessengerHome>
             (bridge as InboxStorageStatus).inboxStorageFull;
         if (mounted && storageFull && !_storageWarningShown) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
+            SnackBar(
               content: Text(
                 'Archivio dei messaggi pieno. Libera spazio per riprendere la ricezione; i messaggi in attesa non sono stati scartati.',
               ),
@@ -259,15 +257,34 @@ class _MessengerHomeState extends State<MessengerHome>
           ),
     );
     if (hasNewMessage || newPin) {
-      unawaited(
-        const MessageNotifications().showIncomingMessage(pinned: newPin),
-      );
+      for (final conversation in conversations) {
+        final pin = conversation.pinnedMessageIds.any(
+          (id) => !_conversations
+              .where((old) => old.id == conversation.id)
+              .any((old) => old.pinnedMessageIds.contains(id)),
+        );
+        if (!MessageNotifications.isConversationVisible(conversation.id) &&
+            (conversation.unreadCount > (_unreadCounts[conversation.id] ?? 0) ||
+                pin)) {
+          unawaited(
+            const MessageNotifications().showIncomingMessage(
+              pinned: pin,
+              conversationId: conversation.id,
+            ),
+          );
+        }
+      }
     }
+    unawaited(
+      const MessageNotifications().clearSummaryIfRead(
+        hasUnreadMessages: conversations.any(
+          (conversation) => conversation.unreadCount > 0,
+        ),
+      ),
+    );
     if (newPin && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Un messaggio è stato fissato in un gruppo.'),
-        ),
+        SnackBar(content: Text('Un messaggio è stato fissato in un gruppo.')),
       );
     }
     setState(() {
@@ -295,6 +312,8 @@ class _MessengerHomeState extends State<MessengerHome>
     super.dispose();
   }
 
+  bool _detailsVisible = true;
+
   Future<void> _selectConversation(String conversationId) async {
     AppLog.instance.record(
       category: 'messenger',
@@ -304,12 +323,18 @@ class _MessengerHomeState extends State<MessengerHome>
     if (mounted && _activeConversationId != conversationId) {
       setState(() => _activeConversationId = conversationId);
     }
-    unawaited(_markConversationRead(conversationId));
+    if (!(widget.bridge is GroupChannelBridge &&
+        _conversations.any(
+          (item) => item.id == conversationId && item.isGroup,
+        ))) {
+      unawaited(_markConversationRead(conversationId));
+    }
   }
 
   Future<void> _markConversationRead(String conversationId) async {
     try {
       await widget.bridge.markConversationRead(conversationId);
+      await const MessageNotifications().clearConversation(conversationId);
     } on Object catch (error) {
       // A newly imported contact has no authenticated session yet, but its
       // safety details must remain inspectable from the UI.
@@ -330,7 +355,7 @@ class _MessengerHomeState extends State<MessengerHome>
     );
     final draft = await showDialog<_ContactDraft>(
       context: context,
-      builder: (context) => const _AddContactDialog(),
+      builder: (context) => _AddContactDialog(),
     );
     if (draft == null || !mounted) {
       return;
@@ -390,7 +415,7 @@ class _MessengerHomeState extends State<MessengerHome>
   Future<void> _createGroup() async {
     final draft = await showDialog<_GroupDraft>(
       context: context,
-      builder: (context) => const _CreateGroupDialog(),
+      builder: (context) => _CreateGroupDialog(),
     );
     if (draft == null || !mounted) return;
     try {
@@ -403,7 +428,7 @@ class _MessengerHomeState extends State<MessengerHome>
         if (mounted) {
           setState(() => _activeConversationId = id);
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
+            SnackBar(
               content: Text(
                 'Richiesta di ingresso inviata. Attendi che il proprietario sia online.',
               ),
@@ -413,7 +438,7 @@ class _MessengerHomeState extends State<MessengerHome>
         return;
       }
       if (capability is! GroupMessagingBridge) {
-        throw const SecureMessagingException('unsupported');
+        throw SecureMessagingException('unsupported');
       }
       final groupBridge = capability as GroupMessagingBridge;
       final id = await groupBridge.createGroup(
@@ -467,7 +492,7 @@ class _MessengerHomeState extends State<MessengerHome>
     );
     Navigator.of(context).push<void>(
       MaterialPageRoute(
-        settings: const RouteSettings(name: '/settings'),
+        settings: RouteSettings(name: '/settings'),
         builder: (context) => SettingsPage(
           nativeCore: widget.nativeCore,
           veilidService: widget.veilidService,
@@ -482,7 +507,7 @@ class _MessengerHomeState extends State<MessengerHome>
   @override
   Widget build(BuildContext context) {
     if (_isLoadingConversations && _conversations.isEmpty) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return Scaffold(body: Center(child: CircularProgressIndicator()));
     }
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -512,7 +537,10 @@ class _MessengerHomeState extends State<MessengerHome>
             onProfilePressed: _openProfile,
             onSettingsPressed: _openSettings,
             privacySettings: widget.privacySettings,
-            showDetails: constraints.maxWidth >= 1180,
+            showDetails: constraints.maxWidth >= 1180 && _detailsVisible,
+            canShowDetails: constraints.maxWidth >= 1180,
+            onToggleDetails: () =>
+                setState(() => _detailsVisible = !_detailsVisible),
           );
         }
         return _MobileConversationList(
@@ -550,6 +578,8 @@ class _DesktopMessenger extends StatelessWidget {
     required this.onSettingsPressed,
     required this.privacySettings,
     required this.showDetails,
+    required this.canShowDetails,
+    required this.onToggleDetails,
   });
 
   final SecureMessagingBridge bridge;
@@ -566,6 +596,8 @@ class _DesktopMessenger extends StatelessWidget {
   final VoidCallback onSettingsPressed;
   final PrivacySettingsController privacySettings;
   final bool showDetails;
+  final bool canShowDetails;
+  final VoidCallback onToggleDetails;
 
   @override
   Widget build(BuildContext context) {
@@ -591,7 +623,7 @@ class _DesktopMessenger extends StatelessWidget {
               ),
               onSettingsPressed: onSettingsPressed,
             ),
-            const VerticalDivider(width: 1),
+            VerticalDivider(width: 1),
             SizedBox(
               width: 328,
               child: _ConversationSidebar(
@@ -602,7 +634,7 @@ class _DesktopMessenger extends StatelessWidget {
                 onAddContact: onAddContact,
               ),
             ),
-            const VerticalDivider(width: 1),
+            VerticalDivider(width: 1),
             Expanded(
               child: activeConversation == null
                   ? _EmptyInbox(
@@ -614,15 +646,17 @@ class _DesktopMessenger extends StatelessWidget {
                       conversation: activeConversation!,
                       onChanged: onChanged,
                       showHeader: true,
+                      onToggleDetails: canShowDetails ? onToggleDetails : null,
                       privacySettings: privacySettings,
                     ),
             ),
             if (showDetails && activeConversation != null) ...[
-              const VerticalDivider(width: 1),
+              VerticalDivider(width: 1),
               SizedBox(
                 width: 292,
                 child: _ConversationDetails(
                   conversation: activeConversation!,
+                  onClose: onToggleDetails,
                   veilidSnapshot: veilidService.snapshot,
                 ),
               ),
@@ -663,21 +697,21 @@ class _EmptyInbox extends StatelessWidget {
             color: _networkColor(snapshot.phase),
           ),
         ),
-        const SizedBox(height: 18),
-        const Text(
+        SizedBox(height: 18),
+        Text(
           'Nessuna conversazione sicura',
           textAlign: TextAlign.center,
           style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
         ),
-        const SizedBox(height: 8),
+        SizedBox(height: 8),
         Text(
           hasNativeCore
               ? 'Il bridge nativo è attivo. Le conversazioni appariranno solo dopo la creazione del vault e la verifica di un contatto.'
               : 'Installa il core nativo per creare un’identità e collegarti alla rete Veilid.',
           textAlign: TextAlign.center,
-          style: const TextStyle(color: Color(0xFFAEB7C3), height: 1.4),
+          style: TextStyle(color: AppPalette.color(0xFFAEB7C3), height: 1.4),
         ),
-        const SizedBox(height: 12),
+        SizedBox(height: 12),
         Text(
           snapshot.title,
           textAlign: TextAlign.center,
@@ -693,23 +727,23 @@ class _EmptyInbox extends StatelessWidget {
     if (compact) {
       return Card(
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+          padding: EdgeInsets.symmetric(horizontal: 24, vertical: 32),
           child: content,
         ),
       );
     }
     return DecoratedBox(
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [Color(0xFF11151B), Color(0xFF0C0F14)],
+          colors: [AppPalette.color(0xFF11151B), AppPalette.color(0xFF0C0F14)],
         ),
       ),
       child: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 460),
-          child: Padding(padding: const EdgeInsets.all(32), child: content),
+          constraints: BoxConstraints(maxWidth: 460),
+          child: Padding(padding: EdgeInsets.all(32), child: content),
         ),
       ),
     );
@@ -741,11 +775,11 @@ class _DesktopAppRail extends StatelessWidget {
   Widget build(BuildContext context) {
     final networkColor = _networkColor(snapshot.phase);
     return ColoredBox(
-      color: const Color(0xFF090C11),
+      color: AppPalette.color(0xFF090C11),
       child: SizedBox(
         width: 72,
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 18),
+          padding: EdgeInsets.symmetric(vertical: 18),
           child: Column(
             children: [
               Container(
@@ -768,8 +802,8 @@ class _DesktopAppRail extends StatelessWidget {
                   color: Theme.of(context).colorScheme.onPrimary,
                 ),
               ),
-              const SizedBox(height: 30),
-              const _RailButton(
+              SizedBox(height: 30),
+              _RailButton(
                 icon: Icons.forum_rounded,
                 tooltip: 'Conversazioni',
                 selected: true,
@@ -785,12 +819,12 @@ class _DesktopAppRail extends StatelessWidget {
                 onPressed: onCreateGroup,
               ),
               _RailButton(
-                key: const ValueKey('open-encrypted-files'),
+                key: ValueKey('open-encrypted-files'),
                 icon: Icons.folder_copy_outlined,
                 tooltip: 'File cifrati',
                 onPressed: onFilesPressed,
               ),
-              const Spacer(),
+              Spacer(),
               Tooltip(
                 message: snapshot.detail,
                 child: Container(
@@ -800,7 +834,7 @@ class _DesktopAppRail extends StatelessWidget {
                     color: networkColor,
                     shape: BoxShape.circle,
                     border: Border.all(
-                      color: const Color(0xFF090C11),
+                      color: AppPalette.color(0xFF090C11),
                       width: 2,
                     ),
                     boxShadow: [
@@ -812,19 +846,19 @@ class _DesktopAppRail extends StatelessWidget {
                   ),
                 ),
               ),
-              const SizedBox(height: 14),
+              SizedBox(height: 14),
               _RailButton(
                 icon: Icons.shield_outlined,
                 tooltip: 'Privacy e rete',
                 onPressed: onPrivacyPressed,
               ),
               _RailButton(
-                key: const ValueKey('open-settings'),
+                key: ValueKey('open-settings'),
                 icon: Icons.settings_outlined,
                 tooltip: 'Impostazioni',
                 onPressed: onSettingsPressed,
               ),
-              const SizedBox(height: 8),
+              SizedBox(height: 8),
               _ProfileAvatar(
                 profile: profile,
                 radius: 18,
@@ -855,7 +889,7 @@ class _RailButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+      padding: EdgeInsets.only(bottom: 8),
       child: IconButton(
         tooltip: tooltip,
         onPressed: onPressed ?? () {},
@@ -865,7 +899,7 @@ class _RailButton extends StatelessWidget {
               : Colors.transparent,
           foregroundColor: selected
               ? Theme.of(context).colorScheme.primary
-              : const Color(0xFF8C96A5),
+              : AppPalette.color(0xFF8C96A5),
         ),
         icon: Icon(icon),
       ),
@@ -906,65 +940,68 @@ class _ConversationSidebarState extends State<_ConversationSidebar> {
         )
         .toList();
     return ColoredBox(
-      color: const Color(0xFF15181E),
+      color: AppPalette.color(0xFF15181E),
       child: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(24, 18, 12, 12),
+            padding: EdgeInsets.fromLTRB(24, 18, 12, 12),
             child: Row(
               children: [
-                const Expanded(child: _BrandMark()),
+                Expanded(child: _BrandMark()),
                 IconButton(
-                  key: const ValueKey('desktop-add-contact'),
+                  key: ValueKey('desktop-add-contact'),
                   tooltip: 'Aggiungi contatto',
                   onPressed: widget.onAddContact,
-                  icon: const Icon(Icons.person_add_alt_1_rounded),
+                  icon: Icon(Icons.person_add_alt_1_rounded),
                 ),
               ],
             ),
           ),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
+            padding: EdgeInsets.symmetric(horizontal: 16),
             child: TextField(
               onChanged: (value) => setState(() => _query = value),
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 hintText: 'Cerca conversazioni',
                 prefixIcon: Icon(Icons.search_rounded),
                 contentPadding: EdgeInsets.symmetric(vertical: 13),
               ),
             ),
           ),
-          const Padding(
+          Padding(
             padding: EdgeInsets.fromLTRB(24, 24, 24, 10),
             child: Row(
               children: [
                 Text(
                   'CONVERSAZIONI',
                   style: TextStyle(
-                    color: Color(0xFF9299A5),
+                    color: AppPalette.color(0xFF9299A5),
                     fontSize: 11,
                     fontWeight: FontWeight.w800,
                     letterSpacing: 1.2,
                   ),
                 ),
                 Spacer(),
-                Icon(Icons.tune_rounded, size: 18, color: Color(0xFF9299A5)),
+                Icon(
+                  Icons.tune_rounded,
+                  size: 18,
+                  color: AppPalette.color(0xFF9299A5),
+                ),
               ],
             ),
           ),
           Expanded(
             child: conversations.isEmpty
-                ? const Center(
+                ? Center(
                     child: Text(
                       'Nessuna conversazione trovata',
-                      style: TextStyle(color: Color(0xFF9299A5)),
+                      style: TextStyle(color: AppPalette.color(0xFF9299A5)),
                     ),
                   )
                 : ListView.separated(
-                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    padding: EdgeInsets.symmetric(horizontal: 10),
                     itemCount: conversations.length,
-                    separatorBuilder: (context, index) =>
-                        const SizedBox(height: 4),
+                    separatorBuilder: (context, index) => SizedBox(height: 4),
                     itemBuilder: (context, index) {
                       final conversation = conversations[index];
                       return _ConversationTile(
@@ -978,7 +1015,7 @@ class _ConversationSidebarState extends State<_ConversationSidebar> {
                   ),
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
+            padding: EdgeInsets.fromLTRB(16, 8, 16, 20),
             child: _VaultStatusCard(veilidSnapshot: widget.veilidSnapshot),
           ),
         ],
@@ -1020,25 +1057,25 @@ class _MobileConversationList extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const _BrandMark(compact: true),
+        title: _BrandMark(compact: true),
         actions: [
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8),
+            padding: EdgeInsets.symmetric(vertical: 8),
             child: _ProfileAvatar(
               profile: profile,
               radius: 18,
               onPressed: onProfilePressed,
             ),
           ),
-          const SizedBox(width: 4),
+          SizedBox(width: 4),
           IconButton(
             tooltip: 'Stato protezione',
             onPressed: () =>
                 _showPrivacyOverview(context, nativeCore, veilidService),
-            icon: const Icon(Icons.shield_outlined),
+            icon: Icon(Icons.shield_outlined),
           ),
           IconButton(
-            key: const ValueKey('open-encrypted-files'),
+            key: ValueKey('open-encrypted-files'),
             tooltip: 'File cifrati',
             onPressed: () => Navigator.of(context).push<void>(
               MaterialPageRoute(
@@ -1048,23 +1085,23 @@ class _MobileConversationList extends StatelessWidget {
                 ),
               ),
             ),
-            icon: const Icon(Icons.folder_copy_outlined),
+            icon: Icon(Icons.folder_copy_outlined),
           ),
           IconButton(
-            key: const ValueKey('open-settings'),
+            key: ValueKey('open-settings'),
             tooltip: 'Impostazioni',
             onPressed: onSettingsPressed,
-            icon: const Icon(Icons.settings_outlined),
+            icon: Icon(Icons.settings_outlined),
           ),
-          const SizedBox(width: 4),
+          SizedBox(width: 4),
         ],
       ),
       body: SafeArea(
         top: false,
         child: ListView.separated(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
+          padding: EdgeInsets.fromLTRB(16, 8, 16, 100),
           itemCount: conversations.isEmpty ? 3 : conversations.length + 2,
-          separatorBuilder: (context, index) => const SizedBox(height: 8),
+          separatorBuilder: (context, index) => SizedBox(height: 8),
           itemBuilder: (context, index) {
             if (index == 0) {
               return _MobileNetworkStatus(
@@ -1073,12 +1110,12 @@ class _MobileConversationList extends StatelessWidget {
               );
             }
             if (index == 1) {
-              return const Padding(
+              return Padding(
                 padding: EdgeInsets.fromLTRB(4, 14, 4, 4),
                 child: Text(
                   'CONVERSAZIONI',
                   style: TextStyle(
-                    color: Color(0xFF9299A5),
+                    color: AppPalette.color(0xFF9299A5),
                     fontSize: 11,
                     fontWeight: FontWeight.w800,
                     letterSpacing: 1.2,
@@ -1123,17 +1160,17 @@ class _MobileConversationList extends StatelessWidget {
             heroTag: 'mobile-create-group',
             tooltip: 'Crea gruppo o canale',
             onPressed: onCreateGroup,
-            child: const Icon(Icons.groups_2_outlined),
+            child: Icon(Icons.groups_2_outlined),
           ),
-          const SizedBox(height: 10),
+          SizedBox(height: 10),
           FloatingActionButton.extended(
-            key: const ValueKey('mobile-add-contact'),
+            key: ValueKey('mobile-add-contact'),
             heroTag: 'mobile-add-contact',
             onPressed: onAddContact,
             backgroundColor: Theme.of(context).colorScheme.primary,
             foregroundColor: Theme.of(context).colorScheme.onPrimary,
-            icon: const Icon(Icons.edit_square),
-            label: const Text('Aggiungi contatto'),
+            icon: Icon(Icons.edit_square),
+            label: Text('Aggiungi contatto'),
           ),
         ],
       ),
@@ -1172,11 +1209,16 @@ class _MobileChatScreenState extends State<_MobileChatScreen> {
         title: _GroupHeaderButton(
           onTap: conversation.isGroup && bridge is GroupManagementBridge
               ? () => _chatPaneKey.currentState?._manageGroup()
-              : null,
+              : () => _showContactProfile(
+                  context,
+                  conversation,
+                  bridge,
+                  onChanged,
+                ),
           child: Row(
             children: [
               _ContactAvatar(conversation: conversation, radius: 17),
-              const SizedBox(width: 10),
+              SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1184,16 +1226,16 @@ class _MobileChatScreenState extends State<_MobileChatScreen> {
                     Text(
                       conversation.name,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.w700,
                       ),
                     ),
                     Text(
                       _presenceLabel(conversation),
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 12,
-                        color: Color(0xFF9DA5B2),
+                        color: AppPalette.color(0xFF9DA5B2),
                       ),
                     ),
                   ],
@@ -1207,10 +1249,10 @@ class _MobileChatScreenState extends State<_MobileChatScreen> {
             tooltip: 'Sicurezza conversazione',
             onPressed: () =>
                 _showSecuritySheet(context, conversation, bridge, onChanged),
-            icon: const Icon(Icons.verified_user_outlined),
+            icon: Icon(Icons.verified_user_outlined),
           ),
           IconButton(
-            key: const ValueKey('delete-conversation-mobile'),
+            key: ValueKey('delete-conversation-mobile'),
             tooltip: 'Cancella chat',
             onPressed: () async {
               final deleted = await _confirmDeleteConversation(
@@ -1223,7 +1265,7 @@ class _MobileChatScreenState extends State<_MobileChatScreen> {
                 onChanged();
               }
             },
-            icon: const Icon(Icons.delete_outline_rounded),
+            icon: Icon(Icons.delete_outline_rounded),
           ),
         ],
       ),
@@ -1246,6 +1288,7 @@ class _ChatPane extends StatefulWidget {
     required this.conversation,
     required this.onChanged,
     required this.showHeader,
+    this.onToggleDetails,
     required this.privacySettings,
   });
 
@@ -1253,6 +1296,7 @@ class _ChatPane extends StatefulWidget {
   final Conversation conversation;
   final VoidCallback onChanged;
   final bool showHeader;
+  final VoidCallback? onToggleDetails;
   final PrivacySettingsController privacySettings;
 
   @override
@@ -1261,6 +1305,59 @@ class _ChatPane extends StatefulWidget {
 
 class _ChatPaneState extends State<_ChatPane> {
   ChatMessage? _replyTo;
+  final Set<String> _pendingMessageActions = {};
+  List<Map> _channels = [];
+  String? _channelId;
+  Map<String, dynamic>? _groupDetails;
+
+  bool get _canSendMessages =>
+      _groupDetails?['can_send'] as bool? ??
+      widget.conversation.canSendMessages;
+  List<String> get _pinnedMessageIds =>
+      (_groupDetails?['pinned'] as List?)?.cast<String>() ??
+      widget.conversation.pinnedMessageIds;
+  bool _actionPending(String id) =>
+      _pendingMessageActions.contains(id) ||
+      (_groupDetails?['pending_actions'] as List? ?? []).any(
+        (action) => action['message_id'] == id,
+      );
+
+  Future<void> _loadChannels() async {
+    if (!widget.conversation.isGroup ||
+        _management == null ||
+        widget.bridge is! GroupChannelBridge) {
+      return;
+    }
+    final id = widget.conversation.id;
+    try {
+      final details = await _management!.groupDetails(id);
+      if (!mounted || widget.conversation.id != id) return;
+      setState(() {
+        _groupDetails = details;
+        _channels = (details['channels'] as List? ?? []).cast<Map>();
+        if (!_channels.any((channel) => channel['id'] == _channelId)) {
+          _channelId = null;
+        }
+      });
+    } on Object catch (error) {
+      AppLog.instance.recordError(
+        category: 'messenger',
+        action: 'channels_load_failed',
+        error: error,
+      );
+    }
+  }
+
+  void _selectChannel(String? id) {
+    setState(() {
+      _channelId = id;
+      _replyTo = null;
+      _lastAcknowledgedIncomingId = null;
+    });
+    unawaited(_markConversationReadSafely());
+    _scheduleScrollToBottom();
+  }
+
   GroupManagementBridge? get _management =>
       widget.bridge is GroupManagementBridge
       ? widget.bridge as GroupManagementBridge
@@ -1280,6 +1377,7 @@ class _ChatPaneState extends State<_ChatPane> {
     if (mounted) {
       widget.onChanged();
       await _reloadMessagesAsync(force: true);
+      await _loadChannels();
     }
   }
 
@@ -1298,12 +1396,14 @@ class _ChatPaneState extends State<_ChatPane> {
       ),
     );
     if (result != null && mounted && widget.conversation.id == id) {
+      _selectChannel(result['channel_id'] as String?);
       setState(
         () => _replyTo = ChatMessage(
           id: result['id'] as String,
           authorId: result['author_id'] as String,
           authorName: result['author_name'] as String?,
           body: result['body'] as String,
+          channelId: result['channel_id'] as String?,
           sentAt: DateTime.fromMillisecondsSinceEpoch(
             result['sent_at_ms'] as int,
           ),
@@ -1326,7 +1426,7 @@ class _ChatPaneState extends State<_ChatPane> {
           child: ListView(
             shrinkWrap: true,
             children: [
-              const ListTile(title: Text('Menziona un membro')),
+              ListTile(title: Text('Menziona un membro')),
               for (final member in (details['members'] as List).cast<Map>())
                 ListTile(
                   title: Text(member['name'] as String),
@@ -1364,7 +1464,7 @@ class _ChatPaneState extends State<_ChatPane> {
         if (bridge == null) return;
         final details = await bridge
             .groupDetails(conversation.id)
-            .timeout(const Duration(seconds: 15));
+            .timeout(Duration(seconds: 15));
         members = (details['members'] as List? ?? []).cast<Map>();
       } else {
         members = [
@@ -1381,9 +1481,7 @@ class _ChatPaneState extends State<_ChatPane> {
           .toList();
       if (matches.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Persona non trovata tra i membri attuali.'),
-          ),
+          SnackBar(content: Text('Persona non trovata tra i membri attuali.')),
         );
         return;
       }
@@ -1395,7 +1493,7 @@ class _ChatPaneState extends State<_ChatPane> {
                 child: ListView(
                   shrinkWrap: true,
                   children: [
-                    const ListTile(title: Text('Scegli la persona menzionata')),
+                    ListTile(title: Text('Scegli la persona menzionata')),
                     for (final member in matches)
                       ListTile(
                         title: Text(member['name'] as String),
@@ -1416,16 +1514,14 @@ class _ChatPaneState extends State<_ChatPane> {
         showDragHandle: true,
         builder: (context) => SafeArea(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+            padding: EdgeInsets.fromLTRB(24, 0, 24, 24),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 ListTile(
                   contentPadding: EdgeInsets.zero,
-                  leading: const CircleAvatar(
-                    child: Icon(Icons.person_rounded),
-                  ),
+                  leading: CircleAvatar(child: Icon(Icons.person_rounded)),
                   title: Text(member['name'] as String),
                   subtitle: Text(
                     conversation.isGroup
@@ -1437,8 +1533,8 @@ class _ChatPaneState extends State<_ChatPane> {
                         : 'Contatto',
                   ),
                 ),
-                const SizedBox(height: 12),
-                const Text('Identificativo'),
+                SizedBox(height: 12),
+                Text('Identificativo'),
                 SelectableText(member['id'] as String),
               ],
             ),
@@ -1458,14 +1554,16 @@ class _ChatPaneState extends State<_ChatPane> {
 
   Future<void> _messageActions(ChatMessage message) async {
     final bridge = _management;
-    if (bridge == null || _messageActionsOpen) return;
+    if (bridge == null || _messageActionsOpen || _actionPending(message.id)) {
+      return;
+    }
     _messageActionsOpen = true;
     final conversationId = widget.conversation.id;
     try {
       final details = widget.conversation.isGroup
           ? bridge.groupDetails(conversationId)
           : Future<Map<String, dynamic>>.value({});
-      var pinned = widget.conversation.pinnedMessageIds.contains(message.id);
+      var pinned = _pinnedMessageIds.contains(message.id);
       var selectionMade = false;
       Map? targetMember;
       final action = await showModalBottomSheet<String>(
@@ -1474,6 +1572,8 @@ class _ChatPaneState extends State<_ChatPane> {
           future: details,
           builder: (context, snapshot) {
             final permissions = snapshot.data?['permissions'] as Map? ?? {};
+            final pending = (snapshot.data?['pending_actions'] as List? ?? [])
+                .any((action) => action['message_id'] == message.id);
             targetMember = (snapshot.data?['members'] as List? ?? [])
                 .cast<Map>()
                 .where((member) => member['id'] == message.authorId)
@@ -1492,29 +1592,35 @@ class _ChatPaneState extends State<_ChatPane> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   ListTile(
-                    leading: const Icon(Icons.reply),
-                    title: const Text('Rispondi'),
+                    leading: Icon(Icons.reply),
+                    title: Text('Rispondi'),
                     onTap: () => choose('reply'),
                   ),
                   if (snapshot.connectionState != ConnectionState.done)
-                    const LinearProgressIndicator(),
+                    LinearProgressIndicator(),
                   if (snapshot.hasError)
                     Padding(
-                      padding: const EdgeInsets.all(16),
+                      padding: EdgeInsets.all(16),
                       child: Text(groupError(snapshot.error!)),
                     ),
-                  if (permissions['pin_messages'] == true)
+                  if (pending)
                     ListTile(
-                      leading: const Icon(Icons.push_pin_outlined),
+                      title: Text(
+                        'Modifica già richiesta, in attesa di conferma',
+                      ),
+                    ),
+                  if (!pending && permissions['pin_messages'] == true)
+                    ListTile(
+                      leading: Icon(Icons.push_pin_outlined),
                       title: Text(
                         pinned ? 'Rimuovi dai fissati' : 'Fissa per tutti',
                       ),
                       onTap: () => choose('pin'),
                     ),
-                  if (permissions['delete_messages'] == true)
+                  if (!pending && permissions['delete_messages'] == true)
                     ListTile(
-                      leading: const Icon(Icons.delete_outline),
-                      title: const Text('Elimina messaggio per tutti'),
+                      leading: Icon(Icons.delete_outline),
+                      title: Text('Elimina messaggio per tutti'),
                       onTap: () => choose('delete'),
                     ),
                   if (!message.isOutgoing &&
@@ -1526,8 +1632,8 @@ class _ChatPaneState extends State<_ChatPane> {
                       (targetMember!['restriction'] as Map?)?['send_links'] !=
                           false)
                     ListTile(
-                      leading: const Icon(Icons.link_off),
-                      title: const Text('Blocca i link di questo membro'),
+                      leading: Icon(Icons.link_off),
+                      title: Text('Blocca i link di questo membro'),
                       onTap: () => choose('block_links'),
                     ),
                 ],
@@ -1549,24 +1655,25 @@ class _ChatPaneState extends State<_ChatPane> {
         final confirmed = await showDialog<bool>(
           context: context,
           builder: (context) => AlertDialog(
-            title: const Text('Elimina messaggio per tutti?'),
-            content: const Text(
+            title: Text('Elimina messaggio per tutti?'),
+            content: Text(
               'Il comando sarà consegnato anche ai membri offline quando torneranno online.',
             ),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(context, false),
-                child: const Text('Annulla'),
+                child: Text('Annulla'),
               ),
               FilledButton(
                 onPressed: () => Navigator.pop(context, true),
-                child: const Text('Elimina'),
+                child: Text('Elimina'),
               ),
             ],
           ),
         );
         if (confirmed != true) return;
       }
+      setState(() => _pendingMessageActions.add(message.id));
       final result = await bridge.groupAction(
         conversationId,
         action == 'block_links'
@@ -1585,21 +1692,23 @@ class _ChatPaneState extends State<_ChatPane> {
               },
       );
       if (!mounted) return;
+      if (result != 'pending_owner') {
+        setState(() => _pendingMessageActions.remove(message.id));
+      }
       if (result == 'pending_owner') {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
+          SnackBar(
             content: Text('Richiesta inviata al proprietario del gruppo.'),
           ),
         );
       } else if (action == 'block_links') {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Invio di link bloccato per questo membro.'),
-          ),
+          SnackBar(content: Text('Invio di link bloccato per questo membro.')),
         );
       }
       widget.onChanged();
       await _reloadMessagesAsync(force: true);
+      await _loadChannels();
     } on Object catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(
@@ -1608,6 +1717,7 @@ class _ChatPaneState extends State<_ChatPane> {
       }
     } finally {
       _messageActionsOpen = false;
+      if (mounted) setState(() => _pendingMessageActions.remove(message.id));
     }
   }
 
@@ -1666,6 +1776,7 @@ class _ChatPaneState extends State<_ChatPane> {
       _reloadMessages(force: true);
     }
     _configureInboxUpdates();
+    unawaited(_loadChannels());
   }
 
   void _configureInboxUpdates() {
@@ -1681,7 +1792,7 @@ class _ChatPaneState extends State<_ChatPane> {
         _inboxChanges!.addListener(_onInboxRevisionChanged);
       } else if (!widget.showHeader) {
         _messageTimer = Timer.periodic(
-          const Duration(seconds: 3),
+          Duration(seconds: 3),
           (_) => _refreshMessagesFromNetwork(),
         );
       }
@@ -1693,11 +1804,16 @@ class _ChatPaneState extends State<_ChatPane> {
     if (!mounted || revision == null || revision == _lastInboxRevision) return;
     _lastInboxRevision = revision;
     unawaited(_reloadMessagesAsync());
+    unawaited(_loadChannels());
   }
 
   @override
   void didUpdateWidget(covariant _ChatPane oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.conversation.groupRevision !=
+        widget.conversation.groupRevision) {
+      unawaited(_loadChannels());
+    }
     if (oldWidget.bridge != widget.bridge ||
         oldWidget.showHeader != widget.showHeader) {
       _configureInboxUpdates();
@@ -1706,6 +1822,10 @@ class _ChatPaneState extends State<_ChatPane> {
         oldWidget.bridge != widget.bridge) {
       _messageLoadGeneration++;
       _conversationGeneration++;
+      _channels = [];
+      _groupDetails = null;
+      _channelId = null;
+      unawaited(_loadChannels());
       _composerController.clear();
       _replyTo = null;
       _optimisticMessages.clear();
@@ -1714,7 +1834,7 @@ class _ChatPaneState extends State<_ChatPane> {
       final bridge = widget.bridge;
       if (bridge is CachedMessagingBridge) {
         final cached = bridge.cachedMessages(widget.conversation.id);
-        _messages = cached ?? const [];
+        _messages = cached ?? [];
         _messageSignature = cached == null ? '' : _signatureForMessages(cached);
         _latestMessageId = cached == null || cached.isEmpty
             ? null
@@ -1782,7 +1902,7 @@ class _ChatPaneState extends State<_ChatPane> {
     unawaited(
       _messageScrollController.animateTo(
         0,
-        duration: const Duration(milliseconds: 220),
+        duration: Duration(milliseconds: 220),
         curve: Curves.easeOut,
       ),
     );
@@ -1883,7 +2003,7 @@ class _ChatPaneState extends State<_ChatPane> {
     }
     String? latestIncomingId;
     for (final message in messages.reversed) {
-      if (!message.isOutgoing) {
+      if (!message.isOutgoing && message.channelId == _channelId) {
         latestIncomingId = message.id;
         break;
       }
@@ -1903,7 +2023,21 @@ class _ChatPaneState extends State<_ChatPane> {
       return;
     }
     try {
-      await widget.bridge.markConversationRead(widget.conversation.id);
+      final bridge = widget.bridge;
+      var allRead = true;
+      if (widget.conversation.isGroup && bridge is GroupChannelBridge) {
+        allRead = await (bridge as GroupChannelBridge).markChannelRead(
+          widget.conversation.id,
+          _channelId,
+        );
+      } else {
+        await bridge.markConversationRead(widget.conversation.id);
+      }
+      if (allRead) {
+        await const MessageNotifications().clearConversation(
+          widget.conversation.id,
+        );
+      }
     } on Object catch (error) {
       AppLog.instance.recordError(
         category: 'messenger',
@@ -1914,13 +2048,14 @@ class _ChatPaneState extends State<_ChatPane> {
   }
 
   Future<void> _sendMessage() async {
-    if (!widget.conversation.canSendMessages) return;
+    if (!_canSendMessages) return;
     final text = _composerController.text.trim();
     if (text.isEmpty) {
       return;
     }
     final conversationId = widget.conversation.id;
     final reply = _replyTo;
+    final channelId = _channelId;
     setState(() => _replyTo = null);
     _composerController.clear();
     final optimistic = ChatMessage(
@@ -1928,6 +2063,7 @@ class _ChatPaneState extends State<_ChatPane> {
       authorId: 'me',
       body: text,
       replyTo: reply?.id,
+      channelId: channelId,
       sentAt: DateTime.now(),
       isOutgoing: true,
       deliveryState: DeliveryState.queued,
@@ -1940,7 +2076,14 @@ class _ChatPaneState extends State<_ChatPane> {
       verbose: true,
     );
     try {
-      if (reply != null && _management != null) {
+      if (channelId != null && widget.bridge is GroupChannelBridge) {
+        await (widget.bridge as GroupChannelBridge).sendChannelText(
+          conversationId,
+          channelId,
+          text,
+          replyTo: reply?.id,
+        );
+      } else if (reply != null && _management != null) {
         await _management!.sendReply(conversationId, text, reply.id);
       } else {
         await widget.bridge.sendText(
@@ -2014,13 +2157,14 @@ class _ChatPaneState extends State<_ChatPane> {
   Future<void> _pickAndSendAttachment() async {
     if (_isSendingAttachment) return;
     final conversationId = widget.conversation.id;
+    final channelId = _channelId;
     final file = await openFile();
     if (file == null || !mounted) return;
     final size = await file.length();
     if (!mounted) return;
     if (widget.conversation.id != conversationId) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
+        SnackBar(
           content: Text(
             'La conversazione è cambiata: seleziona nuovamente l’allegato.',
           ),
@@ -2031,7 +2175,7 @@ class _ChatPaneState extends State<_ChatPane> {
     if (size <= 0 || size > 700 * 1024) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
+          SnackBar(
             content: Text(
               'Il file deve avere una dimensione massima di 700 KB.',
             ),
@@ -2044,11 +2188,20 @@ class _ChatPaneState extends State<_ChatPane> {
     try {
       final bytes = await file.readAsBytes();
       if (!mounted) return;
-      await widget.bridge.sendAttachment(
-        conversationId: conversationId,
-        fileName: file.name,
-        bytes: bytes,
-      );
+      if (channelId != null && widget.bridge is GroupChannelBridge) {
+        await (widget.bridge as GroupChannelBridge).sendChannelAttachment(
+          conversationId,
+          channelId,
+          file.name,
+          bytes,
+        );
+      } else {
+        await widget.bridge.sendAttachment(
+          conversationId: conversationId,
+          fileName: file.name,
+          bytes: bytes,
+        );
+      }
       if (!mounted) return;
       final bridge = widget.bridge;
       if (bridge is CachedMessagingBridge) {
@@ -2079,22 +2232,26 @@ class _ChatPaneState extends State<_ChatPane> {
 
   @override
   Widget build(BuildContext context) {
-    final visibleMessages = [..._messages, ..._optimisticMessages]
-      ..sort((left, right) {
-        final order = left.orderAt.compareTo(right.orderAt);
-        return order == 0 ? left.id.compareTo(right.id) : order;
-      });
+    final visibleMessages =
+        [
+            ..._messages,
+            ..._optimisticMessages,
+          ].where((message) => message.channelId == _channelId).toList()
+          ..sort((left, right) {
+            final order = left.orderAt.compareTo(right.orderAt);
+            return order == 0 ? left.id.compareTo(right.id) : order;
+          });
     final cachedBridge = widget.bridge is CachedMessagingBridge
         ? widget.bridge as CachedMessagingBridge
         : null;
     final hasOlder =
         cachedBridge?.hasOlderMessages(widget.conversation.id) ?? false;
     return DecoratedBox(
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [Color(0xFF11151B), Color(0xFF0C0F14)],
+          colors: [AppPalette.color(0xFF11151B), AppPalette.color(0xFF0C0F14)],
         ),
       ),
       child: Column(
@@ -2104,9 +2261,36 @@ class _ChatPaneState extends State<_ChatPane> {
               conversation: widget.conversation,
               bridge: widget.bridge,
               onChanged: widget.onChanged,
+              onOpenProfile: widget.onToggleDetails,
               onOpenGroup: widget.conversation.isGroup && _management != null
                   ? _manageGroup
                   : null,
+            ),
+          if (widget.conversation.isGroup && _channels.isNotEmpty)
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(6),
+                    child: ChoiceChip(
+                      label: const Text('Generale'),
+                      selected: _channelId == null,
+                      onSelected: (_) => _selectChannel(null),
+                    ),
+                  ),
+                  for (final channel in _channels)
+                    Padding(
+                      padding: const EdgeInsets.all(6),
+                      child: ChoiceChip(
+                        label: Text('# ${channel['name']}'),
+                        selected: _channelId == channel['id'],
+                        onSelected: (_) =>
+                            _selectChannel(channel['id'] as String),
+                      ),
+                    ),
+                ],
+              ),
             ),
           if (_management != null)
             Row(
@@ -2114,43 +2298,40 @@ class _ChatPaneState extends State<_ChatPane> {
               children: [
                 if (widget.conversation.isGroup) ...[
                   IconButton(
-                    key: const ValueKey('group-settings'),
+                    key: ValueKey('group-settings'),
                     tooltip: 'Gestisci gruppo',
                     onPressed: _manageGroup,
-                    icon: const Icon(Icons.tune),
+                    icon: Icon(Icons.tune),
                   ),
                   IconButton(
                     tooltip: 'Menziona un membro',
-                    onPressed: widget.conversation.canSendMessages
-                        ? _mentionMember
-                        : null,
-                    icon: const Icon(Icons.alternate_email),
+                    onPressed: _canSendMessages ? _mentionMember : null,
+                    icon: Icon(Icons.alternate_email),
                   ),
                 ],
                 IconButton(
-                  key: const ValueKey('search-chat'),
+                  key: ValueKey('search-chat'),
                   tooltip: 'Cerca nella chat',
                   onPressed: () => _searchChat(),
-                  icon: const Icon(Icons.search),
+                  icon: Icon(Icons.search),
                 ),
-                if (widget.conversation.pinnedMessageIds.isNotEmpty)
+                if (_pinnedMessageIds.isNotEmpty)
                   IconButton(
-                    key: const ValueKey('pinned-messages'),
+                    key: ValueKey('pinned-messages'),
                     tooltip: 'Messaggi fissati',
-                    onPressed: () =>
-                        _searchChat('', widget.conversation.pinnedMessageIds),
-                    icon: const Text('📌'),
+                    onPressed: () => _searchChat('', _pinnedMessageIds),
+                    icon: Text('📌'),
                   ),
               ],
             ),
           Expanded(
             child: _isLoadingMessages && _messages.isEmpty
-                ? const Center(child: CircularProgressIndicator())
+                ? Center(child: CircularProgressIndicator())
                 : ListView.builder(
-                    key: const ValueKey('chat-message-list'),
+                    key: ValueKey('chat-message-list'),
                     controller: _messageScrollController,
                     reverse: true,
-                    padding: const EdgeInsets.fromLTRB(22, 20, 22, 12),
+                    padding: EdgeInsets.fromLTRB(22, 20, 22, 12),
                     itemCount: visibleMessages.length + (hasOlder ? 1 : 0),
                     itemBuilder: (context, index) {
                       if (index < visibleMessages.length) {
@@ -2175,7 +2356,7 @@ class _ChatPaneState extends State<_ChatPane> {
                                 child: TextButton.icon(
                                   onPressed: () =>
                                       _searchChat('id:${message.replyTo}'),
-                                  icon: const Icon(Icons.reply, size: 16),
+                                  icon: Icon(Icons.reply, size: 16),
                                   label: Text(
                                     visibleMessages
                                             .where(
@@ -2196,6 +2377,10 @@ class _ChatPaneState extends State<_ChatPane> {
                               onSecondaryTap: () => _messageActions(message),
                               child: _MessageBubble(
                                 message: message,
+                                isPinned: _pinnedMessageIds.contains(
+                                  message.id,
+                                ),
+                                actionPending: _actionPending(message.id),
                                 onMention: _openMention,
                                 showAuthor: widget.conversation.isGroup,
                                 onRestoreDraft:
@@ -2210,7 +2395,7 @@ class _ChatPaneState extends State<_ChatPane> {
                                           ScaffoldMessenger.of(
                                             context,
                                           ).showSnackBar(
-                                            const SnackBar(
+                                            SnackBar(
                                               content: Text(
                                                 'Completa la bozza attuale prima di recuperare questo messaggio.',
                                               ),
@@ -2219,10 +2404,7 @@ class _ChatPaneState extends State<_ChatPane> {
                                         }
                                       }
                                     : null,
-                                showReceipt: widget
-                                    .privacySettings
-                                    .value
-                                    .showReadReceipts,
+                                showReceipt: true,
                               ),
                             ),
                           ],
@@ -2235,26 +2417,26 @@ class _ChatPaneState extends State<_ChatPane> {
                                 ? null
                                 : _loadOlderMessages,
                             icon: _isLoadingOlder
-                                ? const SizedBox.square(
+                                ? SizedBox.square(
                                     dimension: 16,
                                     child: CircularProgressIndicator(
                                       strokeWidth: 2,
                                     ),
                                   )
-                                : const Icon(Icons.history_rounded),
-                            label: const Text('Carica messaggi precedenti'),
+                                : Icon(Icons.history_rounded),
+                            label: Text('Carica messaggi precedenti'),
                           ),
                         );
                       }
-                      return const SizedBox.shrink();
+                      return SizedBox.shrink();
                     },
                   ),
           ),
           if (_replyTo != null)
             ListTile(
               dense: true,
-              leading: const Icon(Icons.reply),
-              title: const Text('Risposta a un messaggio'),
+              leading: Icon(Icons.reply),
+              title: Text('Risposta a un messaggio'),
               subtitle: Text(
                 _replyTo!.body,
                 maxLines: 2,
@@ -2263,11 +2445,11 @@ class _ChatPaneState extends State<_ChatPane> {
               trailing: IconButton(
                 tooltip: 'Annulla risposta',
                 onPressed: () => setState(() => _replyTo = null),
-                icon: const Icon(Icons.close),
+                icon: Icon(Icons.close),
               ),
             ),
-          if (!widget.conversation.canSendMessages)
-            const SafeArea(
+          if (!_canSendMessages)
+            SafeArea(
               top: false,
               child: Padding(
                 padding: EdgeInsets.all(18),
@@ -2281,6 +2463,7 @@ class _ChatPaneState extends State<_ChatPane> {
               controller: _composerController,
               onSend: _sendMessage,
               isSendingAttachment: _isSendingAttachment,
+              incognitoKeyboard: widget.privacySettings.value.incognitoKeyboard,
               onAttachmentPressed: _pickAndSendAttachment,
             ),
         ],
@@ -2308,7 +2491,7 @@ class _GroupHeaderButton extends StatelessWidget {
             onTap: onTap,
             borderRadius: BorderRadius.circular(8),
             child: ConstrainedBox(
-              constraints: const BoxConstraints(minHeight: 48),
+              constraints: BoxConstraints(minHeight: 48),
               child: child,
             ),
           ),
@@ -2324,18 +2507,20 @@ class _ChatHeader extends StatelessWidget {
     required this.bridge,
     required this.onChanged,
     this.onOpenGroup,
+    this.onOpenProfile,
   });
 
   final Conversation conversation;
   final SecureMessagingBridge bridge;
   final VoidCallback onChanged;
   final VoidCallback? onOpenGroup;
+  final VoidCallback? onOpenProfile;
 
   @override
   Widget build(BuildContext context) {
     return Container(
       height: 82,
-      padding: const EdgeInsets.symmetric(horizontal: 24),
+      padding: EdgeInsets.symmetric(horizontal: 24),
       decoration: BoxDecoration(
         border: Border(
           bottom: BorderSide(color: Theme.of(context).dividerColor),
@@ -2345,11 +2530,19 @@ class _ChatHeader extends StatelessWidget {
         children: [
           Expanded(
             child: _GroupHeaderButton(
-              onTap: onOpenGroup,
+              onTap:
+                  onOpenGroup ??
+                  onOpenProfile ??
+                  () => _showContactProfile(
+                    context,
+                    conversation,
+                    bridge,
+                    onChanged,
+                  ),
               child: Row(
                 children: [
                   _ContactAvatar(conversation: conversation, radius: 22),
-                  const SizedBox(width: 12),
+                  SizedBox(width: 12),
                   Expanded(
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
@@ -2358,16 +2551,16 @@ class _ChatHeader extends StatelessWidget {
                         Text(
                           conversation.name,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 17,
                             fontWeight: FontWeight.w700,
                           ),
                         ),
-                        const SizedBox(height: 3),
+                        SizedBox(height: 3),
                         Text(
                           _presenceLabel(conversation),
-                          style: const TextStyle(
-                            color: Color(0xFF9DA5B2),
+                          style: TextStyle(
+                            color: AppPalette.color(0xFF9DA5B2),
                             fontSize: 13,
                           ),
                         ),
@@ -2378,10 +2571,22 @@ class _ChatHeader extends StatelessWidget {
               ),
             ),
           ),
+          IconButton(
+            tooltip: 'Apri o chiudi dettagli',
+            icon: Icon(Icons.person_outline),
+            onPressed:
+                onOpenProfile ??
+                () => _showContactProfile(
+                  context,
+                  conversation,
+                  bridge,
+                  onChanged,
+                ),
+          ),
           _SafetyBadge(safety: conversation.safety),
-          const SizedBox(width: 8),
+          SizedBox(width: 8),
           PopupMenuButton<String>(
-            key: const ValueKey('conversation-menu'),
+            key: ValueKey('conversation-menu'),
             tooltip: 'Azioni conversazione',
             onSelected: (value) async {
               if (value == 'security') {
@@ -2402,7 +2607,7 @@ class _ChatHeader extends StatelessWidget {
                 }
               }
             },
-            itemBuilder: (context) => const [
+            itemBuilder: (context) => [
               PopupMenuItem(
                 value: 'security',
                 child: ListTile(
@@ -2418,7 +2623,7 @@ class _ChatHeader extends StatelessWidget {
                 ),
               ),
             ],
-            icon: const Icon(Icons.more_horiz_rounded),
+            icon: Icon(Icons.more_horiz_rounded),
           ),
         ],
       ),
@@ -2493,7 +2698,7 @@ class _EmojiCategoryPickerState extends State<_EmojiCategoryPicker> {
         SizedBox(
           height: 48,
           child: ListView(
-            padding: const EdgeInsets.symmetric(horizontal: 6),
+            padding: EdgeInsets.symmetric(horizontal: 6),
             scrollDirection: Axis.horizontal,
             children: [
               for (final category in _EmojiCategory.values)
@@ -2527,16 +2732,16 @@ class _EmojiCategoryPickerState extends State<_EmojiCategoryPicker> {
           ),
         ),
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 10, 16, 2),
+          padding: EdgeInsets.fromLTRB(16, 10, 16, 2),
           child: Text(
             _selected.label,
-            key: const ValueKey('emoji-category-title'),
+            key: ValueKey('emoji-category-title'),
             style: Theme.of(context).textTheme.labelLarge,
           ),
         ),
         Expanded(
           child: emoji.isEmpty
-              ? const Center(
+              ? Center(
                   child: Padding(
                     padding: EdgeInsets.all(24),
                     child: Text(
@@ -2546,8 +2751,8 @@ class _EmojiCategoryPickerState extends State<_EmojiCategoryPicker> {
                   ),
                 )
               : GridView.builder(
-                  padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
-                  gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                  padding: EdgeInsets.fromLTRB(12, 6, 12, 12),
+                  gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
                     maxCrossAxisExtent: 54,
                   ),
                   itemCount: emoji.length,
@@ -2563,10 +2768,7 @@ class _EmojiCategoryPickerState extends State<_EmojiCategoryPicker> {
                           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                         ),
                         onPressed: () => widget.onSelected(item),
-                        child: Text(
-                          item.char,
-                          style: const TextStyle(fontSize: 24),
-                        ),
+                        child: Text(item.char, style: TextStyle(fontSize: 24)),
                       ),
                     );
                   },
@@ -2583,12 +2785,14 @@ class _Composer extends StatefulWidget {
     required this.onSend,
     required this.onAttachmentPressed,
     required this.isSendingAttachment,
+    this.incognitoKeyboard = false,
   });
 
   final TextEditingController controller;
   final VoidCallback onSend;
   final VoidCallback onAttachmentPressed;
   final bool isSendingAttachment;
+  final bool incognitoKeyboard;
 
   @override
   State<_Composer> createState() => _ComposerState();
@@ -2616,6 +2820,30 @@ class _ComposerState extends State<_Composer> {
     '٩(◕‿◕｡)۶',
     '(っ˘ω˘ς )',
     'ヽ(・∀・)ﾉ',
+    '૮ ˶ᵔ ᵕ ᵔ˶ ა',
+    '(˶˃ ᵕ ˂˶) .ᐟ.ᐟ',
+    '𐔌՞. .՞𐦯',
+    '₍₍⚞(˶ˆᗜˆ˵)⚟⁾⁾',
+    '♡',
+    'ദ്ദി◝ ⩊ ◜.ᐟ',
+    '𖾕𖾝𖽙𖾟',
+    '(⸝⸝๑﹏๑⸝⸝)',
+    'ദ്ദി ˉ͈̀꒳ˉ͈́ )✧',
+    '𑣲𝄞',
+    '(˵◝ ⩊ ◜˵マ',
+    '໒꒰ྀིっ˕ -｡꒱ྀི১',
+    '⚞^. .^⚟',
+    '(｡•̀ᴗ-)✧',
+    '(っ˘з(˘⌣˘ )',
+    '(๑˃ᴗ˂)ﻭ',
+    '( ˘͈ ᵕ ˘͈♡)',
+    'ฅ(＾・ω・＾ฅ)',
+    '(ﾉ◕ヮ◕)ﾉ*:･ﾟ✧',
+    '( ˶ˆ꒳ˆ˵ )',
+    '(ᵔᴥᵔ)',
+    '(๑•́ ₃ •̀๑)',
+    '(づ￣ ³￣)づ',
+    '(∩˃o˂∩)♡',
   ];
 
   void _insert(String value) {
@@ -2654,7 +2882,7 @@ class _ComposerState extends State<_Composer> {
             height: 390,
             child: Column(
               children: [
-                const TabBar(
+                TabBar(
                   tabs: [
                     Tab(text: 'Emoji'),
                     Tab(text: 'Kaomoji'),
@@ -2669,7 +2897,7 @@ class _ComposerState extends State<_Composer> {
                             _selectEmoji(sheetContext, emoji),
                       ),
                       ListView.builder(
-                        padding: const EdgeInsets.all(12),
+                        padding: EdgeInsets.all(12),
                         itemCount: _kaomoji.length,
                         itemBuilder: (context, index) => ListTile(
                           dense: true,
@@ -2696,10 +2924,10 @@ class _ComposerState extends State<_Composer> {
     final compact = MediaQuery.sizeOf(context).width < 600;
     return Container(
       padding: compact
-          ? const EdgeInsets.fromLTRB(6, 6, 6, 8)
-          : const EdgeInsets.fromLTRB(16, 12, 16, 18),
+          ? EdgeInsets.fromLTRB(6, 6, 6, 8)
+          : EdgeInsets.fromLTRB(16, 12, 16, 18),
       decoration: BoxDecoration(
-        color: const Color(0xFF15181E),
+        color: AppPalette.color(0xFF15181E),
         border: Border(top: BorderSide(color: Theme.of(context).dividerColor)),
       ),
       child: SafeArea(
@@ -2713,26 +2941,27 @@ class _ComposerState extends State<_Composer> {
                   ? null
                   : widget.onAttachmentPressed,
               icon: widget.isSendingAttachment
-                  ? const SizedBox(
+                  ? SizedBox(
                       width: 18,
                       height: 18,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
-                  : const Icon(Icons.add_circle_outline_rounded),
-              color: const Color(0xFFB5BDC9),
+                  : Icon(Icons.add_circle_outline_rounded),
+              color: AppPalette.color(0xFFB5BDC9),
             ),
             IconButton(
-              key: const ValueKey('open-expression-picker'),
+              key: ValueKey('open-expression-picker'),
               tooltip: 'Emoji e kaomoji',
               visualDensity: compact ? VisualDensity.compact : null,
               onPressed: _showExpressions,
-              icon: const Icon(Icons.emoji_emotions_outlined),
-              color: const Color(0xFFB5BDC9),
+              icon: Icon(Icons.emoji_emotions_outlined),
+              color: AppPalette.color(0xFFB5BDC9),
             ),
             SizedBox(width: compact ? 1 : 4),
             Expanded(
               child: TextField(
-                key: const ValueKey('message-composer'),
+                key: ValueKey('message-composer'),
+                enableIMEPersonalizedLearning: !widget.incognitoKeyboard,
                 controller: widget.controller,
                 minLines: 1,
                 maxLines: 4,
@@ -2755,7 +2984,7 @@ class _ComposerState extends State<_Composer> {
             ),
             SizedBox(width: compact ? 4 : 8),
             IconButton.filled(
-              key: const ValueKey('send-message'),
+              key: ValueKey('send-message'),
               tooltip: 'Invia messaggio',
               visualDensity: compact ? VisualDensity.compact : null,
               onPressed: widget.onSend,
@@ -2763,7 +2992,7 @@ class _ComposerState extends State<_Composer> {
                 backgroundColor: Theme.of(context).colorScheme.primary,
                 foregroundColor: Theme.of(context).colorScheme.onPrimary,
               ),
-              icon: const Icon(Icons.arrow_upward_rounded),
+              icon: Icon(Icons.arrow_upward_rounded),
             ),
           ],
         ),
@@ -2772,93 +3001,153 @@ class _ComposerState extends State<_Composer> {
   }
 }
 
+Future<void> _showContactProfile(
+  BuildContext context,
+  Conversation conversation,
+  SecureMessagingBridge bridge,
+  VoidCallback onChanged,
+) => showModalBottomSheet<void>(
+  context: context,
+  isScrollControlled: true,
+  builder: (context) => SafeArea(
+    child: SingleChildScrollView(
+      child: Padding(
+        padding: EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Align(
+              alignment: Alignment.centerRight,
+              child: IconButton(
+                tooltip: 'Chiudi profilo',
+                onPressed: () => Navigator.pop(context),
+                icon: Icon(Icons.close),
+              ),
+            ),
+            _ContactAvatar(conversation: conversation, radius: 48),
+            SizedBox(height: 16),
+            Text(
+              conversation.name,
+              style: Theme.of(context).textTheme.headlineSmall,
+            ),
+            SizedBox(height: 12),
+            _SafetyBadge(safety: conversation.safety),
+            if (conversation.description.isNotEmpty)
+              Text(conversation.description),
+            SizedBox(height: 16),
+            Text('Fingerprint'),
+            SelectableText(
+              conversation.fingerprint,
+              textAlign: TextAlign.center,
+            ),
+            TextButton.icon(
+              icon: Icon(Icons.verified_user_outlined),
+              label: Text('Verifica sicurezza'),
+              onPressed: () =>
+                  _showSecuritySheet(context, conversation, bridge, onChanged),
+            ),
+          ],
+        ),
+      ),
+    ),
+  ),
+);
+
 class _ConversationDetails extends StatelessWidget {
   const _ConversationDetails({
     required this.conversation,
+    this.onClose,
     required this.veilidSnapshot,
   });
 
   final Conversation conversation;
   final VeilidSnapshot veilidSnapshot;
+  final VoidCallback? onClose;
 
   @override
   Widget build(BuildContext context) {
     return ColoredBox(
-      color: const Color(0xFF15181E),
+      color: AppPalette.color(0xFF15181E),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(22, 26, 22, 18),
+        padding: EdgeInsets.fromLTRB(22, 26, 22, 18),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
+            if (onClose != null)
+              Align(
+                alignment: Alignment.centerRight,
+                child: IconButton(
+                  tooltip: 'Chiudi dettagli',
+                  onPressed: onClose,
+                  icon: Icon(Icons.close),
+                ),
+              ),
+            Text(
               'DETTAGLI',
               style: TextStyle(
-                color: Color(0xFF9299A5),
+                color: AppPalette.color(0xFF9299A5),
                 fontSize: 11,
                 letterSpacing: 1.2,
                 fontWeight: FontWeight.w800,
               ),
             ),
-            const SizedBox(height: 24),
+            SizedBox(height: 24),
             Center(
               child: _ContactAvatar(conversation: conversation, radius: 42),
             ),
-            const SizedBox(height: 12),
+            SizedBox(height: 12),
             Center(
               child: Text(
                 conversation.name,
                 textAlign: TextAlign.center,
-                style: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                ),
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
               ),
             ),
-            const SizedBox(height: 6),
+            SizedBox(height: 6),
             Center(child: _SafetyBadge(safety: conversation.safety)),
             if (conversation.isGroup) ...[
-              const SizedBox(height: 10),
+              SizedBox(height: 10),
               Center(
                 child: Text(
                   conversation.type == ConversationType.channel
                       ? 'Canale professionale · ${conversation.memberCount} membri'
                       : '${conversation.memberCount} membri',
                   textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: Color(0xFFAEB7C3),
+                  style: TextStyle(
+                    color: AppPalette.color(0xFFAEB7C3),
                     fontSize: 12,
                   ),
                 ),
               ),
               if (conversation.description.isNotEmpty) ...[
-                const SizedBox(height: 6),
+                SizedBox(height: 6),
                 Center(
                   child: Text(
                     conversation.description,
                     textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      color: Color(0xFF9299A5),
+                    style: TextStyle(
+                      color: AppPalette.color(0xFF9299A5),
                       fontSize: 12,
                     ),
                   ),
                 ),
               ],
             ],
-            const SizedBox(height: 30),
-            const _DetailLabel('SICUREZZA SESSIONE'),
-            const SizedBox(height: 9),
+            SizedBox(height: 30),
+            _DetailLabel('SICUREZZA SESSIONE'),
+            SizedBox(height: 9),
             _InfoCard(
               icon: Icons.key_outlined,
               title: 'Fingerprint',
               subtitle: conversation.fingerprint,
             ),
-            const SizedBox(height: 10),
+            SizedBox(height: 10),
             _InfoCard(
               icon: Icons.hub_outlined,
               title: 'Trasporto',
               subtitle: veilidSnapshot.title,
             ),
-            const Spacer(),
+            Spacer(),
             _VaultStatusCard(veilidSnapshot: veilidSnapshot, compact: true),
           ],
         ),
@@ -2890,11 +3179,11 @@ class _ConversationTile extends StatelessWidget {
         onTap: onTap,
         borderRadius: BorderRadius.circular(16),
         child: Padding(
-          padding: const EdgeInsets.all(11),
+          padding: EdgeInsets.all(11),
           child: Row(
             children: [
               _ContactAvatar(conversation: conversation, radius: 23),
-              const SizedBox(width: 12),
+              SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -2912,27 +3201,27 @@ class _ConversationTile extends StatelessWidget {
                             ),
                           ),
                         ),
-                        const SizedBox(width: 8),
+                        SizedBox(width: 8),
                         Text(
                           _relativeTime(conversation.lastActivity),
-                          style: const TextStyle(
-                            color: Color(0xFF9299A5),
+                          style: TextStyle(
+                            color: AppPalette.color(0xFF9299A5),
                             fontSize: 11,
                           ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 4),
+                    SizedBox(height: 4),
                     Row(
                       children: [
                         if (conversation.safety ==
                             ContactSafety.refreshRequired)
-                          const Padding(
+                          Padding(
                             padding: EdgeInsets.only(right: 5),
                             child: Icon(
                               Icons.warning_amber_rounded,
                               size: 15,
-                              color: Color(0xFFFFC56B),
+                              color: AppPalette.color(0xFFFFC56B),
                             ),
                           ),
                         Expanded(
@@ -2941,8 +3230,8 @@ class _ConversationTile extends StatelessWidget {
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
                               color: conversation.unreadCount > 0
-                                  ? const Color(0xFFE6E8EB)
-                                  : const Color(0xFF9299A5),
+                                  ? AppPalette.color(0xFFE6E8EB)
+                                  : AppPalette.color(0xFF9299A5),
                               fontSize: 13,
                               fontWeight: conversation.unreadCount > 0
                                   ? FontWeight.w600
@@ -2951,10 +3240,10 @@ class _ConversationTile extends StatelessWidget {
                           ),
                         ),
                         if (conversation.unreadCount > 0) ...[
-                          const SizedBox(width: 8),
+                          SizedBox(width: 8),
                           Container(
-                            constraints: const BoxConstraints(minWidth: 20),
-                            padding: const EdgeInsets.symmetric(
+                            constraints: BoxConstraints(minWidth: 20),
+                            padding: EdgeInsets.symmetric(
                               horizontal: 6,
                               vertical: 3,
                             ),
@@ -2993,10 +3282,14 @@ class _MessageBubble extends StatelessWidget {
     this.onRestoreDraft,
     this.onMention,
     this.showAuthor = false,
+    this.isPinned = false,
+    this.actionPending = false,
   });
 
   final ChatMessage message;
   final bool showAuthor;
+  final bool isPinned;
+  final bool actionPending;
   final bool showReceipt;
   final VoidCallback? onRestoreDraft;
   final ValueChanged<String>? onMention;
@@ -3017,7 +3310,7 @@ class _MessageBubble extends StatelessWidget {
     final name = message.attachmentName;
     if (bytes == null || name == null) return;
     try {
-      final location = await const AttachmentDownloads().save(
+      final location = await AttachmentDownloads().save(
         fileName: name,
         bytes: bytes,
       );
@@ -3028,7 +3321,7 @@ class _MessageBubble extends StatelessWidget {
     } on Object {
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Non è stato possibile salvare il file.')),
+        SnackBar(content: Text('Non è stato possibile salvare il file.')),
       );
     }
   }
@@ -3039,19 +3332,19 @@ class _MessageBubble extends StatelessWidget {
     showDialog<void>(
       context: context,
       builder: (context) => Dialog(
-        backgroundColor: const Color(0xFF0C0F14),
-        insetPadding: const EdgeInsets.all(20),
+        backgroundColor: AppPalette.color(0xFF0C0F14),
+        insetPadding: EdgeInsets.all(20),
         child: Stack(
           children: [
             Padding(
-              padding: const EdgeInsets.all(12),
+              padding: EdgeInsets.all(12),
               child: InteractiveViewer(
                 minScale: 0.5,
                 maxScale: 5,
                 child: Image.memory(
                   bytes,
                   fit: BoxFit.contain,
-                  errorBuilder: (context, error, stackTrace) => const Padding(
+                  errorBuilder: (context, error, stackTrace) => Padding(
                     padding: EdgeInsets.all(32),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
@@ -3071,7 +3364,7 @@ class _MessageBubble extends StatelessWidget {
               child: IconButton.filledTonal(
                 tooltip: 'Chiudi',
                 onPressed: () => Navigator.of(context).pop(),
-                icon: const Icon(Icons.close_rounded),
+                icon: Icon(Icons.close_rounded),
               ),
             ),
           ],
@@ -3085,21 +3378,21 @@ class _MessageBubble extends StatelessWidget {
     final outgoing = message.isOutgoing;
     final background = outgoing
         ? Theme.of(context).colorScheme.primary
-        : const Color(0xFF242933);
+        : AppPalette.color(0xFF242933);
     final foreground = outgoing
         ? Theme.of(context).colorScheme.onPrimary
-        : const Color(0xFFF2F3F5);
+        : AppPalette.color(0xFFF2F3F5);
     return Align(
       alignment: outgoing ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
-        constraints: const BoxConstraints(maxWidth: 520),
-        margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.fromLTRB(14, 10, 12, 8),
+        constraints: BoxConstraints(maxWidth: 520),
+        margin: EdgeInsets.only(bottom: 10),
+        padding: EdgeInsets.fromLTRB(14, 10, 12, 8),
         decoration: BoxDecoration(
           color: background,
           borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(18),
-            topRight: const Radius.circular(18),
+            topLeft: Radius.circular(18),
+            topRight: Radius.circular(18),
             bottomLeft: Radius.circular(outgoing ? 18 : 4),
             bottomRight: Radius.circular(outgoing ? 4 : 18),
           ),
@@ -3123,12 +3416,12 @@ class _MessageBubble extends StatelessWidget {
                   fontWeight: FontWeight.w800,
                 ),
               ),
-              const SizedBox(height: 4),
+              SizedBox(height: 4),
             ],
             if (message.attachmentName case final fileName?)
               Container(
-                constraints: const BoxConstraints(minWidth: 210),
-                padding: const EdgeInsets.all(10),
+                constraints: BoxConstraints(minWidth: 210),
+                padding: EdgeInsets.all(10),
                 decoration: BoxDecoration(
                   color: foreground.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(12),
@@ -3159,7 +3452,7 @@ class _MessageBubble extends StatelessWidget {
                           ),
                         ),
                       ),
-                      const SizedBox(height: 8),
+                      SizedBox(height: 8),
                     ],
                     Row(
                       mainAxisSize: MainAxisSize.min,
@@ -3170,7 +3463,7 @@ class _MessageBubble extends StatelessWidget {
                               : Icons.insert_drive_file_rounded,
                           color: foreground,
                         ),
-                        const SizedBox(width: 10),
+                        SizedBox(width: 10),
                         Flexible(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -3195,7 +3488,7 @@ class _MessageBubble extends StatelessWidget {
                             ],
                           ),
                         ),
-                        const SizedBox(width: 8),
+                        SizedBox(width: 8),
                         if (message.attachmentBytes != null)
                           IconButton(
                             tooltip: 'Scarica file',
@@ -3227,10 +3520,27 @@ class _MessageBubble extends StatelessWidget {
               if (onRestoreDraft != null)
                 TextButton(
                   onPressed: onRestoreDraft,
-                  child: const Text('Riprendi bozza'),
+                  child: Text('Riprendi bozza'),
                 ),
             ],
-            const SizedBox(height: 5),
+            if (isPinned)
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.push_pin, size: 14, color: foreground),
+                  SizedBox(width: 4),
+                  Text(
+                    'Fissato',
+                    style: TextStyle(fontSize: 11, color: foreground),
+                  ),
+                ],
+              ),
+            if (actionPending)
+              Text(
+                'Modifica in attesa di conferma',
+                style: TextStyle(fontSize: 11, color: foreground),
+              ),
+            SizedBox(height: 5),
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -3242,7 +3552,7 @@ class _MessageBubble extends StatelessWidget {
                   ),
                 ),
                 if (outgoing && showReceipt) ...[
-                  const SizedBox(width: 4),
+                  SizedBox(width: 4),
                   Tooltip(
                     message: message.deliveryState.label,
                     child: Icon(
@@ -3256,7 +3566,7 @@ class _MessageBubble extends StatelessWidget {
                       },
                       size: 14,
                       color: message.deliveryState == DeliveryState.read
-                          ? const Color(0xFF2F6FED)
+                          ? AppPalette.color(0xFF2F6FED)
                           : foreground.withValues(alpha: 0.72),
                     ),
                   ),
@@ -3316,9 +3626,12 @@ class _ContactAvatar extends StatelessWidget {
               width: radius * 0.48,
               height: radius * 0.48,
               decoration: BoxDecoration(
-                color: const Color(0xFF81E6A3),
+                color: AppPalette.color(0xFF81E6A3),
                 shape: BoxShape.circle,
-                border: Border.all(color: const Color(0xFF15181E), width: 2),
+                border: Border.all(
+                  color: AppPalette.color(0xFF15181E),
+                  width: 2,
+                ),
               ),
             ),
           ),
@@ -3338,21 +3651,21 @@ class _SafetyBadge extends StatelessWidget {
       ContactSafety.verified => (
         'Verificato',
         Icons.verified_rounded,
-        const Color(0xFF9DE4B6),
+        AppPalette.color(0xFF9DE4B6),
       ),
       ContactSafety.pending => (
         'Da verificare',
         Icons.shield_outlined,
-        const Color(0xFFFFD27B),
+        AppPalette.color(0xFFFFD27B),
       ),
       ContactSafety.refreshRequired => (
         'Chiave aggiornata',
         Icons.key_rounded,
-        const Color(0xFFFFBE7A),
+        AppPalette.color(0xFFFFBE7A),
       ),
     };
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      padding: EdgeInsets.symmetric(horizontal: 9, vertical: 5),
       decoration: BoxDecoration(
         color: details.$3.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(20),
@@ -3361,7 +3674,7 @@ class _SafetyBadge extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(details.$2, size: 14, color: details.$3),
-          const SizedBox(width: 4),
+          SizedBox(width: 4),
           Text(
             details.$1,
             style: TextStyle(
@@ -3387,8 +3700,8 @@ class _BrandMark extends StatelessWidget {
       mainAxisSize: compact ? MainAxisSize.min : MainAxisSize.max,
       children: [
         SylphyLogo(size: compact ? 36 : 42, excludeFromSemantics: true),
-        const SizedBox(width: 10),
-        const Text(
+        SizedBox(width: 10),
+        Text(
           'Sylphy',
           style: TextStyle(
             fontSize: 21,
@@ -3417,13 +3730,13 @@ class _ProfileAvatar extends StatelessWidget {
     return Tooltip(
       message: profile.displayName,
       child: InkWell(
-        key: const ValueKey('open-profile'),
-        customBorder: const CircleBorder(),
+        key: ValueKey('open-profile'),
+        customBorder: CircleBorder(),
         onTap: onPressed,
         child: CircleAvatar(
-          key: const ValueKey('current-profile-avatar'),
+          key: ValueKey('current-profile-avatar'),
           radius: radius,
-          backgroundColor: const Color(0xFF2A313B),
+          backgroundColor: AppPalette.color(0xFF2A313B),
           backgroundImage: profile.photoBytes == null
               ? null
               : MemoryImage(profile.photoBytes!),
@@ -3472,21 +3785,21 @@ class _CreateGroupDialogState extends State<_CreateGroupDialog> {
     final code = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Entra tramite link'),
+        title: Text('Entra tramite link'),
         content: TextField(
           controller: controller,
           minLines: 2,
           maxLines: 4,
-          decoration: const InputDecoration(labelText: 'Link di invito Sylphy'),
+          decoration: InputDecoration(labelText: 'Link di invito Sylphy'),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Annulla'),
+            child: Text('Annulla'),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, controller.text.trim()),
-            child: const Text('Entra'),
+            child: Text('Entra'),
           ),
         ],
       ),
@@ -3496,7 +3809,7 @@ class _CreateGroupDialogState extends State<_CreateGroupDialog> {
         context,
         _GroupDraft(
           name: '',
-          invitationCodes: const [],
+          invitationCodes: [],
           professional: false,
           description: '',
           joinLink: code,
@@ -3545,7 +3858,7 @@ class _CreateGroupDialogState extends State<_CreateGroupDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Row(
+      title: Row(
         children: [
           Icon(Icons.groups_2_outlined),
           SizedBox(width: 12),
@@ -3563,7 +3876,7 @@ class _CreateGroupDialogState extends State<_CreateGroupDialog> {
                 TextFormField(
                   controller: _nameController,
                   autofocus: true,
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     labelText: 'Nome',
                     prefixIcon: Icon(Icons.title_rounded),
                   ),
@@ -3571,32 +3884,32 @@ class _CreateGroupDialogState extends State<_CreateGroupDialog> {
                       ? 'Inserisci un nome.'
                       : null,
                 ),
-                const SizedBox(height: 12),
+                SizedBox(height: 12),
                 TextFormField(
                   controller: _descriptionController,
                   maxLines: 2,
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     labelText: 'Descrizione (facoltativa)',
                     prefixIcon: Icon(Icons.subject_rounded),
                   ),
                 ),
-                const SizedBox(height: 12),
+                SizedBox(height: 12),
                 SwitchListTile.adaptive(
                   contentPadding: EdgeInsets.zero,
-                  title: const Text('Gruppo aziendale'),
-                  subtitle: const Text(
+                  title: Text('Gruppo aziendale'),
+                  subtitle: Text(
                     'Tutti possono scrivere. I permessi si modificano nelle impostazioni del gruppo.',
                   ),
                   value: _professional,
                   onChanged: (value) => setState(() => _professional = value),
                 ),
-                const SizedBox(height: 8),
+                SizedBox(height: 8),
                 TextFormField(
                   controller: _membersController,
                   minLines: 4,
                   maxLines: 8,
                   autocorrect: false,
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     labelText: 'Codici invito dei membri',
                     hintText: 'Un codice per riga',
                     alignLabelWithHint: true,
@@ -3616,18 +3929,15 @@ class _CreateGroupDialogState extends State<_CreateGroupDialog> {
         ),
       ),
       actions: [
-        TextButton(
-          onPressed: _joinViaLink,
-          child: const Text('Entra tramite link'),
-        ),
+        TextButton(onPressed: _joinViaLink, child: Text('Entra tramite link')),
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Annulla'),
+          child: Text('Annulla'),
         ),
         FilledButton.icon(
           onPressed: _submit,
-          icon: const Icon(Icons.check_rounded),
-          label: const Text('Crea'),
+          icon: Icon(Icons.check_rounded),
+          label: Text('Crea'),
         ),
       ],
     );
@@ -3671,7 +3981,7 @@ class _AddContactDialogState extends State<_AddContactDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Row(
+      title: Row(
         children: [
           Icon(Icons.person_add_alt_1_rounded),
           SizedBox(width: 12),
@@ -3687,20 +3997,23 @@ class _AddContactDialogState extends State<_AddContactDialog> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
+                Text(
                   'Chiedi alla persona il suo codice invito Sylphy. Il core nativo controllerà identità, firme e scadenza prima di aggiungerla.',
-                  style: TextStyle(color: Color(0xFFB8C1CC), height: 1.4),
+                  style: TextStyle(
+                    color: AppPalette.color(0xFFB8C1CC),
+                    height: 1.4,
+                  ),
                 ),
-                const SizedBox(height: 20),
+                SizedBox(height: 20),
                 TextFormField(
-                  key: const ValueKey('contact-invitation-code'),
+                  key: ValueKey('contact-invitation-code'),
                   controller: _invitationController,
                   autofocus: true,
                   minLines: 3,
                   maxLines: 6,
                   autocorrect: false,
                   enableSuggestions: false,
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     labelText: 'Codice invito',
                     hintText: 'sylphy:…',
                     alignLabelWithHint: true,
@@ -3710,21 +4023,21 @@ class _AddContactDialogState extends State<_AddContactDialog> {
                       ? 'Incolla il codice invito.'
                       : null,
                 ),
-                const SizedBox(height: 12),
-                const Row(
+                SizedBox(height: 12),
+                Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Icon(
                       Icons.verified_user_outlined,
                       size: 18,
-                      color: Color(0xFFCFF36A),
+                      color: AppPalette.color(0xFFCFF36A),
                     ),
                     SizedBox(width: 8),
                     Expanded(
                       child: Text(
                         'Puoi ricevere e inviare subito. Verifica il fingerprint solo se vuoi contrassegnare questa persona come sicura.',
                         style: TextStyle(
-                          color: Color(0xFF9299A5),
+                          color: AppPalette.color(0xFF9299A5),
                           fontSize: 12,
                         ),
                       ),
@@ -3739,13 +4052,13 @@ class _AddContactDialogState extends State<_AddContactDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Annulla'),
+          child: Text('Annulla'),
         ),
         FilledButton.icon(
-          key: const ValueKey('confirm-add-contact'),
+          key: ValueKey('confirm-add-contact'),
           onPressed: _submit,
-          icon: const Icon(Icons.person_add_alt_1_rounded),
-          label: const Text('Aggiungi'),
+          icon: Icon(Icons.person_add_alt_1_rounded),
+          label: Text('Aggiungi'),
         ),
       ],
     );
@@ -3763,26 +4076,26 @@ class _VaultStatusCard extends StatelessWidget {
     return Container(
       padding: EdgeInsets.all(compact ? 12 : 14),
       decoration: BoxDecoration(
-        color: const Color(0xFF1C2221),
+        color: AppPalette.color(0xFF1C2221),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFF34463A)),
+        border: Border.all(color: AppPalette.color(0xFF34463A)),
       ),
       child: Row(
         children: [
           Container(
             width: compact ? 32 : 36,
             height: compact ? 32 : 36,
-            decoration: const BoxDecoration(
-              color: Color(0xFF2A3D2F),
+            decoration: BoxDecoration(
+              color: AppPalette.color(0xFF2A3D2F),
               shape: BoxShape.circle,
             ),
-            child: const Icon(
+            child: Icon(
               Icons.lock_rounded,
-              color: Color(0xFFA5E5B7),
+              color: AppPalette.color(0xFFA5E5B7),
               size: 18,
             ),
           ),
-          const SizedBox(width: 10),
+          SizedBox(width: 10),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -3791,18 +4104,15 @@ class _VaultStatusCard extends StatelessWidget {
                   veilidSnapshot.phase == VeilidPhase.unavailable
                       ? 'Core nativo non disponibile'
                       : 'Core di sicurezza',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                  ),
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800),
                 ),
-                const SizedBox(height: 2),
+                SizedBox(height: 2),
                 Text(
                   veilidSnapshot.phase == VeilidPhase.unavailable
                       ? 'Nessun dato dimostrativo caricato'
                       : 'Bridge Rust + Veilid disponibile',
-                  style: const TextStyle(
-                    color: Color(0xFFAEB7C3),
+                  style: TextStyle(
+                    color: AppPalette.color(0xFFAEB7C3),
                     fontSize: 11,
                   ),
                 ),
@@ -3824,9 +4134,9 @@ class _MobileNetworkStatus extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(14),
+      padding: EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: const Color(0xFF1B2027),
+        color: AppPalette.color(0xFF1B2027),
         borderRadius: BorderRadius.circular(17),
       ),
       child: Row(
@@ -3845,20 +4155,20 @@ class _MobileNetworkStatus extends StatelessWidget {
               color: _networkColor(snapshot.phase),
             ),
           ),
-          const SizedBox(width: 12),
+          SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
                   snapshot.title,
-                  style: const TextStyle(fontWeight: FontWeight.w800),
+                  style: TextStyle(fontWeight: FontWeight.w800),
                 ),
-                const SizedBox(height: 2),
+                SizedBox(height: 2),
                 Text(
                   snapshot.detail,
-                  style: const TextStyle(
-                    color: Color(0xFFB2BAC5),
+                  style: TextStyle(
+                    color: AppPalette.color(0xFFB2BAC5),
                     fontSize: 12,
                   ),
                 ),
@@ -3870,7 +4180,7 @@ class _MobileNetworkStatus extends StatelessWidget {
             IconButton(
               tooltip: 'Riprova',
               onPressed: onRetry,
-              icon: const Icon(Icons.refresh_rounded),
+              icon: Icon(Icons.refresh_rounded),
             ),
         ],
       ),
@@ -3887,18 +4197,18 @@ class _DaySeparator extends StatelessWidget {
   Widget build(BuildContext context) {
     return Center(
       child: Container(
-        margin: const EdgeInsets.only(bottom: 18),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        margin: EdgeInsets.only(bottom: 18),
+        padding: EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         decoration: BoxDecoration(
-          color: const Color(0xFF20252E),
+          color: AppPalette.color(0xFF20252E),
           borderRadius: BorderRadius.circular(20),
         ),
         child: Text(
           DateUtils.isSameDay(date, DateTime.now())
               ? 'OGGI'
               : '${date.day}/${date.month}/${date.year}',
-          style: const TextStyle(
-            color: Color(0xFFAEB7C3),
+          style: TextStyle(
+            color: AppPalette.color(0xFFAEB7C3),
             fontSize: 10,
             fontWeight: FontWeight.w800,
             letterSpacing: 0.8,
@@ -3918,8 +4228,8 @@ class _DetailLabel extends StatelessWidget {
   Widget build(BuildContext context) {
     return Text(
       label,
-      style: const TextStyle(
-        color: Color(0xFF9299A5),
+      style: TextStyle(
+        color: AppPalette.color(0xFF9299A5),
         fontSize: 10,
         fontWeight: FontWeight.w800,
         letterSpacing: 1.1,
@@ -3942,33 +4252,30 @@ class _InfoCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(11),
+      padding: EdgeInsets.all(11),
       decoration: BoxDecoration(
-        color: const Color(0xFF1D222A),
+        color: AppPalette.color(0xFF1D222A),
         borderRadius: BorderRadius.circular(13),
       ),
       child: Row(
         children: [
-          Icon(icon, color: const Color(0xFFB8C1CC), size: 19),
-          const SizedBox(width: 9),
+          Icon(icon, color: AppPalette.color(0xFFB8C1CC), size: 19),
+          SizedBox(width: 9),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
                   title,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 11,
-                    color: Color(0xFFAEB7C3),
+                    color: AppPalette.color(0xFFAEB7C3),
                   ),
                 ),
-                const SizedBox(height: 2),
+                SizedBox(height: 2),
                 Text(
                   subtitle,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                  ),
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
                 ),
               ],
             ),
@@ -4026,7 +4333,7 @@ void _showPrivacyOverview(
 ) {
   showModalBottomSheet<void>(
     context: context,
-    backgroundColor: const Color(0xFF1A1E25),
+    backgroundColor: AppPalette.color(0xFF1A1E25),
     showDragHandle: true,
     isScrollControlled: true,
     builder: (sheetContext) => ConstrainedBox(
@@ -4105,33 +4412,36 @@ class _PrivacyOverviewSheetState extends State<_PrivacyOverviewSheet> {
       top: false,
       child: SingleChildScrollView(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(24, 8, 24, 30),
+          padding: EdgeInsets.fromLTRB(24, 8, 24, 30),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
+              Text(
                 'Privacy di Sylphy',
                 style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
               ),
-              const SizedBox(height: 12),
+              SizedBox(height: 12),
               Text(
                 coreLoaded
                     ? 'Il bridge Rust è caricato. Il nodo Veilid usa storage isolato e accetta soltanto envelope applicativi opachi.'
                     : 'La libreria Rust non è disponibile. Sylphy resta chiuso e non mostra conversazioni dimostrative.',
-                style: const TextStyle(color: Color(0xFFC1C8D2), height: 1.45),
+                style: TextStyle(
+                  color: AppPalette.color(0xFFC1C8D2),
+                  height: 1.45,
+                ),
               ),
-              const SizedBox(height: 16),
+              SizedBox(height: 16),
               AnimatedBuilder(
                 animation: widget.veilidService,
                 builder: (context, _) {
                   final snapshot = widget.veilidService.snapshot;
                   return Container(
-                    padding: const EdgeInsets.all(14),
+                    padding: EdgeInsets.all(14),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF141920),
+                      color: AppPalette.color(0xFF141920),
                       borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: const Color(0xFF303741)),
+                      border: Border.all(color: AppPalette.color(0xFF303741)),
                     ),
                     child: Row(
                       children: [
@@ -4139,22 +4449,20 @@ class _PrivacyOverviewSheetState extends State<_PrivacyOverviewSheet> {
                           Icons.hub_rounded,
                           color: _networkColor(snapshot.phase),
                         ),
-                        const SizedBox(width: 12),
+                        SizedBox(width: 12),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
                                 snapshot.title,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w800,
-                                ),
+                                style: TextStyle(fontWeight: FontWeight.w800),
                               ),
-                              const SizedBox(height: 2),
+                              SizedBox(height: 2),
                               Text(
                                 snapshot.detail,
-                                style: const TextStyle(
-                                  color: Color(0xFFAEB7C3),
+                                style: TextStyle(
+                                  color: AppPalette.color(0xFFAEB7C3),
                                   fontSize: 12,
                                 ),
                               ),
@@ -4166,54 +4474,54 @@ class _PrivacyOverviewSheetState extends State<_PrivacyOverviewSheet> {
                           IconButton(
                             tooltip: 'Riprova connessione',
                             onPressed: widget.veilidService.retry,
-                            icon: const Icon(Icons.refresh_rounded),
+                            icon: Icon(Icons.refresh_rounded),
                           ),
                       ],
                     ),
                   );
                 },
               ),
-              const SizedBox(height: 18),
-              const _PrivacyLine(
+              SizedBox(height: 18),
+              _PrivacyLine(
                 Icons.lock_outline_rounded,
                 'Vault Argon2id + XChaCha20-Poly1305',
               ),
-              const SizedBox(height: 12),
-              const _PrivacyLine(
+              SizedBox(height: 12),
+              _PrivacyLine(
                 Icons.key_outlined,
                 'X25519 + ML-KEM-768 nel core nativo',
               ),
-              const SizedBox(height: 12),
-              const _PrivacyLine(
+              SizedBox(height: 12),
+              _PrivacyLine(
                 Icons.sync_lock_rounded,
                 'Double Ratchet Signal con chiavi per messaggio',
               ),
-              const SizedBox(height: 12),
-              const _PrivacyLine(
+              SizedBox(height: 12),
+              _PrivacyLine(
                 Icons.hub_outlined,
                 'Envelope opachi per il trasporto',
               ),
               if (coreLoaded) ...[
-                const SizedBox(height: 22),
+                SizedBox(height: 22),
                 OutlinedButton.icon(
                   onPressed: _isChecking ? null : _checkNativeCore,
                   icon: _isChecking
-                      ? const SizedBox(
+                      ? SizedBox(
                           width: 16,
                           height: 16,
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
-                      : const Icon(Icons.verified_outlined),
-                  label: const Text('Verifica crittografia'),
+                      : Icon(Icons.verified_outlined),
+                  label: Text('Verifica crittografia'),
                 ),
                 if (resultText != null) ...[
-                  const SizedBox(height: 10),
+                  SizedBox(height: 10),
                   Text(
                     resultText,
                     style: TextStyle(
                       color: _response!.ok
-                          ? const Color(0xFF9DE4B6)
-                          : const Color(0xFFFFBE7A),
+                          ? AppPalette.color(0xFF9DE4B6)
+                          : AppPalette.color(0xFFFFBE7A),
                       fontWeight: FontWeight.w700,
                     ),
                   ),
@@ -4235,49 +4543,52 @@ Future<void> _showSecuritySheet(
 ) {
   return showModalBottomSheet<void>(
     context: context,
-    backgroundColor: const Color(0xFF1A1E25),
+    backgroundColor: AppPalette.color(0xFF1A1E25),
     showDragHandle: true,
     builder: (context) => SafeArea(
       top: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(24, 8, 24, 30),
+        padding: EdgeInsets.fromLTRB(24, 8, 24, 30),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
               'Sicurezza con ${conversation.name}',
-              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
             ),
-            const SizedBox(height: 14),
+            SizedBox(height: 14),
             _SafetyBadge(safety: conversation.safety),
-            const SizedBox(height: 20),
-            const Text(
+            SizedBox(height: 20),
+            Text(
               'FINGERPRINT',
               style: TextStyle(
-                color: Color(0xFF9299A5),
+                color: AppPalette.color(0xFF9299A5),
                 fontSize: 11,
                 fontWeight: FontWeight.w800,
                 letterSpacing: 1.1,
               ),
             ),
-            const SizedBox(height: 7),
+            SizedBox(height: 7),
             SelectableText(
               conversation.fingerprint,
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 16,
                 fontWeight: FontWeight.w700,
                 letterSpacing: 1.2,
               ),
             ),
-            const SizedBox(height: 20),
-            const Text(
+            SizedBox(height: 20),
+            Text(
               'I messaggi sono visibili subito. La verifica è facoltativa e serve a confermare, confrontando il fingerprint fuori da Sylphy, che stai parlando con la persona giusta.',
-              style: TextStyle(color: Color(0xFFC1C8D2), height: 1.45),
+              style: TextStyle(
+                color: AppPalette.color(0xFFC1C8D2),
+                height: 1.45,
+              ),
             ),
-            const SizedBox(height: 20),
+            SizedBox(height: 20),
             FilledButton.icon(
-              key: const ValueKey('toggle-contact-verification'),
+              key: ValueKey('toggle-contact-verification'),
               onPressed: () async {
                 try {
                   await bridge.setContactVerified(
@@ -4326,7 +4637,7 @@ Future<bool> _confirmDeleteConversation(
   final confirmed = await showDialog<bool>(
     context: context,
     builder: (dialogContext) => AlertDialog(
-      title: const Text('Cancellare la chat?'),
+      title: Text('Cancellare la chat?'),
       content: Text(
         conversation.isGroup
             ? 'Uscirai da ${conversation.name} e cancellerai la cronologia locale. Non riceverai più messaggi o aggiornamenti del gruppo. Se sei il proprietario, la proprietà passerà a un amministratore oppure a un membro.'
@@ -4335,12 +4646,12 @@ Future<bool> _confirmDeleteConversation(
       actions: [
         TextButton(
           onPressed: () => Navigator.of(dialogContext).pop(false),
-          child: const Text('Annulla'),
+          child: Text('Annulla'),
         ),
         FilledButton(
-          key: const ValueKey('confirm-delete-conversation'),
+          key: ValueKey('confirm-delete-conversation'),
           onPressed: () => Navigator.of(dialogContext).pop(true),
-          child: const Text('Cancella'),
+          child: Text('Cancella'),
         ),
       ],
     ),
@@ -4371,14 +4682,11 @@ class _PrivacyLine extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        const SizedBox(width: 4),
-        Icon(icon, size: 19, color: Color(0xFFD4F66A)),
-        const SizedBox(width: 12),
+        SizedBox(width: 4),
+        Icon(icon, size: 19, color: AppPalette.color(0xFFD4F66A)),
+        SizedBox(width: 12),
         Expanded(
-          child: Text(
-            label,
-            style: const TextStyle(fontWeight: FontWeight.w700),
-          ),
+          child: Text(label, style: TextStyle(fontWeight: FontWeight.w700)),
         ),
       ],
     );
@@ -4386,12 +4694,12 @@ class _PrivacyLine extends StatelessWidget {
 }
 
 Color _networkColor(VeilidPhase phase) => switch (phase) {
-  VeilidPhase.attached => const Color(0xFF8CE6AC),
-  VeilidPhase.connecting => const Color(0xFFCFF36A),
-  VeilidPhase.degraded => const Color(0xFFFFC56B),
-  VeilidPhase.offline => const Color(0xFF95A0AF),
-  VeilidPhase.unavailable => const Color(0xFF77818F),
-  VeilidPhase.error => const Color(0xFFFF8F86),
+  VeilidPhase.attached => AppPalette.color(0xFF8CE6AC),
+  VeilidPhase.connecting => AppPalette.color(0xFFCFF36A),
+  VeilidPhase.degraded => AppPalette.color(0xFFFFC56B),
+  VeilidPhase.offline => AppPalette.color(0xFF95A0AF),
+  VeilidPhase.unavailable => AppPalette.color(0xFF77818F),
+  VeilidPhase.error => AppPalette.color(0xFFFF8F86),
 };
 
 bool get _usesDesktopKeyboard =>
@@ -4405,7 +4713,7 @@ String _signatureForConversations(
 ) => conversations
     .map(
       (item) =>
-          '${item.id}|${item.name}|${item.initials}|${item.accentValue}|${Object.hashAll(item.avatarBytes ?? const <int>[])}|${item.description}|${item.fingerprint}|${item.isAdmin}|${item.lastActivity.microsecondsSinceEpoch}|${item.lastMessage}|${item.unreadCount}|${item.safety.name}|${item.isOnline}|${item.type.name}|${item.memberCount}|${item.canSendMessages}|${item.groupRevision}|${item.pinnedMessageIds.join(",")}',
+          '${item.id}|${item.name}|${item.initials}|${item.accentValue}|${Object.hashAll(item.avatarBytes ?? <int>[])}|${item.description}|${item.fingerprint}|${item.isAdmin}|${item.lastActivity.microsecondsSinceEpoch}|${item.lastMessage}|${item.unreadCount}|${item.safety.name}|${item.isOnline}|${item.type.name}|${item.memberCount}|${item.canSendMessages}|${item.groupRevision}|${item.pinnedMessageIds.join(",")}',
     )
     .join('\n');
 

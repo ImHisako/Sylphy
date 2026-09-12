@@ -1,3 +1,4 @@
+import '../../core/privacy/app_palette.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -13,7 +14,7 @@ Future<bool> showProfileSheet({
   return showModalBottomSheet<bool>(
     context: context,
     isScrollControlled: true,
-    backgroundColor: const Color(0xFF1A1E25),
+    backgroundColor: AppPalette.color(0xFF1A1E25),
     showDragHandle: true,
     builder: (sheetContext) => AnimatedBuilder(
       animation: identityService,
@@ -49,7 +50,7 @@ class _ProfileSheetContent extends StatelessWidget {
     await Clipboard.setData(ClipboardData(text: invitation));
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
+        SnackBar(
           content: Text('ID Sylphy copiato. Ora puoi inviarlo alla persona.'),
         ),
       );
@@ -70,20 +71,20 @@ class _ProfileSheetContent extends StatelessWidget {
         ),
         child: Center(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 560),
+            constraints: BoxConstraints(maxWidth: 560),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Text(
+                Text(
                   'Il mio profilo',
                   style: TextStyle(fontSize: 23, fontWeight: FontWeight.w900),
                 ),
-                const SizedBox(height: 22),
+                SizedBox(height: 22),
                 Row(
                   children: [
                     CircleAvatar(
                       radius: 38,
-                      backgroundColor: const Color(0xFF2A313B),
+                      backgroundColor: AppPalette.color(0xFF2A313B),
                       backgroundImage: profile.photoBytes == null
                           ? null
                           : MemoryImage(profile.photoBytes!),
@@ -98,41 +99,43 @@ class _ProfileSheetContent extends StatelessWidget {
                             )
                           : null,
                     ),
-                    const SizedBox(width: 16),
+                    SizedBox(width: 16),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
                             profile.displayName,
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 20,
                               fontWeight: FontWeight.w800,
                             ),
                           ),
-                          const SizedBox(height: 4),
-                          const Text(
+                          SizedBox(height: 4),
+                          Text(
                             'Profilo locale Sylphy',
-                            style: TextStyle(color: Color(0xFF9DA5B2)),
+                            style: TextStyle(
+                              color: AppPalette.color(0xFF9DA5B2),
+                            ),
                           ),
                         ],
                       ),
                     ),
                     IconButton(
-                      key: const ValueKey('edit-profile'),
+                      key: ValueKey('edit-profile'),
                       tooltip: 'Modifica nome o foto',
                       onPressed: onEditProfile,
-                      icon: const Icon(Icons.edit_outlined),
+                      icon: Icon(Icons.edit_outlined),
                     ),
                   ],
                 ),
-                const SizedBox(height: 24),
+                SizedBox(height: 24),
                 Container(
-                  padding: const EdgeInsets.all(18),
+                  padding: EdgeInsets.all(18),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF11161D),
+                    color: AppPalette.color(0xFF11161D),
                     borderRadius: BorderRadius.circular(18),
-                    border: Border.all(color: const Color(0xFF303741)),
+                    border: Border.all(color: AppPalette.color(0xFF303741)),
                   ),
                   child: _IdentityContent(
                     snapshot: identity,
@@ -164,7 +167,7 @@ class _IdentityContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (snapshot.phase == IdentityPhase.loading) {
-      return const Row(
+      return Row(
         children: [
           SizedBox(
             width: 22,
@@ -180,23 +183,23 @@ class _IdentityContent extends StatelessWidget {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
+          Text(
             'ID Sylphy non disponibile',
             style: TextStyle(fontWeight: FontWeight.w800),
           ),
-          const SizedBox(height: 6),
+          SizedBox(height: 6),
           Text(
             snapshot.phase == IdentityPhase.unavailable
                 ? 'Il servizio di identità non è incluso in questa build.'
                 : 'Non è stato possibile aprire il vault dell’identità (${snapshot.errorCode ?? 'errore sconosciuto'}).',
-            style: const TextStyle(color: Color(0xFFAEB7C3), height: 1.4),
+            style: TextStyle(color: AppPalette.color(0xFFAEB7C3), height: 1.4),
           ),
           if (snapshot.phase == IdentityPhase.error) ...[
-            const SizedBox(height: 12),
+            SizedBox(height: 12),
             OutlinedButton.icon(
               onPressed: onRetry,
-              icon: const Icon(Icons.refresh_rounded),
-              label: const Text('Riprova'),
+              icon: Icon(Icons.refresh_rounded),
+              label: Text('Riprova'),
             ),
           ],
         ],
@@ -210,14 +213,17 @@ class _IdentityContent extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Row(
+        Row(
           children: [
-            Icon(Icons.fingerprint_rounded, color: Color(0xFFCFF36A)),
+            Icon(
+              Icons.fingerprint_rounded,
+              color: AppPalette.color(0xFFCFF36A),
+            ),
             SizedBox(width: 10),
             Text(
               'IL TUO ID SYLPHY',
               style: TextStyle(
-                color: Color(0xFFCFF36A),
+                color: AppPalette.color(0xFFCFF36A),
                 fontSize: 11,
                 fontWeight: FontWeight.w900,
                 letterSpacing: 1.1,
@@ -225,33 +231,33 @@ class _IdentityContent extends StatelessWidget {
             ),
           ],
         ),
-        const SizedBox(height: 12),
+        SizedBox(height: 12),
         SelectableText(
           id,
-          key: const ValueKey('profile-identity-id'),
-          style: const TextStyle(
+          key: ValueKey('profile-identity-id'),
+          style: TextStyle(
             fontFamily: 'monospace',
             fontWeight: FontWeight.w700,
             height: 1.45,
           ),
         ),
-        const SizedBox(height: 14),
+        SizedBox(height: 14),
         Text(
           hasShortInvitation
               ? 'Il pulsante copia il nuovo ID breve pubblicato su Veilid. La persona può incollarlo in “Aggiungi contatto”; Sylphy recupererà e verificherà automaticamente il bundle crittografico completo.'
               : 'Pubblicazione dell’ID breve su Veilid in corso. Sylphy riproverà automaticamente appena la rete è disponibile.',
-          style: const TextStyle(color: Color(0xFFAEB7C3), height: 1.4),
+          style: TextStyle(color: AppPalette.color(0xFFAEB7C3), height: 1.4),
         ),
         if (expiration != null) ...[
-          const SizedBox(height: 8),
+          SizedBox(height: 8),
           Text(
             'Invito valido fino al ${expiration.day}/${expiration.month}/${expiration.year}',
-            style: const TextStyle(color: Color(0xFF858F9D), fontSize: 12),
+            style: TextStyle(color: AppPalette.color(0xFF858F9D), fontSize: 12),
           ),
         ],
-        const SizedBox(height: 16),
+        SizedBox(height: 16),
         FilledButton.icon(
-          key: const ValueKey('copy-profile-invitation'),
+          key: ValueKey('copy-profile-invitation'),
           onPressed: hasShortInvitation ? () => onCopy(invitation) : null,
           icon: Icon(
             hasShortInvitation ? Icons.copy_rounded : Icons.sync_rounded,

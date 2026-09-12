@@ -1,3 +1,4 @@
+import '../../core/privacy/app_palette.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -90,8 +91,12 @@ TextSpan messageTextSpan(
         recognizer: recognizerFor?.call(token),
         style: TextStyle(
           color: mention
-              ? (outgoing ? const Color(0xFF006D91) : const Color(0xFF72DCFF))
-              : (outgoing ? const Color(0xFF1748BD) : const Color(0xFF82ACFF)),
+              ? (outgoing
+                    ? AppPalette.color(0xFF006D91)
+                    : AppPalette.color(0xFF72DCFF))
+              : (outgoing
+                    ? AppPalette.color(0xFF1748BD)
+                    : AppPalette.color(0xFF82ACFF)),
           fontWeight: FontWeight.w600,
           decoration: mention ? TextDecoration.none : TextDecoration.underline,
         ),
@@ -156,14 +161,14 @@ class _MessageTextState extends State<MessageText> {
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(
-          title: const Text('Aprire il link?'),
+          title: Text('Aprire il link?'),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Si aprirà una pagina nel browser esterno:'),
-                const SizedBox(height: 12),
+                Text('Si aprirà una pagina nel browser esterno:'),
+                SizedBox(height: 12),
                 SelectableText(
                   uri.toString(),
                   textDirection: TextDirection.ltr,
@@ -175,11 +180,11 @@ class _MessageTextState extends State<MessageText> {
             TextButton(
               autofocus: true,
               onPressed: () => Navigator.pop(context, false),
-              child: const Text('Annulla'),
+              child: Text('Annulla'),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(context, true),
-              child: const Text('Apri nel browser'),
+              child: Text('Apri nel browser'),
             ),
           ],
         ),
@@ -199,7 +204,7 @@ class _MessageTextState extends State<MessageText> {
   void _showOpenError() {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Impossibile aprire il link nel browser.')),
+      SnackBar(content: Text('Impossibile aprire il link nel browser.')),
     );
   }
 

@@ -89,7 +89,17 @@ class MainActivity : FlutterActivity() {
                         result.success(true)
                     }
                     "showMessageNotification" -> {
-                        showMessageNotification(call.argument<Boolean>("pinned") == true)
+                        showMessageNotification(call.argument<Boolean>("pinned") == true, call.argument<String>("conversation_id"))
+                        result.success(true)
+                    }
+                    "clearConversationNotification" -> {
+                        call.argument<String>("conversation_id")?.let {
+                            NotificationManagerCompat.from(this).cancel("conversation:$it", MessagingService.INCOMING_NOTIFICATION_ID)
+                        }
+                        result.success(true)
+                    }
+                    "clearMessageSummary" -> {
+                        NotificationManagerCompat.from(this).cancel(MessagingService.INCOMING_NOTIFICATION_ID)
                         result.success(true)
                     }
                     "startBackgroundMessaging" -> {
@@ -189,7 +199,7 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun showMessageNotification(pinned: Boolean = false) {
+    private fun showMessageNotification(pinned: Boolean = false, conversationId: String? = null) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
                 PackageManager.PERMISSION_GRANTED
@@ -216,7 +226,7 @@ class MainActivity : FlutterActivity() {
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .build()
         NotificationManagerCompat.from(this)
-            .notify((System.currentTimeMillis() and 0x7fffffff).toInt(), notification)
+            .notify("conversation:${conversationId ?: "unknown"}", MessagingService.INCOMING_NOTIFICATION_ID, notification)
     }
 
     @Synchronized

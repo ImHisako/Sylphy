@@ -78,6 +78,19 @@ enum CoreRequest {
         conversation_id: String,
         plaintext: String,
     },
+    SendChannelText {
+        conversation_id: String,
+        plaintext: String,
+        channel_id: String,
+        #[serde(default)]
+        reply_to: Option<String>,
+    },
+    SendChannelAttachment {
+        conversation_id: String,
+        file_name: String,
+        bytes_base64: String,
+        channel_id: String,
+    },
     SendReply {
         conversation_id: String,
         plaintext: String,
@@ -87,6 +100,10 @@ enum CoreRequest {
         conversation_id: String,
         file_name: String,
         bytes_base64: String,
+    },
+    MarkChannelRead {
+        conversation_id: String,
+        channel_id: Option<String>,
     },
     MarkConversationRead {
         conversation_id: String,
@@ -248,6 +265,36 @@ fn dispatch_request(request: CoreRequest) -> Result<CoreResponse, CoreError> {
             code: "ok",
             data: messaging_adapter::groups::search(&conversation_id, &query, offset)?,
         }),
+        CoreRequest::SendChannelText {
+            conversation_id,
+            plaintext,
+            channel_id,
+            reply_to,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::groups::send_channel_text(
+                &conversation_id,
+                &plaintext,
+                &channel_id,
+                reply_to.as_deref(),
+            )?,
+        }),
+        CoreRequest::SendChannelAttachment {
+            conversation_id,
+            file_name,
+            bytes_base64,
+            channel_id,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::send_attachment_in_channel(
+                &conversation_id,
+                &file_name,
+                &bytes_base64,
+                Some(&channel_id),
+            )?,
+        }),
         CoreRequest::SendReply {
             conversation_id,
             plaintext,
@@ -378,6 +425,14 @@ fn dispatch_request(request: CoreRequest) -> Result<CoreResponse, CoreError> {
             ok: true,
             code: "ok",
             data: messaging_adapter::send_attachment(&conversation_id, &file_name, &bytes_base64)?,
+        }),
+        CoreRequest::MarkChannelRead {
+            conversation_id,
+            channel_id,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::mark_channel_read(&conversation_id, channel_id.as_deref())?,
         }),
         CoreRequest::MarkConversationRead { conversation_id } => Ok(CoreResponse {
             ok: true,

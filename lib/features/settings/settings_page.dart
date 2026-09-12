@@ -1,3 +1,4 @@
+import '../../core/privacy/app_palette.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -58,33 +59,34 @@ class _SettingsPageState extends State<SettingsPage> {
                     ? 'Scegli una password di almeno 10 caratteri. Servirà sull’altro dispositivo e non viene salvata.'
                     : 'Inserisci la password scelta quando hai creato il file account.',
               ),
-              const SizedBox(height: 16),
+              SizedBox(height: 16),
               TextField(
                 controller: first,
                 obscureText: true,
                 autofocus: true,
-                decoration: const InputDecoration(labelText: 'Password'),
+                decoration: InputDecoration(labelText: 'Password'),
               ),
               if (confirm) ...[
-                const SizedBox(height: 10),
+                SizedBox(height: 10),
                 TextField(
                   controller: second,
                   obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Ripeti password',
-                  ),
+                  decoration: InputDecoration(labelText: 'Ripeti password'),
                 ),
               ],
               if (error != null) ...[
-                const SizedBox(height: 10),
-                Text(error!, style: const TextStyle(color: Color(0xFFFF9D95))),
+                SizedBox(height: 10),
+                Text(
+                  error!,
+                  style: TextStyle(color: AppPalette.color(0xFFFF9D95)),
+                ),
               ],
             ],
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('Annulla'),
+              child: Text('Annulla'),
             ),
             FilledButton(
               onPressed: () {
@@ -113,7 +115,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final core = widget.nativeCore;
     if (core is NativeCoreClient) return core;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
+      SnackBar(
         content: Text(
           'Trasferimento non disponibile: installa la versione Sylphy più recente.',
         ),
@@ -133,11 +135,11 @@ class _SettingsPageState extends State<SettingsPage> {
       showDragHandle: true,
       builder: (context) => SafeArea(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
+          padding: EdgeInsets.fromLTRB(16, 4, 16, 20),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const ListTile(
+              ListTile(
                 title: Text(
                   'Collega un altro dispositivo',
                   style: TextStyle(fontWeight: FontWeight.w800),
@@ -145,22 +147,20 @@ class _SettingsPageState extends State<SettingsPage> {
                 subtitle: Text('Scegli come trasferire l’account cifrato.'),
               ),
               ListTile(
-                key: const ValueKey('export-account-qr'),
-                leading: const Icon(Icons.qr_code_2_rounded),
-                title: const Text('Mostra QR Code'),
-                subtitle: const Text(
+                key: ValueKey('export-account-qr'),
+                leading: Icon(Icons.qr_code_2_rounded),
+                title: Text('Mostra QR Code'),
+                subtitle: Text(
                   'Trasferimento diretto sulla stessa rete Wi-Fi o LAN.',
                 ),
                 onTap: () =>
                     Navigator.pop(context, _AccountExportMethod.qrCode),
               ),
               ListTile(
-                key: const ValueKey('export-account-file'),
-                leading: const Icon(Icons.save_alt_rounded),
-                title: const Text('Salva file cifrato'),
-                subtitle: const Text(
-                  'Metodo compatibile con tutti i dispositivi.',
-                ),
+                key: ValueKey('export-account-file'),
+                leading: Icon(Icons.save_alt_rounded),
+                title: Text('Salva file cifrato'),
+                subtitle: Text('Metodo compatibile con tutti i dispositivi.'),
                 onTap: () => Navigator.pop(context, _AccountExportMethod.file),
               ),
             ],
@@ -276,7 +276,7 @@ class _SettingsPageState extends State<SettingsPage> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const ListTile(
+              ListTile(
                 title: Text(
                   'Usa un account esistente',
                   style: TextStyle(fontWeight: FontWeight.w800),
@@ -284,19 +284,19 @@ class _SettingsPageState extends State<SettingsPage> {
                 subtitle: Text('Scegli il computer o un file già esportato.'),
               ),
               ListTile(
-                key: const ValueKey('import-account-qr'),
-                leading: const Icon(Icons.qr_code_scanner_rounded),
-                title: const Text('Scansiona QR dal computer'),
+                key: ValueKey('import-account-qr'),
+                leading: Icon(Icons.qr_code_scanner_rounded),
+                title: Text('Scansiona QR dal computer'),
                 onTap: () =>
                     Navigator.pop(context, _AccountImportMethod.qrCode),
               ),
               ListTile(
-                key: const ValueKey('import-account-file'),
-                leading: const Icon(Icons.file_open_outlined),
-                title: const Text('Scegli file account'),
+                key: ValueKey('import-account-file'),
+                leading: Icon(Icons.file_open_outlined),
+                title: Text('Scegli file account'),
                 onTap: () => Navigator.pop(context, _AccountImportMethod.file),
               ),
-              const SizedBox(height: 12),
+              SizedBox(height: 12),
             ],
           ),
         ),
@@ -306,8 +306,8 @@ class _SettingsPageState extends State<SettingsPage> {
       if (useQr) {
         qrPayload = await Navigator.of(context).push<String>(
           MaterialPageRoute(
-            settings: const RouteSettings(name: '/account-qr-scanner'),
-            builder: (context) => const AccountQrScannerPage(),
+            settings: RouteSettings(name: '/account-qr-scanner'),
+            builder: (context) => AccountQrScannerPage(),
           ),
         );
         if (!mounted || qrPayload == null) return;
@@ -430,13 +430,13 @@ class _SettingsPageState extends State<SettingsPage> {
     }
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(const SnackBar(content: Text('Log diagnostici copiati.')));
+    ).showSnackBar(SnackBar(content: Text('Log diagnostici copiati.')));
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Impostazioni')),
+      appBar: AppBar(title: Text('Impostazioni')),
       body: AnimatedBuilder(
         animation: Listenable.merge([
           AppLog.instance,
@@ -447,7 +447,7 @@ class _SettingsPageState extends State<SettingsPage> {
           final snapshot = widget.veilidService.snapshot;
           final privacy = widget.privacySettings.value;
           return ListView(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+            padding: EdgeInsets.fromLTRB(16, 8, 16, 32),
             children: [
               _SettingsCard(
                 child: ListTile(
@@ -460,49 +460,49 @@ class _SettingsPageState extends State<SettingsPage> {
                   trailing: IconButton(
                     tooltip: 'Riprova connessione',
                     onPressed: widget.veilidService.retry,
-                    icon: const Icon(Icons.refresh_rounded),
+                    icon: Icon(Icons.refresh_rounded),
                   ),
                 ),
               ),
-              const SizedBox(height: 16),
-              const _SectionTitle('ACCOUNT E DISPOSITIVI'),
-              const SizedBox(height: 8),
+              SizedBox(height: 16),
+              _SectionTitle('ACCOUNT E DISPOSITIVI'),
+              SizedBox(height: 8),
               _SettingsCard(
                 child: Column(
                   children: [
                     ListTile(
-                      key: const ValueKey('export-account'),
-                      leading: const Icon(Icons.laptop_chromebook_rounded),
-                      title: const Text('Collega un altro dispositivo'),
-                      subtitle: const Text(
+                      key: ValueKey('export-account'),
+                      leading: Icon(Icons.laptop_chromebook_rounded),
+                      title: Text('Collega un altro dispositivo'),
+                      subtitle: Text(
                         'Crea un file cifrato con identità, contatti, chat, messaggi e sessioni sicure.',
                       ),
                       trailing: _accountTransferRunning
-                          ? const SizedBox(
+                          ? SizedBox(
                               width: 22,
                               height: 22,
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
-                          : const Icon(Icons.chevron_right_rounded),
+                          : Icon(Icons.chevron_right_rounded),
                       onTap: _accountTransferRunning
                           ? null
                           : _linkAnotherDevice,
                     ),
-                    const Divider(height: 1),
+                    Divider(height: 1),
                     ListTile(
-                      key: const ValueKey('import-account'),
-                      leading: const Icon(Icons.phonelink_ring_rounded),
-                      title: const Text('Usa un account esistente'),
-                      subtitle: const Text(
+                      key: ValueKey('import-account'),
+                      leading: Icon(Icons.phonelink_ring_rounded),
+                      title: Text('Usa un account esistente'),
+                      subtitle: Text(
                         'Importa il file creato sull’altro telefono o computer.',
                       ),
-                      trailing: const Icon(Icons.chevron_right_rounded),
+                      trailing: Icon(Icons.chevron_right_rounded),
                       onTap: _accountTransferRunning ? null : _importAccount,
                     ),
                     if (_accountTransferResult != null) ...[
-                      const Divider(height: 1),
+                      Divider(height: 1),
                       Padding(
-                        padding: const EdgeInsets.all(16),
+                        padding: EdgeInsets.all(16),
                         child: Align(
                           alignment: Alignment.centerLeft,
                           child: Text(_accountTransferResult!),
@@ -512,17 +512,17 @@ class _SettingsPageState extends State<SettingsPage> {
                   ],
                 ),
               ),
-              const SizedBox(height: 16),
-              const _SectionTitle('PRIVACY DEL PROFILO'),
-              const SizedBox(height: 8),
+              SizedBox(height: 16),
+              _SectionTitle('PRIVACY DEL PROFILO'),
+              SizedBox(height: 8),
               _SettingsCard(
                 child: Column(
                   children: [
                     SwitchListTile(
-                      key: const ValueKey('share-display-name'),
-                      secondary: const Icon(Icons.badge_outlined),
-                      title: const Text('Mostra il nome profilo'),
-                      subtitle: const Text(
+                      key: ValueKey('share-display-name'),
+                      secondary: Icon(Icons.badge_outlined),
+                      title: Text('Mostra il nome profilo'),
+                      subtitle: Text(
                         'Consenti ai contatti di vedere il nome che hai scelto.',
                       ),
                       value: privacy.shareDisplayName,
@@ -530,12 +530,12 @@ class _SettingsPageState extends State<SettingsPage> {
                         privacy.copyWith(shareDisplayName: value),
                       ),
                     ),
-                    const Divider(height: 1),
+                    Divider(height: 1),
                     SwitchListTile(
-                      key: const ValueKey('share-profile-photo'),
-                      secondary: const Icon(Icons.account_circle_outlined),
-                      title: const Text('Mostra la foto profilo'),
-                      subtitle: const Text(
+                      key: ValueKey('share-profile-photo'),
+                      secondary: Icon(Icons.account_circle_outlined),
+                      title: Text('Mostra la foto profilo'),
+                      subtitle: Text(
                         'Condividi la foto solo con i contatti Sylphy.',
                       ),
                       value: privacy.shareProfilePhoto,
@@ -546,37 +546,96 @@ class _SettingsPageState extends State<SettingsPage> {
                   ],
                 ),
               ),
-              const SizedBox(height: 16),
-              const _SectionTitle('MESSAGGI E SPUNTE'),
-              const SizedBox(height: 8),
+              SizedBox(height: 16),
+              _SectionTitle('MESSAGGI E SPUNTE'),
+              SizedBox(height: 8),
               _SettingsCard(
                 child: Column(
                   children: [
                     SwitchListTile(
-                      key: const ValueKey('show-read-receipts'),
-                      secondary: const Icon(Icons.visibility_outlined),
-                      title: const Text('Mostra spunte ricevute'),
-                      subtitle: const Text(
-                        'Nasconde le spunte solo nella tua interfaccia.',
+                      key: ValueKey('show-read-receipts'),
+                      secondary: Icon(Icons.visibility_outlined),
+                      title: Text('Mostra spunte ricevute'),
+                      subtitle: Text(
+                        'Permette agli altri di vedere quando leggi i loro messaggi.',
                       ),
-                      value: privacy.showReadReceipts,
+                      value: privacy.sendReadReceipts,
                       onChanged: (value) => widget.privacySettings.update(
-                        privacy.copyWith(showReadReceipts: value),
+                        privacy.copyWith(
+                          sendReadReceipts: value,
+                          showReadReceipts: true,
+                        ),
                       ),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(height: 16),
-              const _SectionTitle('CONTATTI E ACCESSIBILITÀ'),
-              const SizedBox(height: 8),
+              SizedBox(height: 16),
+              _SectionTitle('ASPETTO E TASTIERA'),
+              _SettingsCard(
+                child: Column(
+                  children: [
+                    DropdownButtonFormField<String>(
+                      key: ValueKey('app-theme'),
+                      initialValue:
+                          [
+                            'sylphy',
+                            'black',
+                            'cyan',
+                            'pink',
+                            'amoled',
+                            'white',
+                          ].contains(privacy.themeName)
+                          ? privacy.themeName
+                          : 'sylphy',
+                      decoration: InputDecoration(labelText: 'Tema di Sylphy'),
+                      items: [
+                        DropdownMenuItem(
+                          value: 'sylphy',
+                          child: Text('Sylphy'),
+                        ),
+                        DropdownMenuItem(value: 'black', child: Text('Black')),
+                        DropdownMenuItem(value: 'cyan', child: Text('Cyan')),
+                        DropdownMenuItem(value: 'pink', child: Text('Pink')),
+                        DropdownMenuItem(
+                          value: 'amoled',
+                          child: Text('AMOLED'),
+                        ),
+                        DropdownMenuItem(value: 'white', child: Text('White')),
+                      ],
+                      onChanged: (value) {
+                        if (value != null) {
+                          widget.privacySettings.update(
+                            privacy.copyWith(themeName: value),
+                          );
+                        }
+                      },
+                    ),
+                    SwitchListTile(
+                      key: ValueKey('incognito-keyboard'),
+                      secondary: Icon(Icons.keyboard_outlined),
+                      title: Text('Tastiera in incognito'),
+                      subtitle: Text(
+                        'Chiede a Gboard e alle tastiere compatibili di non memorizzare ciò che scrivi in chat.',
+                      ),
+                      value: privacy.incognitoKeyboard,
+                      onChanged: (value) => widget.privacySettings.update(
+                        privacy.copyWith(incognitoKeyboard: value),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              SizedBox(height: 16),
+              _SectionTitle('CONTATTI E ACCESSIBILITÀ'),
+              SizedBox(height: 8),
               _SettingsCard(
                 child: Column(
                   children: [
                     SwitchListTile(
-                      secondary: const Icon(Icons.person_search_outlined),
-                      title: const Text('Richieste da sconosciuti'),
-                      subtitle: const Text(
+                      secondary: Icon(Icons.person_search_outlined),
+                      title: Text('Richieste da sconosciuti'),
+                      subtitle: Text(
                         'Accetta nuove richieste soltanto quando è attivo.',
                       ),
                       value: privacy.allowUnknownContacts,
@@ -584,10 +643,10 @@ class _SettingsPageState extends State<SettingsPage> {
                         privacy.copyWith(allowUnknownContacts: value),
                       ),
                     ),
-                    const Divider(height: 1),
+                    Divider(height: 1),
                     SwitchListTile(
-                      secondary: const Icon(Icons.motion_photos_off_outlined),
-                      title: const Text('Riduci animazioni'),
+                      secondary: Icon(Icons.motion_photos_off_outlined),
+                      title: Text('Riduci animazioni'),
                       value: privacy.reduceMotion,
                       onChanged: (value) => widget.privacySettings.update(
                         privacy.copyWith(reduceMotion: value),
@@ -596,83 +655,81 @@ class _SettingsPageState extends State<SettingsPage> {
                   ],
                 ),
               ),
-              const SizedBox(height: 16),
-              const UpdateSettings(),
-              const SizedBox(height: 16),
+              SizedBox(height: 16),
+              UpdateSettings(),
+              SizedBox(height: 16),
               Text(
                 'DEVELOPER OPTIONS',
                 style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                  color: const Color(0xFF9299A5),
+                  color: AppPalette.color(0xFF9299A5),
                   fontWeight: FontWeight.w800,
                   letterSpacing: 1.1,
                 ),
               ),
-              const SizedBox(height: 8),
+              SizedBox(height: 8),
               _SettingsCard(
                 child: Column(
                   children: [
                     SwitchListTile(
-                      key: const ValueKey('developer-logging-switch'),
-                      secondary: const Icon(Icons.bug_report_outlined),
-                      title: const Text('Logging dettagliato'),
-                      subtitle: const Text(
+                      key: ValueKey('developer-logging-switch'),
+                      secondary: Icon(Icons.bug_report_outlined),
+                      title: Text('Logging dettagliato'),
+                      subtitle: Text(
                         'Registra lifecycle, navigazione, azioni UI e chiamate al core. Testi dei messaggi, password e chiavi sono sempre esclusi.',
                       ),
                       value: AppLog.instance.verboseEnabled,
                       onChanged: AppLog.instance.setVerboseEnabled,
                     ),
-                    const Divider(height: 1),
+                    Divider(height: 1),
                     ListTile(
-                      leading: const Icon(Icons.health_and_safety_outlined),
-                      title: const Text('Esegui diagnostica'),
+                      leading: Icon(Icons.health_and_safety_outlined),
+                      title: Text('Esegui diagnostica'),
                       subtitle: _diagnosticResult == null
-                          ? const Text(
-                              'Controlla core nativo, bootstrap e Veilid.',
-                            )
+                          ? Text('Controlla core nativo, bootstrap e Veilid.')
                           : Text(_diagnosticResult!),
                       trailing: _diagnosticRunning
-                          ? const SizedBox(
+                          ? SizedBox(
                               width: 22,
                               height: 22,
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
-                          : const Icon(Icons.chevron_right_rounded),
+                          : Icon(Icons.chevron_right_rounded),
                       onTap: _diagnosticRunning ? null : _runDiagnostics,
                     ),
                   ],
                 ),
               ),
-              const SizedBox(height: 16),
+              SizedBox(height: 16),
               Row(
                 children: [
                   Text(
                     'LOG (${AppLog.instance.entries.length})',
                     style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                      color: const Color(0xFF9299A5),
+                      color: AppPalette.color(0xFF9299A5),
                       fontWeight: FontWeight.w800,
                       letterSpacing: 1.1,
                     ),
                   ),
-                  const Spacer(),
+                  Spacer(),
                   IconButton(
                     tooltip: 'Copia log',
                     onPressed: _copyLogs,
-                    icon: const Icon(Icons.copy_all_outlined),
+                    icon: Icon(Icons.copy_all_outlined),
                   ),
                   IconButton(
                     tooltip: 'Cancella log',
                     onPressed: AppLog.instance.clear,
-                    icon: const Icon(Icons.delete_sweep_outlined),
+                    icon: Icon(Icons.delete_sweep_outlined),
                   ),
                 ],
               ),
               _LogViewer(entries: AppLog.instance.entries),
               if (AppLog.instance.logFilePath case final path?) ...[
-                const SizedBox(height: 10),
+                SizedBox(height: 10),
                 SelectableText(
                   'File persistente: $path',
-                  style: const TextStyle(
-                    color: Color(0xFF7F8997),
+                  style: TextStyle(
+                    color: AppPalette.color(0xFF7F8997),
                     fontSize: 11,
                   ),
                 ),
@@ -693,10 +750,10 @@ class _SettingsCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: const Color(0xFF151A21),
+      color: AppPalette.color(0xFF151A21),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(18),
-        side: const BorderSide(color: Color(0xFF303741)),
+        side: BorderSide(color: AppPalette.color(0xFF303741)),
       ),
       clipBehavior: Clip.antiAlias,
       child: child,
@@ -716,9 +773,9 @@ class _AccountQrDialog extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('Scansiona dal telefono'),
+      title: Text('Scansiona dal telefono'),
       content: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 390),
+        constraints: BoxConstraints(maxWidth: 390),
         child: AnimatedBuilder(
           animation: session.state,
           builder: (context, _) {
@@ -729,16 +786,14 @@ class _AccountQrDialog extends StatelessWidget {
                 if (state == AccountQrTransferState.waiting)
                   Container(
                     color: Colors.white,
-                    padding: const EdgeInsets.all(12),
+                    padding: EdgeInsets.all(12),
                     child: QrImageView(
-                      key: const ValueKey('account-transfer-qr'),
+                      key: ValueKey('account-transfer-qr'),
                       data: session.qrPayload,
                       size: 280,
                       backgroundColor: Colors.white,
-                      eyeStyle: const QrEyeStyle(color: Colors.black),
-                      dataModuleStyle: const QrDataModuleStyle(
-                        color: Colors.black,
-                      ),
+                      eyeStyle: QrEyeStyle(color: Colors.black),
+                      dataModuleStyle: QrDataModuleStyle(color: Colors.black),
                       errorCorrectionLevel: QrErrorCorrectLevel.M,
                     ),
                   )
@@ -751,10 +806,10 @@ class _AccountQrDialog extends StatelessWidget {
                         : Icons.error_outline_rounded,
                     size: 72,
                     color: state == AccountQrTransferState.transferred
-                        ? const Color(0xFF8CE6AC)
-                        : const Color(0xFFFF9D95),
+                        ? AppPalette.color(0xFF8CE6AC)
+                        : AppPalette.color(0xFFFF9D95),
                   ),
-                const SizedBox(height: 16),
+                SizedBox(height: 16),
                 Text(switch (state) {
                   AccountQrTransferState.waiting =>
                     'Sul telefono apri “Usa un account esistente” e scegli “Scansiona QR”. I dispositivi devono essere sulla stessa rete.',
@@ -773,7 +828,7 @@ class _AccountQrDialog extends StatelessWidget {
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Chiudi'),
+          child: Text('Chiudi'),
         ),
       ],
     );
@@ -789,7 +844,7 @@ class _SectionTitle extends StatelessWidget {
   Widget build(BuildContext context) => Text(
     label,
     style: Theme.of(context).textTheme.labelMedium?.copyWith(
-      color: const Color(0xFF9299A5),
+      color: AppPalette.color(0xFF9299A5),
       fontWeight: FontWeight.w800,
       letterSpacing: 1.1,
     ),
@@ -805,25 +860,25 @@ class _LogViewer extends StatelessWidget {
   Widget build(BuildContext context) {
     final visibleEntries = entries.reversed.take(300).toList(growable: false);
     return Container(
-      key: const ValueKey('developer-log-viewer'),
-      constraints: const BoxConstraints(minHeight: 180, maxHeight: 420),
-      padding: const EdgeInsets.all(14),
+      key: ValueKey('developer-log-viewer'),
+      constraints: BoxConstraints(minHeight: 180, maxHeight: 420),
+      padding: EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: const Color(0xFF090C11),
+        color: AppPalette.color(0xFF090C11),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFF303741)),
+        border: Border.all(color: AppPalette.color(0xFF303741)),
       ),
       child: visibleEntries.isEmpty
-          ? const Center(
+          ? Center(
               child: Text(
                 'Nessun evento registrato.',
-                style: TextStyle(color: Color(0xFF9299A5)),
+                style: TextStyle(color: AppPalette.color(0xFF9299A5)),
               ),
             )
           : Scrollbar(
               child: ListView.separated(
                 itemCount: visibleEntries.length,
-                separatorBuilder: (context, index) => const Divider(height: 12),
+                separatorBuilder: (context, index) => Divider(height: 12),
                 itemBuilder: (context, index) {
                   final entry = visibleEntries[index];
                   return SelectableText(
@@ -843,10 +898,10 @@ class _LogViewer extends StatelessWidget {
 }
 
 Color _logColor(AppLogLevel level) => switch (level) {
-  AppLogLevel.debug => const Color(0xFF9299A5),
-  AppLogLevel.info => const Color(0xFFC8D0DA),
-  AppLogLevel.warning => const Color(0xFFFFC56B),
-  AppLogLevel.error => const Color(0xFFFF8F86),
+  AppLogLevel.debug => AppPalette.color(0xFF9299A5),
+  AppLogLevel.info => AppPalette.color(0xFFC8D0DA),
+  AppLogLevel.warning => AppPalette.color(0xFFFFC56B),
+  AppLogLevel.error => AppPalette.color(0xFFFF8F86),
 };
 
 bool get _isDesktopPlatform =>

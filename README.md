@@ -91,7 +91,7 @@ flowchart TB
         UI --> DS --> BG
     end
 
-    BG -->|"JSON FFI · ABI 11"| FFI["C/Rust boundary"]
+    BG -->|"JSON FFI · ABI 12"| FFI["C/Rust boundary"]
 
     subgraph Core["Native Rust core"]
         FFI --> ID["Identity and vault"]

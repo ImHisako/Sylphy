@@ -60,6 +60,22 @@ abstract interface class GroupMessagingBridge {
   });
 }
 
+abstract interface class GroupChannelBridge {
+  Future<bool> markChannelRead(String conversationId, String? channelId);
+  Future<void> sendChannelText(
+    String conversationId,
+    String channelId,
+    String text, {
+    String? replyTo,
+  });
+  Future<void> sendChannelAttachment(
+    String conversationId,
+    String channelId,
+    String fileName,
+    List<int> bytes,
+  );
+}
+
 abstract interface class GroupManagementBridge {
   Future<String> joinGroup(String invitationCode);
   Future<Map<String, dynamic>> groupDetails(String conversationId);

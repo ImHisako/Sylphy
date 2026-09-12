@@ -298,6 +298,47 @@ class _GroupManagementPageState extends State<GroupManagementPage> {
     );
   }
 
+  Future<void> _editChannel([Map? channel]) async {
+    var name = channel?['name'] as String? ?? '';
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(channel == null ? 'Crea canale' : 'Rinomina canale'),
+        content: TextFormField(
+          initialValue: name,
+          onChanged: (value) => name = value,
+          autofocus: true,
+          maxLength: 64,
+          decoration: const InputDecoration(labelText: 'Nome del canale'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Annulla'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (name.trim().isNotEmpty) {
+                Navigator.pop(context, name.trim());
+              }
+            },
+            child: const Text('Salva'),
+          ),
+        ],
+      ),
+    );
+    if (result == null) return;
+    await _act(
+      channel == null
+          ? {'kind': 'create_channel', 'name': result}
+          : {
+              'kind': 'rename_channel',
+              'channel_id': channel['id'],
+              'name': result,
+            },
+    );
+  }
+
   Future<void> _editAdmin(Map member) async {
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
@@ -396,6 +437,49 @@ class _GroupManagementPageState extends State<GroupManagementPage> {
                     Card(
                       child: Column(
                         children: [
+                          SwitchListTile(
+                            key: const ValueKey('group-action-notices'),
+                            secondary: const Icon(Icons.campaign_outlined),
+                            title: const Text('Avvisi delle azioni in chat'),
+                            subtitle: const Text(
+                              'Mostra gli avvisi per permessi, membri, messaggi eliminati e fissati.',
+                            ),
+                            value: details['show_action_notices'] != false,
+                            onChanged: _allowed('manage_permissions')
+                                ? (enabled) => _act({
+                                    'kind': 'action_notices',
+                                    'enabled': enabled,
+                                  })
+                                : null,
+                          ),
+                          const Divider(),
+                          ListTile(
+                            title: const Text('Canali del gruppo'),
+                            subtitle: const Text(
+                              'La chat Generale rimane sempre disponibile.',
+                            ),
+                            trailing: IconButton(
+                              tooltip: 'Crea canale',
+                              icon: const Icon(Icons.add),
+                              onPressed: _allowed('change_info')
+                                  ? () => _editChannel()
+                                  : null,
+                            ),
+                          ),
+                          for (final channel
+                              in (details['channels'] as List? ?? [])
+                                  .cast<Map>())
+                            ListTile(
+                              leading: const Icon(Icons.tag),
+                              title: Text(channel['name'] as String),
+                              trailing: IconButton(
+                                tooltip: 'Rinomina canale',
+                                icon: const Icon(Icons.edit_outlined),
+                                onPressed: _allowed('change_info')
+                                    ? () => _editChannel(channel)
+                                    : null,
+                              ),
+                            ),
                           ListTile(
                             leading: const Icon(Icons.tune),
                             title: const Text('Permessi e antispam'),

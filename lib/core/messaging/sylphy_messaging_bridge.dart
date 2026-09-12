@@ -13,6 +13,7 @@ class SylphyMessagingBridge
         SecureMessagingBridge,
         GroupMessagingBridge,
         GroupManagementBridge,
+        GroupChannelBridge,
         CachedGroupManagementBridge,
         InboxRefreshingBridge,
         InboxRevisionNotifications,
@@ -111,6 +112,51 @@ class SylphyMessagingBridge
       'conversation_id': conversationId,
       'plaintext': plaintext,
       'reply_to': replyTo,
+    });
+    _conversationCache = null;
+  }
+
+  @override
+  Future<bool> markChannelRead(String conversationId, String? channelId) async {
+    final response = await _groupCommand({
+      'command': 'mark_channel_read',
+      'conversation_id': conversationId,
+      if (channelId != null) 'channel_id': channelId,
+    });
+    _conversationCache = null;
+    return response.data['all_read'] == true;
+  }
+
+  @override
+  Future<void> sendChannelText(
+    String conversationId,
+    String channelId,
+    String text, {
+    String? replyTo,
+  }) async {
+    await _groupCommand({
+      'command': 'send_channel_text',
+      'conversation_id': conversationId,
+      'channel_id': channelId,
+      'plaintext': text,
+      if (replyTo != null) 'reply_to': replyTo,
+    });
+    _conversationCache = null;
+  }
+
+  @override
+  Future<void> sendChannelAttachment(
+    String conversationId,
+    String channelId,
+    String fileName,
+    List<int> bytes,
+  ) async {
+    await _groupCommand({
+      'command': 'send_channel_attachment',
+      'conversation_id': conversationId,
+      'channel_id': channelId,
+      'file_name': fileName,
+      'bytes_base64': base64Encode(bytes),
     });
     _conversationCache = null;
   }
@@ -701,6 +747,7 @@ ChatMessage _parseMessage(Object? value, {ChatMessage? cached}) {
       cached.authorName == authorName &&
       cached.body == body &&
       cached.replyTo == value['reply_to'] &&
+      cached.channelId == value['channel_id'] &&
       cached.sentAt == sentAt &&
       cached.orderAt == orderAt &&
       cached.isOutgoing == isOutgoing &&
@@ -718,6 +765,7 @@ ChatMessage _parseMessage(Object? value, {ChatMessage? cached}) {
     authorName: authorName,
     body: body,
     replyTo: value['reply_to'] as String?,
+    channelId: value['channel_id'] as String?,
     sentAt: sentAt,
     orderAt: orderAt,
     isOutgoing: isOutgoing,

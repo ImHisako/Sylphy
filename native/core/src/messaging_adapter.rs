@@ -219,10 +219,22 @@ struct MessagingAccountBackup {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 enum MessageEvent {
-    Upsert { message: StoredMessage },
-    DeleteMessage { message_id: String },
-    MarkRead { conversation_id: String },
-    DeleteConversation { conversation_id: String },
+    Upsert {
+        message: StoredMessage,
+    },
+    DeleteMessage {
+        message_id: String,
+    },
+    MarkRead {
+        conversation_id: String,
+    },
+    MarkChannelRead {
+        conversation_id: String,
+        channel_id: Option<String>,
+    },
+    DeleteConversation {
+        conversation_id: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -253,6 +265,8 @@ struct AttachmentPointer {
     chunk_count: u16,
     key_base64: String,
     nonce_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    channel_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -635,8 +649,8 @@ pub fn list_conversations() -> CoreResult<Value> {
                 "initials": initials(visible_name),
                 "avatar_base64": public_profile.and_then(|profile| profile.avatar_base64.as_deref()),
                 "accent_value": accent_value(&contact.bundle.identity_ed25519),
-                "last_message": last.map(|message| message.body.as_str()).unwrap_or(
-                    if can_message { "Conversazione pronta" } else { "Aggiorna l'ID Sylphy del contatto" }
+                "last_message": last.map(|message| message_preview(message, &store)).unwrap_or_else(||
+                    if can_message { "Conversazione pronta" } else { "Aggiorna l'ID Sylphy del contatto" }.to_owned()
                 ),
                 "last_activity_ms": last.map(message_order_ms).unwrap_or(contact.added_at_ms),
                 "unread_count": unread,
@@ -662,13 +676,13 @@ pub fn list_conversations() -> CoreResult<Value> {
             "initials": initials(&group.name),
             "avatar_base64": Value::Null,
             "accent_value": accent_value(group.id.as_bytes()),
-            "last_message": last.map(|message| groups::text_metadata(&message.body).map(|(text, _)| text).unwrap_or_default()).unwrap_or_else(|| "Gruppo creato".to_owned()),
+            "last_message": last.map(|message| message_preview(message, &store)).unwrap_or_else(|| "Gruppo creato".to_owned()),
             "last_activity_ms": last.map(message_order_ms).unwrap_or(group.created_at_ms),
             "unread_count": unread,
             "is_online": false,
             "is_group": true,
             "conversation_type": group.mode,
-            "member_count": group.members.len() + 1,
+            "member_count": group.members.len() + usize::from(!group.management.removed),
             "is_admin": groups::is_admin(group).unwrap_or(false),
             "can_send_messages": groups::can_write(group).unwrap_or(false),
             "pinned_message_ids": group.management.pinned,
@@ -1114,16 +1128,18 @@ fn queue_created_group(
 }
 
 pub fn send_reply(conversation_id: &str, plaintext: &str, reply_to: &str) -> CoreResult<Value> {
-    {
+    let channel_id = {
         let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
         ensure_messages_loaded(&mut store)?;
-        if !store
+        let original = store
             .messages
             .iter()
-            .any(|message| message.id == reply_to && message.conversation_id == conversation_id)
-        {
-            return Err(CoreError::InvalidInput);
-        }
+            .find(|message| message.id == reply_to && message.conversation_id == conversation_id)
+            .ok_or(CoreError::InvalidInput)?;
+        groups::rich_metadata(&original.body)?.2
+    };
+    if let Some(channel_id) = channel_id {
+        return groups::send_channel_text(conversation_id, plaintext, &channel_id, Some(reply_to));
     }
     send_text(
         conversation_id,
@@ -1153,7 +1169,11 @@ fn send_text_with(
     if let Some(group) = group {
         let plaintext = plaintext.trim();
         let local_id = contact_id(&identity::active_identity()?.identity_public_key()?);
-        let (text, _) = groups::text_metadata(plaintext)?;
+        let (text, _, channel) = groups::rich_metadata(plaintext)?;
+        groups::enforce_channel(&group, channel.as_deref())?;
+        if channel.is_some() {
+            groups::require_updated(&group)?;
+        }
         groups::enforce(&group, &local_id, &text, false)?;
         if plaintext.is_empty() || plaintext.len() > MAX_MESSAGE_BODY_BYTES {
             return Err(CoreError::LimitExceeded);
@@ -1169,9 +1189,14 @@ fn send_text_with(
             let (mut sealed, _) = seal(&member.identity, &body, &id_bytes)?;
             deliveries.append(&mut sealed);
         }
-        if deliveries.is_empty() {
+        if deliveries.is_empty() && !group.members.is_empty() {
             return Err(CoreError::VerificationFailed);
         }
+        let delivery_state = if group.members.is_empty() {
+            "delivered"
+        } else {
+            "queued"
+        };
         let message_path = contact_store()
             .lock()
             .map_err(|_| CoreError::Internal)?
@@ -1189,13 +1214,13 @@ fn send_text_with(
             author_name: None,
             is_outgoing: true,
             is_read: true,
-            delivery_state: "queued".to_owned(),
+            delivery_state: delivery_state.to_owned(),
             receipts: Default::default(),
             attachment_name: None,
             attachment_base64: None,
         };
         queue_outgoing(&message_path, message, deliveries)?;
-        return Ok(json!({"message_id": message_id, "delivery_state": "queued"}));
+        return Ok(json!({"message_id": message_id, "delivery_state": delivery_state}));
     }
     let message_path = {
         let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
@@ -1239,6 +1264,15 @@ pub fn send_attachment(
     file_name: &str,
     bytes_base64: &str,
 ) -> CoreResult<Value> {
+    send_attachment_in_channel(conversation_id, file_name, bytes_base64, None)
+}
+
+pub fn send_attachment_in_channel(
+    conversation_id: &str,
+    file_name: &str,
+    bytes_base64: &str,
+    channel_id: Option<&str>,
+) -> CoreResult<Value> {
     validate_conversation_id(conversation_id)?;
     let file_name = validate_attachment_name(file_name)?;
     let bytes = STANDARD
@@ -1251,6 +1285,36 @@ pub fn send_attachment(
     if let Some(group) = group {
         let local_id = contact_id(&identity::active_identity()?.identity_public_key()?);
         groups::enforce(&group, &local_id, &file_name, true)?;
+        groups::enforce_channel(&group, channel_id)?;
+        if channel_id.is_some() {
+            groups::require_updated(&group)?;
+        }
+        if group.members.is_empty() {
+            let message_path = contact_store()
+                .lock()
+                .map_err(|_| CoreError::Internal)?
+                .message_path
+                .clone()
+                .ok_or(CoreError::FeatureUnavailable)?;
+            let message_id = groups::new_id();
+            let message = StoredMessage {
+                id: message_id.clone(),
+                conversation_id: conversation_id.to_owned(),
+                author_id: "me".to_owned(),
+                author_name: None,
+                body: groups::encode_channel_text(&format!("📎 {file_name}"), None, channel_id)?,
+                sent_at_ms: current_time_ms()?,
+                received_at_ms: 0,
+                is_outgoing: true,
+                is_read: true,
+                delivery_state: "delivered".to_owned(),
+                receipts: Default::default(),
+                attachment_name: Some(file_name),
+                attachment_base64: Some(STANDARD.encode(bytes)),
+            };
+            queue_outgoing(&message_path, message, vec![])?;
+            return Ok(json!({"message_id": message_id, "delivery_state": "delivered"}));
+        }
         let mut key = [0_u8; 32];
         let mut nonce = [0_u8; 24];
         OsRng.fill_bytes(&mut key);
@@ -1272,6 +1336,7 @@ pub fn send_attachment(
             chunk_count,
             key_base64: STANDARD_NO_PAD.encode(key),
             nonce_base64: STANDARD_NO_PAD.encode(nonce),
+            channel_id: channel_id.map(str::to_owned),
         };
         let control = format!(
             "{ATTACHMENT_PREFIX}{}",
@@ -1306,7 +1371,7 @@ pub fn send_attachment(
             id: message_id.clone(),
             conversation_id: conversation_id.to_owned(),
             author_id: "me".to_owned(),
-            body: format!("📎 {file_name}"),
+            body: groups::encode_channel_text(&format!("📎 {file_name}"), None, channel_id)?,
             sent_at_ms: current_time_ms()?,
             received_at_ms: 0,
             author_name: None,
@@ -1361,6 +1426,7 @@ pub fn send_attachment(
         chunk_count,
         key_base64: STANDARD_NO_PAD.encode(key),
         nonce_base64: STANDARD_NO_PAD.encode(nonce),
+        channel_id: None,
     };
     let control = format!(
         "{ATTACHMENT_PREFIX}{}",
@@ -1429,6 +1495,47 @@ pub fn mark_conversation_read(conversation_id: &str) -> CoreResult<Value> {
         compact_message_log_if_needed(&mut store)?;
     }
     Ok(json!({"conversation_id": conversation_id, "read": true}))
+}
+
+pub fn mark_channel_read(conversation_id: &str, channel_id: Option<&str>) -> CoreResult<Value> {
+    let group = current_group(conversation_id)?.ok_or(CoreError::InvalidInput)?;
+    groups::enforce_channel(&group, channel_id)?;
+    let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    ensure_messages_loaded(&mut store)?;
+    let path = store
+        .message_path
+        .clone()
+        .ok_or(CoreError::FeatureUnavailable)?;
+    let matches = |message: &StoredMessage| {
+        message.conversation_id == conversation_id
+            && !message.is_outgoing
+            && groups::rich_metadata(&message.body)
+                .is_ok_and(|(_, _, id)| id.as_deref() == channel_id)
+    };
+    if store
+        .messages
+        .iter()
+        .any(|message| matches(message) && !message.is_read)
+    {
+        append_message_event(
+            &path,
+            &MessageEvent::MarkChannelRead {
+                conversation_id: conversation_id.to_owned(),
+                channel_id: channel_id.map(str::to_owned),
+            },
+        )?;
+        for message in &mut store.messages {
+            if matches(message) {
+                message.is_read = true;
+            }
+        }
+        store.message_event_count += 1;
+        store.revision = store.revision.wrapping_add(1);
+        compact_message_log_if_needed(&mut store)?;
+    }
+    Ok(
+        json!({"all_read": !store.messages.iter().any(|message| message.conversation_id == conversation_id && !message.is_outgoing && !message.is_read)}),
+    )
 }
 
 pub fn delete_conversation(conversation_id: &str) -> CoreResult<Value> {
@@ -1948,7 +2055,19 @@ fn persist_inbound_payload_with(
                 }
                 let group = group.clone();
                 drop(store);
-                let (text, _) = groups::text_metadata(&body)?;
+                let (text, _, mut channel) = groups::rich_metadata(&body)?;
+                if let Some(encoded) = body.strip_prefix(ATTACHMENT_PREFIX) {
+                    let pointer: AttachmentPointer = serde_json::from_slice(
+                        &STANDARD_NO_PAD
+                            .decode(encoded)
+                            .map_err(|_| CoreError::InvalidInput)?,
+                    )
+                    .map_err(|_| CoreError::InvalidInput)?;
+                    channel = pointer.channel_id;
+                }
+                // A channel snapshot may arrive after its first message.
+                groups::enforce_channel(&group, channel.as_deref())
+                    .map_err(|_| CoreError::InboundDeferred)?;
                 groups::enforce_inbound(
                     &group,
                     &sender_id,
@@ -2279,7 +2398,12 @@ fn queue_outgoing(
         })
         .collect::<Vec<_>>();
     if pending.is_empty() {
-        return Err(CoreError::VerificationFailed);
+        let group =
+            current_group(&message.conversation_id)?.ok_or(CoreError::VerificationFailed)?;
+        if !group.members.is_empty() || !groups::can_write(&group)? {
+            return Err(CoreError::VerificationFailed);
+        }
+        message.delivery_state = "delivered".to_owned();
     }
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     ensure_messages_loaded(&mut store)?;
@@ -3186,6 +3310,23 @@ fn apply_message_event(messages: &mut Vec<StoredMessage>, event: MessageEvent) -
         MessageEvent::DeleteMessage { message_id } => {
             messages.retain(|message| message.id != message_id);
         }
+        MessageEvent::MarkChannelRead {
+            conversation_id,
+            channel_id,
+        } => {
+            validate_conversation_id(&conversation_id)?;
+            if let Some(id) = &channel_id {
+                validate_conversation_id(id)?;
+            }
+            for message in messages {
+                if message.conversation_id == conversation_id
+                    && !message.is_outgoing
+                    && groups::rich_metadata(&message.body)?.2 == channel_id
+                {
+                    message.is_read = true;
+                }
+            }
+        }
         MessageEvent::MarkRead { conversation_id } => {
             validate_conversation_id(&conversation_id)?;
             for message in messages {
@@ -3289,9 +3430,26 @@ fn persist_bytes(path: &Path, bytes: &[u8]) -> CoreResult<()> {
     atomic_file::replace(path, bytes)
 }
 
+fn message_preview(message: &StoredMessage, store: &ContactStore) -> String {
+    let data = message_json(message, store);
+    let text = data["body"].as_str().unwrap_or("Messaggio");
+    if data["reply_to"].is_string() {
+        format!(
+            "{} ha risposto: {}",
+            data["author_name"].as_str().unwrap_or("Utente"),
+            text
+        )
+    } else {
+        text.to_owned()
+    }
+}
+
 fn message_json(message: &StoredMessage, store: &ContactStore) -> Value {
-    let (text, reply_to) =
-        groups::text_metadata(&message.body).unwrap_or((message.body.clone(), None));
+    let (text, reply_to, channel_id) = groups::rich_metadata(&message.body).unwrap_or((
+        "Messaggio non disponibile".to_owned(),
+        None,
+        None,
+    ));
     let author_name = if message.is_outgoing {
         "Tu".to_owned()
     } else {
@@ -3331,6 +3489,7 @@ fn message_json(message: &StoredMessage, store: &ContactStore) -> Value {
         "author_name": author_name,
         "body": text,
         "reply_to": reply_to,
+        "channel_id": channel_id,
         "sent_at_ms": message.sent_at_ms,
         "order_at_ms": message_order_ms(message),
         "is_outgoing": message.is_outgoing,
@@ -3479,7 +3638,11 @@ fn decode_incoming_content(
         return Err(CoreError::VerificationFailed);
     }
     Ok((
-        format!("📎 {file_name}"),
+        groups::encode_channel_text(
+            &format!("📎 {file_name}"),
+            None,
+            pointer.channel_id.as_deref(),
+        )?,
         Some(file_name),
         Some(STANDARD.encode(bytes)),
     ))
