@@ -106,13 +106,9 @@ void main() {
           true,
         );
       }
-      tester.binding.handleAppLifecycleStateChanged(
-        AppLifecycleState.paused,
-      );
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
       settings['vibration_enabled'] = true;
-      tester.binding.handleAppLifecycleStateChanged(
-        AppLifecycleState.resumed,
-      );
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await tester.pumpAndSettle();
       expect(
         find.text('Attiva in Android · Tocca per modificare'),
@@ -147,12 +143,8 @@ void main() {
       );
       settings['system_enabled'] = true;
       settings['channel_enabled'] = false;
-      tester.binding.handleAppLifecycleStateChanged(
-        AppLifecycleState.paused,
-      );
-      tester.binding.handleAppLifecycleStateChanged(
-        AppLifecycleState.resumed,
-      );
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('notifications-blocked')));
       await tester.pumpAndSettle();
