@@ -10,6 +10,7 @@ import 'package:sylphy/core/veilid/veilid_service.dart';
 import 'package:sylphy/features/settings/settings_page.dart';
 
 const channel = MethodChannel('sylphy/screen_capture');
+const platformChannel = MethodChannel('sylphy/platform');
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -17,6 +18,8 @@ void main() {
   tearDown(() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(platformChannel, null);
   });
 
   testWidgets(
@@ -121,6 +124,21 @@ void main() {
           (_) async {
             nativeCalls++;
             return null;
+          },
+        );
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          platformChannel,
+          (call) async {
+            if (call.method == 'getNotificationSettings') {
+              return {
+                'enabled': true,
+                'system_enabled': true,
+                'channel_enabled': true,
+                'sound_enabled': true,
+                'vibration_enabled': false,
+              };
+            }
+            throw MissingPluginException();
           },
         );
         if (platform != TargetPlatform.windows) {
