@@ -5,6 +5,168 @@ import 'package:sylphy/core/messaging/secure_messaging_bridge.dart';
 import 'package:sylphy/features/messenger/group_management_page.dart';
 
 void main() {
+  testWidgets('channels can be moved and deleted with confirmation on mobile', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final bridge = _Groups()
+      ..channels = [
+        {'id': 'a', 'name': 'Progetti'},
+        {'id': 'b', 'name': 'Annunci'},
+        {'id': 'c', 'name': 'Supporto'},
+      ];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GroupManagementPage(bridge: bridge, conversationId: 'group'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('open-group-channels')));
+    await tester.pumpAndSettle();
+    expect(find.text('Generale'), findsOneWidget);
+    await tester.tap(find.byTooltip('Gestisci Annunci'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Sposta su'));
+    await tester.pumpAndSettle();
+    expect(bridge.actions.last, {
+      'kind': 'move_channel',
+      'channel_id': 'b',
+      'before_channel_id': 'a',
+    });
+    expect(
+      tester.getTopLeft(find.text('Annunci')).dy,
+      lessThan(tester.getTopLeft(find.text('Progetti')).dy),
+    );
+    await tester.tap(find.byTooltip('Gestisci Annunci'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Sposta giù'));
+    await tester.pumpAndSettle();
+    expect(bridge.actions.last['before_channel_id'], 'c');
+    await tester.tap(find.byTooltip('Gestisci Annunci'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Elimina canale'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('tutti i suoi messaggi'), findsOneWidget);
+    await tester.tap(find.text('Annulla'));
+    await tester.pumpAndSettle();
+    expect(bridge.actions.length, 2);
+    await tester.tap(find.byTooltip('Gestisci Annunci'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Elimina canale'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Conferma'));
+    await tester.pumpAndSettle();
+    expect(bridge.actions.last, {'kind': 'delete_channel', 'channel_id': 'b'});
+    expect(find.text('Annunci'), findsNothing);
+    expect(find.text('Generale'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'channel drag moves stable IDs and pending changes stay unapplied',
+    (tester) async {
+      final bridge = _Groups()
+        ..channels = [
+          {'id': 'a', 'name': 'Primo'},
+          {'id': 'b', 'name': 'Secondo'},
+        ];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: GroupManagementPage.channels(
+            bridge: bridge,
+            conversationId: 'group',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byKey(const ValueKey('drag-channel-a'))),
+      );
+      await gesture.moveBy(const Offset(0, 30));
+      await tester.pump();
+      await gesture.moveBy(const Offset(0, 90));
+      await tester.pump(const Duration(milliseconds: 500));
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(bridge.actions.single, {
+        'kind': 'move_channel',
+        'channel_id': 'a',
+        'before_channel_id': null,
+      });
+      bridge.pending = true;
+      await tester.tap(find.byTooltip('Gestisci Secondo'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Sposta giù'));
+      await tester.pumpAndSettle();
+      expect(bridge.channels.first['id'], 'b');
+      expect(
+        find.text(
+          'Modifica dei canali in attesa di conferma del proprietario.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.byKey(const ValueKey('create-group-channel')),
+            )
+            .onPressed,
+        isNull,
+      );
+    },
+  );
+
+  testWidgets('channel actions honor permissions and update from the inbox', (
+    tester,
+  ) async {
+    final bridge = _LiveGroups()..owner = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GroupManagementPage.channels(
+          bridge: bridge,
+          conversationId: 'group',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.byKey(const ValueKey('create-group-channel')),
+          )
+          .onPressed,
+      isNull,
+    );
+    bridge.grantedPermissions.add('change_info');
+    bridge.channels = [
+      {'id': 'a', 'name': 'Progetti'},
+    ];
+    bridge.inboxChanges.value++;
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.byKey(const ValueKey('create-group-channel')),
+          )
+          .onPressed,
+      isNotNull,
+    );
+    await tester.tap(find.byTooltip('Gestisci Progetti'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<PopupMenuItem<String>>(
+            find.widgetWithText(PopupMenuItem<String>, 'Elimina canale'),
+          )
+          .enabled,
+      isFalse,
+    );
+    expect(bridge.actions, isEmpty);
+    await tester.pumpWidget(const SizedBox());
+    bridge.inboxChanges.dispose();
+  });
+
   testWidgets('group notices can be disabled and named channels created', (
     tester,
   ) async {
@@ -20,7 +182,9 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('group-action-notices')));
     await tester.pumpAndSettle();
     expect(bridge.actions.first, {'kind': 'action_notices', 'enabled': false});
-    await tester.tap(find.byTooltip('Crea canale'));
+    await tester.tap(find.byKey(const ValueKey('open-group-channels')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('create-group-channel')));
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'Progetti');
     await tester.tap(find.text('Salva'));
@@ -416,6 +580,7 @@ class _LiveGroups extends _Groups implements InboxRevisionNotifications {
 }
 
 class _Groups implements GroupManagementBridge {
+  List<Map<String, dynamic>> channels = [];
   Map<String, dynamic>? alicePermissions;
   Future<Map<String, dynamic>> Function()? detailsOverride;
   bool owner = true;
@@ -446,6 +611,8 @@ class _Groups implements GroupManagementBridge {
           'closed': closed,
           'can_send': true,
           'pinned': pinned,
+          'channels': channels,
+          'pending_actions': pending ? actions : [],
           'permissions': {
             for (final key in [
               'change_info',
@@ -474,6 +641,32 @@ class _Groups implements GroupManagementBridge {
     Map<String, dynamic> action,
   ) async {
     actions.add(action);
+    if (!pending) {
+      switch (action['kind']) {
+        case 'create_channel':
+          channels.add({'id': 'new-${actions.length}', 'name': action['name']});
+        case 'rename_channel':
+          channels.firstWhere(
+            (channel) => channel['id'] == action['channel_id'],
+          )['name'] = action['name'];
+        case 'delete_channel':
+          channels.removeWhere(
+            (channel) => channel['id'] == action['channel_id'],
+          );
+        case 'move_channel':
+          final moved = channels.firstWhere(
+            (channel) => channel['id'] == action['channel_id'],
+          );
+          channels.remove(moved);
+          final before = action['before_channel_id'];
+          channels.insert(
+            before == null
+                ? channels.length
+                : channels.indexWhere((channel) => channel['id'] == before),
+            moved,
+          );
+      }
+    }
     if (!pending && action['kind'] == 'set_admin') {
       alicePermissions = action['permissions'] == null
           ? null

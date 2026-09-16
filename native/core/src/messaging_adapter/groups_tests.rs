@@ -324,6 +324,202 @@ fn channels_preserve_rich_metadata_permissions_and_read_boundaries() {
         .find(|message| message["body"] == "Messaggio cifrato del canale")
         .unwrap();
     assert_eq!(received["channel_id"], channel);
+
+    // Ordering and deletion are authenticated group changes, including across
+    // restart, late network delivery and replay from a linked device.
+    activate(&directory, "Admin");
+    act(
+        &local.id,
+        Action::CreateChannel {
+            name: "Secondo".to_owned(),
+        },
+    )
+    .unwrap();
+    let second = details(&local.id).unwrap()["channels"][1]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    act(
+        &local.id,
+        Action::MoveChannel {
+            channel_id: second.clone(),
+            before_channel_id: Some(channel.clone()),
+        },
+    )
+    .unwrap();
+    assert_eq!(details(&local.id).unwrap()["channels"][0]["id"], second);
+    assert!(matches!(
+        act(
+            &local.id,
+            Action::MoveChannel {
+                channel_id: second.clone(),
+                before_channel_id: Some("missing".to_owned()),
+            }
+        ),
+        Err(CoreError::InvalidInput)
+    ));
+    assert_eq!(details(&local.id).unwrap()["channels"][0]["id"], second);
+    act(
+        &local.id,
+        Action::MoveChannel {
+            channel_id: second.clone(),
+            before_channel_id: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(details(&local.id).unwrap()["channels"][1]["id"], second);
+    assert!(matches!(
+        act(
+            &local.id,
+            Action::DeleteChannel {
+                channel_id: "general".to_owned()
+            }
+        ),
+        Err(CoreError::InvalidInput)
+    ));
+    let mut delegated = current_group(&local.id).unwrap().unwrap();
+    delegated.management.admins.insert(
+        member.id.clone(),
+        AdminPermissions {
+            change_info: true,
+            ..AdminPermissions::default()
+        },
+    );
+    assert!(
+        authorized(
+            &delegated,
+            &member.id,
+            &Action::MoveChannel {
+                channel_id: channel.clone(),
+                before_channel_id: None
+            }
+        )
+        .is_ok()
+    );
+    assert!(matches!(
+        authorized(
+            &delegated,
+            &member.id,
+            &Action::DeleteChannel {
+                channel_id: channel.clone()
+            }
+        ),
+        Err(CoreError::GroupPermissionDenied)
+    ));
+    act(
+        &local.id,
+        Action::Pin {
+            message_id: first["message_id"].as_str().unwrap().to_owned(),
+            pinned: true,
+        },
+    )
+    .unwrap();
+    let stale_group = current_group(&local.id).unwrap().unwrap();
+    let stale_message = contact_store()
+        .lock()
+        .unwrap()
+        .messages
+        .iter()
+        .find(|message| message.id == first["message_id"].as_str().unwrap())
+        .unwrap()
+        .clone();
+    let mut late_packets = Vec::new();
+    send_text_with(
+        &local.id,
+        &encode_channel_text("Arrivato dopo la cancellazione", None, Some(&channel)).unwrap(),
+        |recipient, body, id| {
+            let device = recipient.delivery_devices()?.remove(0);
+            let (payload, message_id) = secure_packet::seal_for_test_with_id(&device, body, id)?;
+            late_packets.push(payload.clone());
+            Ok((
+                vec![secure_packet::SealedDelivery {
+                    payload,
+                    route_blob: vec![1; 512],
+                    offline_keys: None,
+                }],
+                message_id,
+            ))
+        },
+    )
+    .unwrap();
+    act(
+        &local.id,
+        Action::DeleteChannel {
+            channel_id: channel.clone(),
+        },
+    )
+    .unwrap();
+    assert!(
+        details(&local.id).unwrap()["pinned"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let revision = details(&local.id).unwrap()["revision"].clone();
+    act(
+        &local.id,
+        Action::DeleteChannel {
+            channel_id: channel.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(details(&local.id).unwrap()["revision"], revision);
+    assert!(matches!(
+        send_channel_text(&local.id, "Non inviare", &channel, None),
+        Err(CoreError::InvalidInput)
+    ));
+    let snapshots = take_controls();
+    activate(&directory, "Admin");
+    apply_device_sync_plaintext(
+        &serde_json::to_vec(&DeviceSyncEvent::UpsertGroupMessage {
+            group: stale_group,
+            message: stale_message,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        list_messages(&local.id, None, None, None).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message["channel_id"] != channel)
+    );
+    assert_eq!(
+        search::search(&local.id, "Nel canale", 0).unwrap()["total"],
+        0
+    );
+    assert_eq!(
+        details(&local.id).unwrap()["channels"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    activate(&directory, "Member");
+    deliver_controls(&snapshots);
+    assert_eq!(details(&local.id).unwrap()["channels"][0]["id"], second);
+    assert!(
+        list_messages(&local.id, None, None, None).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message["channel_id"] != channel)
+    );
+    assert!(!persist_inbound_payload(&late_packets[0]).unwrap());
+    assert!(matches!(
+        persist_inbound_payload(&late_packets[0]),
+        Err(CoreError::VerificationFailed)
+    ));
+    activate(&directory, "Member");
+    assert!(
+        current_group(&local.id)
+            .unwrap()
+            .unwrap()
+            .management
+            .deleted_channels
+            .contains(&channel)
+    );
     fs::remove_dir_all(directory).unwrap();
 }
 

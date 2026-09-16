@@ -9,7 +9,20 @@ import 'package:ffi/ffi.dart';
 
 import '../diagnostics/app_log.dart';
 
-const _expectedAbiVersion = 12;
+const _expectedAbiVersion = 13;
+
+/// A local group read may race an account transition on the other worker.
+/// Retry once through that worker's queue, after the transition completes.
+Future<NativeCoreResponse> readGroupDetailsWithAccountRetry({
+  required Future<NativeCoreResponse> Function() read,
+  required Future<NativeCoreResponse> Function() queuedRead,
+}) async {
+  final response = await read();
+  if (!response.ok && response.code == 'feature_unavailable') {
+    return queuedRead();
+  }
+  return response;
+}
 
 typedef _NativeAbiVersion = Uint32 Function();
 typedef _DartAbiVersion = int Function();
@@ -475,6 +488,13 @@ class NativeCoreClient
     if (request['command'] == 'group_details') {
       return _readGroupDetails(request);
     }
+    return _enqueueBackgroundCall(request, priority: priority);
+  }
+
+  Future<NativeCoreResponse> _enqueueBackgroundCall(
+    Map<String, Object> request, {
+    bool priority = false,
+  }) {
     final pending = _PendingNativeCall(request);
     _pendingBackgroundCalls += 1;
     if (priority || _isUrgentCommand(request['command'])) {
@@ -554,7 +574,10 @@ class NativeCoreClient
   ) async {
     _pendingBackgroundCalls++;
     try {
-      return await _workerCall(request, readOnly: true);
+      return await readGroupDetailsWithAccountRetry(
+        read: () => _workerCall(request, readOnly: true),
+        queuedRead: () => _enqueueBackgroundCall(request, priority: true),
+      );
     } finally {
       _pendingBackgroundCalls--;
       if (_pendingBackgroundCalls == 0) {

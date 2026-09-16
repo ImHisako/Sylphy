@@ -102,6 +102,8 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   bool _nativeServicesReady = false;
   int _nativeServicesGeneration = 0;
   Timer? _identityRepublishTimer;
+  int _identityRetrySeconds = 6;
+  bool _identityRetryInProgress = false;
   DateTime? _lastRouteRefresh;
 
   @override
@@ -213,22 +215,40 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     if (_identityService.snapshot.hasShortInvitation) {
       _identityRepublishTimer?.cancel();
       _identityRepublishTimer = null;
+      _identityRetrySeconds = 6;
       return;
     }
-    _identityRepublishTimer ??= Timer.periodic(Duration(seconds: 6), (timer) {
-      if (!mounted || _identityService.snapshot.hasShortInvitation) {
-        timer.cancel();
-        _identityRepublishTimer = null;
-        return;
-      }
-      if (_veilidService.snapshot.isAttached) {
-        _runGuarded(
-          _publishProfile(),
-          category: 'identity',
-          action: 'short_invitation_refresh_failed',
-        );
-      }
-    });
+    if (!mounted ||
+        _identityRetryInProgress ||
+        widget.nativeCore == null && widget.identityService == null) {
+      return;
+    }
+    final foreground =
+        WidgetsBinding.instance.lifecycleState == null ||
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+    _identityRepublishTimer ??= Timer(
+      Duration(seconds: foreground ? _identityRetrySeconds : 60),
+      () async {
+        // Keep the timer assigned until completion to coalesce refreshes.
+        _identityRetryInProgress = true;
+        try {
+          if (mounted && _veilidService.snapshot.isAttached) {
+            await _publishProfile();
+          }
+        } on Object catch (error) {
+          AppLog.instance.recordError(
+            category: 'identity',
+            action: 'short_invitation_refresh_failed',
+            error: error,
+          );
+        } finally {
+          _identityRetryInProgress = false;
+          _identityRepublishTimer = null;
+          _identityRetrySeconds = (_identityRetrySeconds * 2).clamp(6, 60);
+          if (mounted) _scheduleShortInvitationRefresh();
+        }
+      },
+    );
   }
 
   void _onPrivacyChanged() {
@@ -380,7 +400,13 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       result: state.name,
       verbose: true,
     );
-    if (state == AppLifecycleState.resumed) {
+    final foreground = state == AppLifecycleState.resumed;
+    _veilidService.setForeground(foreground);
+    _identityRepublishTimer?.cancel();
+    _identityRepublishTimer = null;
+    if (foreground) _identityRetrySeconds = 6;
+    if (_profile != null) _scheduleShortInvitationRefresh();
+    if (foreground) {
       _runGuarded(
         _resumeNativeServices(),
         category: 'lifecycle',
@@ -390,9 +416,15 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   }
 
   Future<void> _resumeNativeServices() async {
-    await _veilidService.start();
+    await _veilidService.refresh();
+    if (_veilidService.snapshot.phase == VeilidPhase.offline ||
+        _veilidService.snapshot.phase == VeilidPhase.error) {
+      await _veilidService.start();
+    }
     if (_profile != null) {
-      await _publishProfile(forceRefresh: true);
+      await _publishProfile(
+        forceRefresh: _veilidService.snapshot.routeNeedsPublish,
+      );
     }
     if (mounted) {
       setState(() => _nativeServicesGeneration++);

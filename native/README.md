@@ -80,7 +80,7 @@ installs in `bundle/lib`.
 
 ## Native API and persistence
 
-ABI v11 includes `ensure_identity`, `start_veilid`, `veilid_status`,
+ABI v13 includes `ensure_identity`, `start_veilid`, `veilid_status`,
 `stop_veilid`, `list_conversations`, `list_messages`, `sync_inbound`,
 `add_contact`, `create_group`, `group_details`, `group_action`, `join_group`,
 `search_messages`, `send_reply` and `ratchet_self_test`.

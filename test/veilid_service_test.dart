@@ -6,6 +6,32 @@ import 'package:sylphy/core/platform/android_bootstrap.dart';
 import 'package:sylphy/core/veilid/veilid_service.dart';
 
 void main() {
+  testWidgets(
+    'background recovery slows down and resumes at the foreground rate',
+    (tester) async {
+      final core = _FakeNativeCore();
+      var attempts = 0;
+      final service = VeilidService(
+        nativeCore: core,
+        ensureAndroidBootstrap: () async {
+          attempts++;
+          return const AndroidBootstrapResult(ready: false, code: 'not_ready');
+        },
+      );
+      await service.start();
+      expect(attempts, 1);
+      service.setForeground(false);
+      await tester.pump(const Duration(seconds: 59));
+      expect(attempts, 1);
+      await tester.pump(const Duration(seconds: 1));
+      expect(attempts, 2);
+      service.setForeground(true);
+      await tester.pump(const Duration(seconds: 8));
+      expect(attempts, 3);
+      service.dispose();
+    },
+  );
+
   test('maps an attached native response without exposing routing data', () {
     const response = NativeCoreResponse(
       ok: true,

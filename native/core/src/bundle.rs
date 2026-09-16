@@ -108,6 +108,7 @@ impl PublicBundle {
             capabilities.push("group-invite-blob-v2".to_owned());
             capabilities.push("group-management-v1".to_owned());
             capabilities.push("group-channels-v1".to_owned());
+            capabilities.push("group-channel-management-v1".to_owned());
             capabilities.push("group-control-inline-v2".to_owned());
             capabilities.push("message-receipts-v1".to_owned());
             capabilities.push("device-sync-blob-v2".to_owned());

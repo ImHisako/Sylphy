@@ -34,7 +34,15 @@ class GroupManagementPage extends StatefulWidget {
     super.key,
     required this.bridge,
     required this.conversationId,
-  });
+  }) : _channelsOnly = false;
+
+  const GroupManagementPage.channels({
+    super.key,
+    required this.bridge,
+    required this.conversationId,
+  }) : _channelsOnly = true;
+
+  final bool _channelsOnly;
   final GroupManagementBridge bridge;
   final String conversationId;
   @override
@@ -300,16 +308,31 @@ class _GroupManagementPageState extends State<GroupManagementPage> {
 
   Future<void> _editChannel([Map? channel]) async {
     var name = channel?['name'] as String? ?? '';
+    final formKey = GlobalKey<FormState>();
     final result = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(channel == null ? 'Crea canale' : 'Rinomina canale'),
-        content: TextFormField(
-          initialValue: name,
-          onChanged: (value) => name = value,
-          autofocus: true,
-          maxLength: 64,
-          decoration: const InputDecoration(labelText: 'Nome del canale'),
+        content: Form(
+          key: formKey,
+          child: TextFormField(
+            initialValue: name,
+            onChanged: (value) => name = value,
+            autofocus: true,
+            maxLength: 64,
+            decoration: const InputDecoration(labelText: 'Nome del canale'),
+            validator: (value) {
+              final candidate = value?.trim() ?? '';
+              if (candidate.isEmpty) return 'Inserisci un nome.';
+              final duplicate = (_details?['channels'] as List? ?? []).any(
+                (item) =>
+                    item['id'] != channel?['id'] &&
+                    (item['name'] as String).toLowerCase() ==
+                        candidate.toLowerCase(),
+              );
+              return duplicate ? 'Esiste già un canale con questo nome.' : null;
+            },
+          ),
         ),
         actions: [
           TextButton(
@@ -318,7 +341,7 @@ class _GroupManagementPageState extends State<GroupManagementPage> {
           ),
           FilledButton(
             onPressed: () {
-              if (name.trim().isNotEmpty) {
+              if (formKey.currentState!.validate()) {
                 Navigator.pop(context, name.trim());
               }
             },
@@ -336,6 +359,201 @@ class _GroupManagementPageState extends State<GroupManagementPage> {
               'channel_id': channel['id'],
               'name': result,
             },
+    );
+  }
+
+  Future<void> _openChannels() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => GroupManagementPage.channels(
+          bridge: widget.bridge,
+          conversationId: widget.conversationId,
+        ),
+      ),
+    );
+    if (mounted) await _load();
+  }
+
+  bool get _channelsPending =>
+      (_details?['pending_actions'] as List? ?? []).any(
+        (action) => const [
+          'create_channel',
+          'rename_channel',
+          'delete_channel',
+          'move_channel',
+        ].contains(action['kind']),
+      );
+
+  bool get _canManageChannels => _allowed('change_info') && !_channelsPending;
+
+  Future<void> _moveChannel(
+    List<Map> snapshot,
+    int oldIndex,
+    int newIndex,
+  ) async {
+    if (!_canManageChannels) return;
+    final channels = List<Map>.from(snapshot);
+    if (newIndex > oldIndex) newIndex--;
+    if (newIndex == oldIndex) return;
+    final moved = channels.removeAt(oldIndex);
+    await _act({
+      'kind': 'move_channel',
+      'channel_id': moved['id'],
+      'before_channel_id': newIndex < channels.length
+          ? channels[newIndex]['id']
+          : null,
+    });
+  }
+
+  Future<void> _deleteChannel(Map channel) async {
+    if (!_canManageChannels || !_hasPermission('delete_messages')) return;
+    if (await _confirm(
+          'Elimina canale',
+          'Eliminare «${channel['name']}» e tutti i suoi messaggi per il gruppo? Questa azione non può essere annullata.',
+        ) &&
+        mounted) {
+      await _act({'kind': 'delete_channel', 'channel_id': channel['id']});
+    }
+  }
+
+  Widget _buildChannels(Map<String, dynamic> details) {
+    final channels = (details['channels'] as List? ?? []).cast<Map>();
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 760),
+        child: ReorderableListView.builder(
+          key: const ValueKey('manage-channel-list'),
+          padding: const EdgeInsets.all(16),
+          buildDefaultDragHandles: false,
+          // Keep compatibility with the Flutter 3.35 release toolchain.
+          // ignore: deprecated_member_use
+          onReorder: (oldIndex, newIndex) =>
+              _moveChannel(channels, oldIndex, newIndex),
+          header: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (_busy) const LinearProgressIndicator(),
+              if (_error != null)
+                Text(
+                  _error!,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              Text(
+                details['name'] as String,
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Trascina i canali per cambiarne l’ordine oppure usa il menu accanto al nome.',
+              ),
+              if (!_hasPermission('change_info'))
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Text(_permissionMessage('change_info')),
+                ),
+              if (_channelsPending)
+                const Padding(
+                  padding: EdgeInsets.only(top: 12),
+                  child: Text(
+                    'Modifica dei canali in attesa di conferma del proprietario.',
+                  ),
+                ),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                key: const ValueKey('create-group-channel'),
+                onPressed: _canManageChannels && channels.length < 50
+                    ? () => _editChannel()
+                    : null,
+                icon: const Icon(Icons.add),
+                label: const Text('Crea canale'),
+              ),
+              const SizedBox(height: 16),
+              const ListTile(
+                leading: Icon(Icons.chat_bubble_outline),
+                title: Text('Generale'),
+                subtitle: Text('Sempre disponibile · posizione fissa'),
+                trailing: Icon(Icons.lock_outline),
+              ),
+              const Divider(),
+              if (channels.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Text(
+                    'Nessun canale aggiuntivo. Crea il primo canale del gruppo.',
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+            ],
+          ),
+          itemCount: channels.length,
+          itemBuilder: (context, index) {
+            final channel = channels[index];
+            return ListTile(
+              key: ValueKey('manage-channel-${channel['id']}'),
+              leading: const Icon(Icons.tag),
+              title: Text(
+                channel['name'] as String,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  PopupMenuButton<String>(
+                    tooltip: 'Gestisci ${channel['name']}',
+                    enabled: _canManageChannels,
+                    onSelected: (action) async {
+                      if (!_canManageChannels) return;
+                      switch (action) {
+                        case 'rename':
+                          await _editChannel(channel);
+                        case 'up':
+                          await _moveChannel(channels, index, index - 1);
+                        case 'down':
+                          await _moveChannel(channels, index, index + 2);
+                        case 'delete':
+                          await _deleteChannel(channel);
+                      }
+                    },
+                    itemBuilder: (_) => [
+                      const PopupMenuItem(
+                        value: 'rename',
+                        child: Text('Rinomina'),
+                      ),
+                      PopupMenuItem(
+                        value: 'up',
+                        enabled: index > 0,
+                        child: const Text('Sposta su'),
+                      ),
+                      PopupMenuItem(
+                        value: 'down',
+                        enabled: index < channels.length - 1,
+                        child: const Text('Sposta giù'),
+                      ),
+                      PopupMenuItem(
+                        value: 'delete',
+                        enabled: _hasPermission('delete_messages'),
+                        child: const Text('Elimina canale'),
+                      ),
+                    ],
+                  ),
+                  ReorderableDragStartListener(
+                    key: ValueKey('drag-channel-${channel['id']}'),
+                    index: index,
+                    enabled: _canManageChannels,
+                    child: const Tooltip(
+                      message: 'Trascina per spostare',
+                      child: Padding(
+                        padding: EdgeInsets.all(12),
+                        child: Icon(Icons.drag_handle),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
     );
   }
 
@@ -364,7 +582,9 @@ class _GroupManagementPageState extends State<GroupManagementPage> {
     final details = _details;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Gestisci gruppo'),
+        title: Text(
+          widget._channelsOnly ? 'Gestisci canali' : 'Gestisci gruppo',
+        ),
         actions: [
           IconButton(
             onPressed: _busy ? null : _load,
@@ -402,6 +622,8 @@ class _GroupManagementPageState extends State<GroupManagementPage> {
                       ],
                     ),
             )
+          : widget._channelsOnly
+          ? _buildChannels(details)
           : Center(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 760),
@@ -454,32 +676,15 @@ class _GroupManagementPageState extends State<GroupManagementPage> {
                           ),
                           const Divider(),
                           ListTile(
-                            title: const Text('Canali del gruppo'),
+                            key: const ValueKey('open-group-channels'),
+                            leading: const Icon(Icons.view_list_outlined),
+                            title: const Text('Gestisci canali'),
                             subtitle: const Text(
-                              'La chat Generale rimane sempre disponibile.',
+                              'Crea, rinomina, elimina e riordina i canali.',
                             ),
-                            trailing: IconButton(
-                              tooltip: 'Crea canale',
-                              icon: const Icon(Icons.add),
-                              onPressed: _allowed('change_info')
-                                  ? () => _editChannel()
-                                  : null,
-                            ),
+                            trailing: const Icon(Icons.chevron_right),
+                            onTap: _busy ? null : _openChannels,
                           ),
-                          for (final channel
-                              in (details['channels'] as List? ?? [])
-                                  .cast<Map>())
-                            ListTile(
-                              leading: const Icon(Icons.tag),
-                              title: Text(channel['name'] as String),
-                              trailing: IconButton(
-                                tooltip: 'Rinomina canale',
-                                icon: const Icon(Icons.edit_outlined),
-                                onPressed: _allowed('change_info')
-                                    ? () => _editChannel(channel)
-                                    : null,
-                              ),
-                            ),
                           ListTile(
                             leading: const Icon(Icons.tune),
                             title: const Text('Permessi e antispam'),

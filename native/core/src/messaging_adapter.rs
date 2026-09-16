@@ -737,7 +737,7 @@ pub fn list_messages(
         messages.retain(|message| {
             !group.management.closed
                 && !group.management.left
-                && !group.management.deleted_messages.contains(&message.id)
+                && !groups::message_deleted(group, message)
         });
         if group.management.closed || group.management.left {
             has_more = false;
@@ -2065,6 +2065,15 @@ fn persist_inbound_payload_with(
                     .map_err(|_| CoreError::InvalidInput)?;
                     channel = pointer.channel_id;
                 }
+                // A deleted channel is final; do not keep retrying late packets
+                // as though their channel snapshot had not arrived yet.
+                if channel
+                    .as_ref()
+                    .is_some_and(|id| group.management.deleted_channels.contains(id))
+                {
+                    opened.commit_ratchet()?;
+                    return Ok(false);
+                }
                 // A channel snapshot may arrive after its first message.
                 groups::enforce_channel(&group, channel.as_deref())
                     .map_err(|_| CoreError::InboundDeferred)?;
@@ -2783,7 +2792,7 @@ fn apply_device_sync_plaintext(plaintext: &[u8]) -> CoreResult<()> {
                     && (group.management.closed
                         || group.management.left
                         || group.management.removed
-                        || group.management.deleted_messages.contains(&message.id))
+                        || groups::message_deleted(group, &message))
             }) {
                 changed |= upsert_synced_message(&mut store, &message_path, message)?;
             }

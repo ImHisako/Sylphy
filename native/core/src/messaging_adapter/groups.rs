@@ -146,6 +146,8 @@ pub struct Management {
     pub show_action_notices: bool,
     #[serde(default)]
     pub channels: Vec<GroupChannel>,
+    #[serde(default)]
+    pub deleted_channels: HashSet<String>,
     pub revision: u64,
     pub policy: Policy,
     pub admins: HashMap<String, AdminPermissions>,
@@ -246,7 +248,8 @@ pub(super) fn preserve_local_queues(existing: &StoredGroup, incoming: &mut Store
     }
     if !incoming.management.left
         && (existing.management.closed != incoming.management.closed
-            || existing.management.deleted_messages != incoming.management.deleted_messages)
+            || existing.management.deleted_messages != incoming.management.deleted_messages
+            || existing.management.deleted_channels != incoming.management.deleted_channels)
     {
         incoming.management.pending_effect = Some(Effect {
             notice: "Moderazione del gruppo sincronizzata".to_owned(),
@@ -292,6 +295,13 @@ pub enum Action {
     RenameChannel {
         channel_id: String,
         name: String,
+    },
+    DeleteChannel {
+        channel_id: String,
+    },
+    MoveChannel {
+        channel_id: String,
+        before_channel_id: Option<String>,
     },
     Info {
         name: String,
@@ -441,7 +451,10 @@ fn authorized(group: &StoredGroup, actor: &str, action: &Action) -> CoreResult<(
     let rights = permissions(group, actor)?;
     let permitted = match action {
         Action::ActionNotices { .. } => rights.manage_permissions,
-        Action::CreateChannel { .. } | Action::RenameChannel { .. } => rights.change_info,
+        Action::CreateChannel { .. }
+        | Action::RenameChannel { .. }
+        | Action::MoveChannel { .. } => rights.change_info,
+        Action::DeleteChannel { .. } => rights.change_info && rights.delete_messages,
         Action::Info { .. } => rights.change_info,
         Action::Policy { .. } => rights.manage_permissions,
         Action::AddMembers { .. } => rights.invite_members,
@@ -503,7 +516,10 @@ pub(super) fn validate(group: &StoredGroup) -> CoreResult<()> {
     for channel in &value.channels {
         validate_conversation_id(&channel.id)?;
         validate_display_name(&channel.name)?;
-        if !channel_ids.insert(&channel.id) || !channel_names.insert(channel.name.to_lowercase()) {
+        if value.deleted_channels.contains(&channel.id)
+            || !channel_ids.insert(&channel.id)
+            || !channel_names.insert(channel.name.to_lowercase())
+        {
             return Err(CoreError::InvalidInput);
         }
     }
@@ -512,6 +528,7 @@ pub(super) fn validate(group: &StoredGroup) -> CoreResult<()> {
         || value.restrictions.len() > MAX_GROUP_MEMBERS
         || value.pinned.len() > 50
         || value.deleted_messages.len() > MAX_MESSAGES
+        || value.deleted_channels.len() > 4096
         || value.requests.len() > MAX_CONTROLS
         || value.processed.len() > 4096
         || value.outbound.len() > MAX_OUTBOX_DELIVERIES
@@ -529,6 +546,7 @@ pub(super) fn validate(group: &StoredGroup) -> CoreResult<()> {
         .keys()
         .chain(value.pinned.iter())
         .chain(value.deleted_messages.iter())
+        .chain(value.deleted_channels.iter())
         .chain(value.departed.iter())
     {
         validate_conversation_id(id)?;
@@ -546,6 +564,9 @@ pub(super) fn validate(group: &StoredGroup) -> CoreResult<()> {
 }
 
 pub(super) fn require_updated(group: &StoredGroup) -> CoreResult<()> {
+    if !group.management.deleted_channels.is_empty() {
+        require_channel_management(group)?;
+    }
     if !group.management.channels.is_empty() {
         require_channels(group)?;
     }
@@ -769,6 +790,9 @@ fn contains_link(text: &str) -> bool {
 }
 fn already_applied(group: &StoredGroup, action: &Action) -> bool {
     match action {
+        Action::DeleteChannel { channel_id } => {
+            group.management.deleted_channels.contains(channel_id)
+        }
         Action::DeleteMessage { message_id } => {
             group.management.deleted_messages.contains(message_id)
         }
@@ -785,6 +809,12 @@ pub fn act(id: &str, action: Action) -> CoreResult<Value> {
     let local = local_id()?;
     authorized(&group, &local, &action)?;
     require_updated(&group)?;
+    if matches!(
+        action,
+        Action::DeleteChannel { .. } | Action::MoveChannel { .. }
+    ) {
+        require_channel_management(&group)?;
+    }
     if already_applied(&group, &action) {
         return Ok(json!({"state": "applied"}));
     }
@@ -872,6 +902,61 @@ fn apply_request(mut group: StoredGroup, request: &Request) -> CoreResult<()> {
                 .ok_or(CoreError::InvalidInput)?;
             channel.name = validate_display_name(name)?;
             "Un canale è stato rinominato"
+        }
+        Action::DeleteChannel { channel_id } => {
+            require_channel_management(&group)?;
+            if !no_change {
+                let position = group
+                    .management
+                    .channels
+                    .iter()
+                    .position(|channel| channel.id == *channel_id)
+                    .ok_or(CoreError::InvalidInput)?;
+                group.management.channels.remove(position);
+                group.management.deleted_channels.insert(channel_id.clone());
+                // Pins and channel history disappear together on every device.
+                let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+                ensure_messages_loaded(&mut store)?;
+                let deleted = store
+                    .messages
+                    .iter()
+                    .filter(|message| {
+                        message.conversation_id == group.id && message_deleted(&group, message)
+                    })
+                    .map(|message| message.id.as_str())
+                    .collect::<HashSet<_>>();
+                group
+                    .management
+                    .pinned
+                    .retain(|id| !deleted.contains(id.as_str()));
+            }
+            "Un canale è stato eliminato"
+        }
+        Action::MoveChannel {
+            channel_id,
+            before_channel_id,
+        } => {
+            require_channel_management(&group)?;
+            let position = group
+                .management
+                .channels
+                .iter()
+                .position(|channel| channel.id == *channel_id)
+                .ok_or(CoreError::InvalidInput)?;
+            if before_channel_id.as_ref() != Some(channel_id) {
+                let channel = group.management.channels.remove(position);
+                let destination = match before_channel_id {
+                    Some(id) => group
+                        .management
+                        .channels
+                        .iter()
+                        .position(|channel| channel.id == *id)
+                        .ok_or(CoreError::InvalidInput)?,
+                    None => group.management.channels.len(),
+                };
+                group.management.channels.insert(destination, channel);
+            }
+            "Ordine dei canali aggiornato"
         }
         Action::Info { name, description } => {
             group.name = validate_display_name(name)?;
@@ -1750,7 +1835,7 @@ fn apply_local_effects(
             message.conversation_id == group.id
                 && (group.management.closed
                     || group.management.left
-                    || group.management.deleted_messages.contains(&message.id))
+                    || message_deleted(group, message))
         })
         .map(|message| message.id.clone())
         .collect::<HashSet<_>>();
@@ -1874,19 +1959,35 @@ pub(super) fn rich_metadata(body: &str) -> CoreResult<(String, Option<String>, O
     Ok((rich.text, rich.reply_to, rich.channel_id))
 }
 
+fn require_channel_management(group: &StoredGroup) -> CoreResult<()> {
+    require_channel_capability(group, "group-channel-management-v1")
+}
+
 fn require_channels(group: &StoredGroup) -> CoreResult<()> {
+    require_channel_capability(group, "group-channels-v1")
+}
+
+fn require_channel_capability(group: &StoredGroup, required: &str) -> CoreResult<()> {
     for member in &group.members {
         if member.identity.delivery_devices()?.iter().any(|device| {
             !device
                 .bundle
                 .capabilities
                 .iter()
-                .any(|capability| capability == "group-channels-v1")
+                .any(|capability| capability == required)
         }) {
             return Err(CoreError::UnsupportedVersion);
         }
     }
     Ok(())
+}
+
+pub(super) fn message_deleted(group: &StoredGroup, message: &StoredMessage) -> bool {
+    group.management.deleted_messages.contains(&message.id)
+        || (!group.management.deleted_channels.is_empty()
+            && rich_metadata(&message.body).is_ok_and(|(_, _, channel)| {
+                channel.is_some_and(|id| group.management.deleted_channels.contains(&id))
+            }))
 }
 
 pub(super) fn enforce_channel(group: &StoredGroup, channel_id: Option<&str>) -> CoreResult<()> {

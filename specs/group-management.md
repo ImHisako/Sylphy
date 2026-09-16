@@ -1,6 +1,6 @@
 # Gestione dei gruppi · protocollo v1
 
-## Canali e moderazione (ABI 12)
+## Canali e moderazione (ABI 13)
 
 Il gruppo contiene sempre la chat Generale. Gli amministratori con `change_info`
 possono creare e rinominare fino a 50 canali, con ID stabili e nomi univoci
@@ -9,7 +9,27 @@ del gruppo. La capability firmata `group-channels-v1` deve essere presente su
 tutti gli endpoint prima di usare i canali o aggiungere nuovi membri a un gruppo
 che li contiene.
 
-`create_channel` e `rename_channel` sono azioni coordinate dal proprietario.
+La voce **Gestisci canali** nelle impostazioni apre una pagina dedicata a
+creazione, rinomina, eliminazione e ordinamento. Il riordino è disponibile con
+trascinamento e con i comandi Sposta su/Sposta giù; Generale rimane fisso.
+
+`create_channel`, `rename_channel`, `move_channel` e `delete_channel` sono azioni
+coordinate dal proprietario. `move_channel` usa un ID stabile e
+`before_channel_id` (null per spostare in fondo), evitando di sovrascrivere
+l'intero elenco con una copia potenzialmente obsoleta. Creazione, rinomina e
+riordino richiedono `change_info`; eliminare richiede anche `delete_messages`.
+La pagina chiede conferma prima di eliminare il canale e la sua cronologia.
+Le azioni delegate rimangono visibilmente in attesa, senza anticipare una
+modifica che il proprietario potrebbe rifiutare.
+
+Eliminazione e riordino richiedono la capability firmata
+`group-channel-management-v1` su tutti gli endpoint. Gli ID eliminati sono
+conservati in `deleted_channels` nello snapshot e nel vault (default vuoto per
+i gruppi precedenti): cronologia e allegati locali vengono rimossi, i messaggi
+tardivi vengono confermati senza reinserirli e la sincronizzazione di vecchi
+dispositivi non li ripristina. I nuovi membri di un gruppo con canali eliminati
+devono supportare questa capability.
+
 `send_channel_text`, `send_channel_attachment` e `mark_channel_read` completano
 il bridge. Il testo ricco e i puntatori degli allegati hanno un `channel_id`
 opzionale: assente significa Generale. Le risposte mantengono il canale
@@ -34,7 +54,7 @@ destinatari di rete; l'assenza di membri non aggira i controlli sui gruppi chius
 o sui partecipanti rimossi. Le anteprime delle chat decodificano il testo ricco
 e mostrano autore e azione per le risposte, senza prefissi di protocollo.
 
-Flutter e libreria nativa vanno ricompilati e distribuiti insieme (ABI 12).
+Flutter e libreria nativa vanno ricompilati e distribuiti insieme (ABI 13).
 La dipendenza Veilid rimane invariata.
 
 ## Comportamento e compatibilità

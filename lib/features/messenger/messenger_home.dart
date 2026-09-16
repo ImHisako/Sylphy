@@ -68,6 +68,18 @@ class _MessengerHomeState extends State<MessengerHome>
   bool _forceRefreshAfterCurrent = false;
   int _lastInboxRevision = 0;
 
+  bool get _androidBackground =>
+      defaultTargetPlatform == TargetPlatform.android &&
+      WidgetsBinding.instance.lifecycleState != null &&
+      WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed;
+
+  void _configureInboxTimer() {
+    _inboxTimer?.cancel();
+    _inboxTimer = _androidBackground
+        ? null
+        : Timer.periodic(Duration(seconds: 3), (_) => _refreshInbox());
+  }
+
   @override
   void initState() {
     super.initState();
@@ -93,7 +105,7 @@ class _MessengerHomeState extends State<MessengerHome>
     if (bridge is InboxRefreshingBridge) {
       _lastInboxRevision = (bridge as InboxRefreshingBridge).inboxRevision;
     }
-    _inboxTimer = Timer.periodic(Duration(seconds: 3), (_) => _refreshInbox());
+    _configureInboxTimer();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) unawaited(_initialRefresh());
     });
@@ -125,6 +137,7 @@ class _MessengerHomeState extends State<MessengerHome>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    _configureInboxTimer();
     if (state == AppLifecycleState.resumed) {
       unawaited(_refreshInbox(force: true));
     }
@@ -183,7 +196,7 @@ class _MessengerHomeState extends State<MessengerHome>
   }
 
   Future<void> _refreshInbox({bool force = false}) async {
-    if (!mounted) return;
+    if (!mounted || _androidBackground) return;
     if (_isRefreshingInbox) {
       _forceRefreshAfterCurrent |= force;
       return;
@@ -1435,7 +1448,7 @@ class _ChatPane extends StatefulWidget {
   State<_ChatPane> createState() => _ChatPaneState();
 }
 
-class _ChatPaneState extends State<_ChatPane> {
+class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
   ChatMessage? _replyTo;
   final Set<String> _pendingMessageActions = {};
   List<Map> _channels = [];
@@ -1503,10 +1516,14 @@ class _ChatPaneState extends State<_ChatPane> {
           generation == _channelLoadGeneration) {
         setState(() => _channelLoadFailed = true);
       }
-      AppLog.instance.recordError(
+      AppLog.instance.record(
         category: 'messenger',
         action: 'channels_load_failed',
-        error: error,
+        level: AppLogLevel.error,
+        result: error is SecureMessagingException
+            ? error.code
+            : error.runtimeType.toString(),
+        force: true,
       );
     }
   }
@@ -1921,6 +1938,20 @@ class _ChatPaneState extends State<_ChatPane> {
   ValueListenable<int>? _inboxChanges;
   ModalRoute<dynamic>? _chatRoute;
 
+  bool get _androidBackground =>
+      defaultTargetPlatform == TargetPlatform.android &&
+      WidgetsBinding.instance.lifecycleState != null &&
+      WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _configureInboxUpdates();
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_reloadMessagesAsync(force: true));
+      unawaited(_loadChannels());
+    }
+  }
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -1930,6 +1961,7 @@ class _ChatPaneState extends State<_ChatPane> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     MessageNotifications.trackConversation(
       this,
       () => mounted && _chatRoute?.isCurrent == true && _isShowingMessages
@@ -1970,7 +2002,7 @@ class _ChatPaneState extends State<_ChatPane> {
       if (bridge is InboxRevisionNotifications) {
         _inboxChanges = (bridge as InboxRevisionNotifications).inboxChanges;
         _inboxChanges!.addListener(_onInboxRevisionChanged);
-      } else if (!widget.showHeader) {
+      } else if (!widget.showHeader && !_androidBackground) {
         _messageTimer = Timer.periodic(
           Duration(seconds: 3),
           (_) => _refreshMessagesFromNetwork(),
@@ -2050,7 +2082,7 @@ class _ChatPaneState extends State<_ChatPane> {
   }
 
   Future<void> _refreshMessagesFromNetwork() async {
-    if (!mounted || _isRefreshingMessages) return;
+    if (!mounted || _androidBackground || _isRefreshingMessages) return;
     final bridge = widget.bridge;
     if (bridge is! InboxRefreshingBridge) return;
     _isRefreshingMessages = true;
@@ -2073,6 +2105,7 @@ class _ChatPaneState extends State<_ChatPane> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     MessageNotifications.untrackConversation(this);
     _channelListController.dispose();
     _messageTimer?.cancel();

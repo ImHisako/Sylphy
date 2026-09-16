@@ -141,6 +141,17 @@ class VeilidService extends ChangeNotifier {
   Future<void>? _refreshInProgress;
   bool _disposed = false;
   bool _platformReady = false;
+  bool _foreground = true;
+
+  void setForeground(bool foreground) {
+    if (_foreground == foreground || _disposed) return;
+    _foreground = foreground;
+    if (_refreshTimer != null) {
+      _refreshTimer!.cancel();
+      _refreshTimer = null;
+      _ensureRefreshTimer();
+    }
+  }
 
   VeilidSnapshot get snapshot => _snapshot;
   bool get hasNativeCore => _nativeCore != null;
@@ -329,7 +340,10 @@ class VeilidService extends ChangeNotifier {
   }
 
   void _ensureRefreshTimer() {
-    _refreshTimer ??= Timer.periodic(const Duration(seconds: 8), (_) {
+    _refreshTimer ??= Timer.periodic(Duration(seconds: _foreground ? 8 : 60), (
+      _,
+    ) {
+      if (_startInProgress != null || _refreshInProgress != null) return;
       if (_snapshot.phase == VeilidPhase.offline ||
           (_snapshot.phase == VeilidPhase.error &&
               _snapshot.diagnosticCode != 'feature_unavailable')) {

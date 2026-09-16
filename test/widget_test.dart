@@ -17,6 +17,73 @@ import 'package:sylphy/main.dart';
 import 'package:sylphy/features/messenger/message_text.dart';
 
 void main() {
+  for (final notifications in [true, false]) {
+    testWidgets(
+      'Android pauses UI polling in background (notifications: $notifications)',
+      (tester) async {
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        );
+        final bridge = notifications
+            ? _NotifyingTestMessagingBridge()
+            : _TestMessagingBridge();
+        await tester.pumpWidget(
+          SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Contatto di test'));
+        await tester.pumpAndSettle();
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.inactive,
+        );
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        await tester.pumpAndSettle();
+        final before = bridge.refreshCount;
+        bridge.injectIncoming('Ricevuto durante la sospensione');
+        await tester.pump(const Duration(seconds: 30));
+        expect(bridge.refreshCount, before);
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.inactive,
+        );
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        );
+        await tester.pumpAndSettle();
+        expect(bridge.refreshCount, greaterThan(before));
+        expect(find.text('Ricevuto durante la sospensione'), findsOneWidget);
+        await tester.pumpWidget(const SizedBox());
+        if (bridge is _NotifyingTestMessagingBridge) {
+          bridge.inboxChanges.dispose();
+        }
+      },
+      variant: TargetPlatformVariant({TargetPlatform.android}),
+    );
+  }
+
+  testWidgets(
+    'resuming retries a failed channel read without marking General read',
+    (tester) async {
+      final bridge = _FailingChannelTestBridge();
+      await tester.pumpWidget(
+        SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Contatto di test'));
+      await tester.pumpAndSettle();
+      expect(find.text('Riprova a caricare i canali'), findsOneWidget);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      bridge.fail = false;
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('group-channel-list')), findsOneWidget);
+      expect(bridge.readChannels, isEmpty);
+      await tester.pumpWidget(const SizedBox());
+      bridge.inboxChanges.dispose();
+    },
+  );
+
   setUpAll(() async {
     if (Platform.environment['SYLPHY_CAPTURE_CHANNELS'] != '1') return;
     final fontDirectory = Platform.environment['SYLPHY_TEST_FONTS'];

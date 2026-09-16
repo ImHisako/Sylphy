@@ -27,7 +27,7 @@ class MessagingService : Service() {
             } catch (error: Throwable) {
                 Log.w("Sylphy", "Background inbox poll unavailable", error)
             } finally {
-                if (!stopped) worker.postDelayed(this, POLL_INTERVAL_MS)
+                if (!stopped && !uiResumed) worker.postDelayed(this, POLL_INTERVAL_MS)
             }
         }
     }
@@ -71,7 +71,8 @@ class MessagingService : Service() {
             System.loadLibrary("sylphy_core")
             workerThread = HandlerThread("sylphy-inbox").apply { start() }
             worker = Handler(workerThread.looper)
-            worker.post(poll)
+            activeService = this
+            updatePolling()
         } catch (error: Throwable) {
             Log.e("Sylphy", "Unable to start native inbox worker", error)
             stopSelf()
@@ -85,9 +86,19 @@ class MessagingService : Service() {
 
     override fun onDestroy() {
         stopped = true
+        if (activeService === this) activeService = null
         if (::worker.isInitialized) worker.removeCallbacksAndMessages(null)
         if (::workerThread.isInitialized) workerThread.quitSafely()
         super.onDestroy()
+    }
+
+    private fun updatePolling() {
+        if (!::worker.isInitialized || stopped) return
+        // Serialize lifecycle changes with the poll to avoid duplicate loops.
+        worker.post {
+            worker.removeCallbacks(poll)
+            if (!stopped && !uiResumed) worker.post(poll)
+        }
     }
 
     private fun showIncomingNotification(pinned: Boolean = false) {
@@ -114,7 +125,13 @@ class MessagingService : Service() {
     }
 
     companion object {
+        @Volatile private var activeService: MessagingService? = null
         @Volatile internal var uiResumed = false
+            set(value) {
+                if (field == value) return
+                field = value
+                activeService?.updatePolling()
+            }
         const val CHANNEL_ID = "sylphy_background_messaging"
         const val NOTIFICATION_ID = 4104
         const val INCOMING_NOTIFICATION_ID = 4105

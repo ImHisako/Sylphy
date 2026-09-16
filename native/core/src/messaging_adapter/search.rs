@@ -107,10 +107,7 @@ pub(super) fn search(id: &str, query: &str, offset: usize) -> CoreResult<Value> 
         positions.retain(|position| {
             !group.management.closed
                 && !group.management.left
-                && !group
-                    .management
-                    .deleted_messages
-                    .contains(&store.messages[*position].id)
+                && !groups::message_deleted(group, &store.messages[*position])
         });
     }
     positions.sort_unstable_by(|left, right| {
