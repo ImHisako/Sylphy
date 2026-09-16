@@ -17,6 +17,35 @@ import 'package:sylphy/main.dart';
 import 'package:sylphy/features/messenger/message_text.dart';
 
 void main() {
+  testWidgets(
+    'attachments require a click and can be cancelled while text keeps arriving',
+    (tester) async {
+      final bridge = _RetrievalTestBridge();
+      await tester.pumpWidget(
+        SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Contatto di test'));
+      await tester.pumpAndSettle();
+      expect(bridge.requests, 0);
+      expect(find.text('Da scaricare'), findsOneWidget);
+      await tester.tap(find.byTooltip('Scarica allegato'));
+      await tester.pumpAndSettle();
+      expect(bridge.requests, 1);
+      expect(find.text('Download in corso…'), findsOneWidget);
+      bridge.injectIncoming('Testo durante il download');
+      await tester.pump(const Duration(seconds: 3));
+      expect(find.text('Testo durante il download'), findsWidgets);
+      await tester.tap(find.byTooltip('Annulla download'));
+      await tester.pumpAndSettle();
+      expect(bridge.cancellations, 1);
+      expect(find.text('Da scaricare'), findsOneWidget);
+      bridge.setAttachmentState('failed');
+      await tester.pump(const Duration(seconds: 3));
+      expect(find.byTooltip('Riprova download'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
   for (final notifications in [true, false]) {
     testWidgets(
       'Android pauses UI polling in background (notifications: $notifications)',
@@ -1467,6 +1496,48 @@ class _WidgetPrivacyCipher implements LocalDataCipher {
   Future<Uint8List> open(Uint8List record) async => record;
   @override
   Future<Uint8List> protect(Uint8List plaintext) async => plaintext;
+}
+
+class _RetrievalTestBridge extends _TestMessagingBridge
+    implements AttachmentRetrievalBridge {
+  _RetrievalTestBridge() {
+    setAttachmentState('pending');
+  }
+  int requests = 0;
+  int cancellations = 0;
+  void setAttachmentState(String state) {
+    final file = ChatMessage(
+      id: 'remote-file',
+      authorId: 'sender',
+      body: '📎 file.bin',
+      sentAt: DateTime(2026),
+      isOutgoing: false,
+      attachmentName: 'file.bin',
+      attachmentState: state,
+      attachmentSize: 1024,
+    );
+    if (_messages.isEmpty) {
+      _messages.add(file);
+    } else {
+      _messages[0] = file;
+    }
+    _inboxRevision++;
+  }
+
+  @override
+  Future<void> requestAttachment(
+    String conversationId,
+    String messageId, {
+    bool cancel = false,
+  }) async {
+    if (cancel) {
+      cancellations++;
+      setAttachmentState('pending');
+    } else {
+      requests++;
+      setAttachmentState('downloading');
+    }
+  }
 }
 
 class _TestMessagingBridge

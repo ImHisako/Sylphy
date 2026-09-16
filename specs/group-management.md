@@ -1,6 +1,6 @@
 # Gestione dei gruppi · protocollo v1
 
-## Canali e moderazione (ABI 13)
+## Canali e moderazione (ABI 14)
 
 Il gruppo contiene sempre la chat Generale. Gli amministratori con `change_info`
 possono creare e rinominare fino a 50 canali, con ID stabili e nomi univoci
@@ -54,7 +54,7 @@ destinatari di rete; l'assenza di membri non aggira i controlli sui gruppi chius
 o sui partecipanti rimossi. Le anteprime delle chat decodificano il testo ricco
 e mostrano autore e azione per le risposte, senza prefissi di protocollo.
 
-Flutter e libreria nativa vanno ricompilati e distribuiti insieme (ABI 13).
+Flutter e libreria nativa vanno ricompilati e distribuiti insieme (ABI 14).
 La dipendenza Veilid rimane invariata.
 
 ## Comportamento e compatibilità
@@ -191,7 +191,7 @@ consegne accumulate offline possono attivarlo e client con storie diverse
 possono avere decisioni diverse. Non è un classificatore centralizzato.
 
 Questa implementazione conserva i limiti dell'archivio esistente: 100.000 messaggi
-e log cifrato di 64 MiB, allegati di 700 KiB, al massimo 64 destinatari oltre al
+e log cifrato di 64 MiB, allegati di 2 MiB, al massimo 64 destinatari oltre al
 creatore. Il gruppo ammette 50 pin, 512 richieste pendenti e 4.096 azioni applicate
 registrate per deduplicazione. La ricerca è verificata su 100.000 messaggi sintetici;
 **non è supportata né certificata la ricerca su milioni di messaggi**. Per quella

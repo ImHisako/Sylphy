@@ -2,6 +2,9 @@ import 'package:flutter/foundation.dart';
 
 import 'models.dart';
 
+/// Keep aligned with the native attachment and linked-device transport limits.
+const maxAttachmentBytes = 2 * 1024 * 1024;
+
 abstract class SecureMessagingBridge {
   List<Conversation> listConversations();
 
@@ -38,6 +41,14 @@ abstract interface class InboxRefreshingBridge {
 
   /// Pulls and persists pending network envelopes without blocking rendering.
   Future<int> refreshInbox();
+}
+
+abstract interface class AttachmentRetrievalBridge {
+  Future<void> requestAttachment(
+    String conversationId,
+    String messageId, {
+    bool cancel = false,
+  });
 }
 
 /// Shares completed inbox changes with open chats without another network poll.

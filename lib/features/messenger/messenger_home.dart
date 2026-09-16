@@ -22,6 +22,7 @@ import '../settings/settings_page.dart';
 import 'encrypted_file_archive_page.dart';
 import 'group_management_page.dart';
 import 'message_text.dart';
+import 'safe_attachment_image.dart';
 
 class MessengerHome extends StatefulWidget {
   const MessengerHome({
@@ -2377,6 +2378,33 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
     );
   }
 
+  Future<void> _retrieveAttachment(
+    ChatMessage message, {
+    required bool cancel,
+  }) async {
+    final bridge = widget.bridge;
+    if (bridge is! AttachmentRetrievalBridge) return;
+    final conversationId = widget.conversation.id;
+    try {
+      await (bridge as AttachmentRetrievalBridge).requestAttachment(
+        conversationId,
+        message.id,
+        cancel: cancel,
+      );
+      if (!mounted || widget.conversation.id != conversationId) return;
+      await _reloadMessagesAsync(force: true);
+    } on Object {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Download non avviato. Attendi il trasferimento in corso e riprova.',
+          ),
+        ),
+      );
+    }
+  }
+
   Future<void> _pickAndSendAttachment() async {
     if (_isSendingAttachment) return;
     final conversationId = widget.conversation.id;
@@ -2395,12 +2423,12 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
       );
       return;
     }
-    if (size <= 0 || size > 700 * 1024) {
+    if (size <= 0 || size > maxAttachmentBytes) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Il file deve avere una dimensione massima di 700 KB.',
+              'Il file deve essere non vuoto e non superare 2 MiB.',
             ),
           ),
         );
@@ -2623,6 +2651,13 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
                             onSecondaryTap: () => _messageActions(message),
                             child: _MessageBubble(
                               message: message,
+                              onRetrieveAttachment:
+                                  widget.bridge is AttachmentRetrievalBridge
+                                  ? (cancel) => _retrieveAttachment(
+                                      message,
+                                      cancel: cancel,
+                                    )
+                                  : null,
                               isPinned: _pinnedMessageIds.contains(message.id),
                               actionPending: _actionPending(message.id),
                               onMention: _openMention,
@@ -3608,6 +3643,7 @@ class _MessageBubble extends StatelessWidget {
     this.showAuthor = false,
     this.isPinned = false,
     this.actionPending = false,
+    this.onRetrieveAttachment,
   });
 
   final ChatMessage message;
@@ -3617,6 +3653,7 @@ class _MessageBubble extends StatelessWidget {
   final bool showReceipt;
   final VoidCallback? onRestoreDraft;
   final ValueChanged<String>? onMention;
+  final ValueChanged<bool>? onRetrieveAttachment;
 
   bool get _isImageAttachment {
     final name = message.attachmentName?.toLowerCase();
@@ -3665,21 +3702,7 @@ class _MessageBubble extends StatelessWidget {
               child: InteractiveViewer(
                 minScale: 0.5,
                 maxScale: 5,
-                child: Image.memory(
-                  bytes,
-                  fit: BoxFit.contain,
-                  errorBuilder: (context, error, stackTrace) => Padding(
-                    padding: EdgeInsets.all(32),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.broken_image_outlined, size: 48),
-                        SizedBox(height: 12),
-                        Text('Impossibile visualizzare questa immagine.'),
-                      ],
-                    ),
-                  ),
-                ),
+                child: SafeAttachmentImage(bytes: bytes, expanded: true),
               ),
             ),
             Positioned(
@@ -3759,20 +3782,8 @@ class _MessageBubble extends StatelessWidget {
                         onTap: () => _showImage(context),
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(9),
-                          child: Image.memory(
-                            message.attachmentBytes!,
-                            width: 300,
-                            height: 220,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, _, _) => SizedBox(
-                              width: 300,
-                              height: 120,
-                              child: Icon(
-                                Icons.broken_image_outlined,
-                                color: foreground,
-                                size: 42,
-                              ),
-                            ),
+                          child: SafeAttachmentImage(
+                            bytes: message.attachmentBytes!,
                           ),
                         ),
                       ),
@@ -3802,7 +3813,9 @@ class _MessageBubble extends StatelessWidget {
                               ),
                               Text(
                                 _fileSizeLabel(
-                                  message.attachmentBytes?.length ?? 0,
+                                  message.attachmentBytes?.length ??
+                                      message.attachmentSize ??
+                                      0,
                                 ),
                                 style: TextStyle(
                                   color: foreground.withValues(alpha: 0.68),
@@ -3823,6 +3836,25 @@ class _MessageBubble extends StatelessWidget {
                               color: foreground,
                             ),
                           ),
+                        if (message.attachmentDownloading &&
+                            onRetrieveAttachment != null)
+                          IconButton(
+                            tooltip: 'Annulla download',
+                            onPressed: () => onRetrieveAttachment!(true),
+                            icon: Icon(Icons.close, color: foreground),
+                          ),
+                        if (message.canDownloadAttachment &&
+                            onRetrieveAttachment != null)
+                          IconButton(
+                            tooltip: message.attachmentState == 'failed'
+                                ? 'Riprova download'
+                                : 'Scarica allegato',
+                            onPressed: () => onRetrieveAttachment!(false),
+                            icon: Icon(
+                              Icons.cloud_download_outlined,
+                              color: foreground,
+                            ),
+                          ),
                         Icon(Icons.lock_rounded, size: 16, color: foreground),
                       ],
                     ),
@@ -3835,6 +3867,16 @@ class _MessageBubble extends StatelessWidget {
                 outgoing: outgoing,
                 onMention: onMention,
                 style: TextStyle(color: foreground, fontSize: 15, height: 1.3),
+              ),
+            if (message.attachmentName != null &&
+                message.attachmentBytes == null)
+              Text(
+                message.attachmentDownloading
+                    ? 'Download in corso…'
+                    : message.attachmentState == 'failed'
+                    ? 'Download non riuscito. Puoi riprovare.'
+                    : 'Da scaricare',
+                style: TextStyle(color: foreground, fontSize: 11),
               ),
             if (message.deliveryState == DeliveryState.notRestored) ...[
               Text(
@@ -3920,11 +3962,20 @@ class _ContactAvatar extends StatelessWidget {
           backgroundColor: Color(
             conversation.accentValue,
           ).withValues(alpha: 0.22),
-          backgroundImage: conversation.avatarBytes == null
-              ? null
-              : MemoryImage(conversation.avatarBytes!),
           child: conversation.avatarBytes != null
-              ? null
+              ? ClipOval(
+                  child: SizedBox.square(
+                    dimension: radius * 2,
+                    child: SafeAttachmentImage(
+                      bytes: conversation.avatarBytes!,
+                      previewEdge: 128,
+                      fallback: Icon(
+                        Icons.person_outline,
+                        color: Color(conversation.accentValue),
+                      ),
+                    ),
+                  ),
+                )
               : conversation.isGroup
               ? Icon(
                   conversation.type == ConversationType.channel
@@ -5044,6 +5095,6 @@ String _signatureForConversations(
 String _signatureForMessages(List<ChatMessage> messages) => messages
     .map(
       (item) =>
-          '${item.id}|${item.authorName}|${item.sentAt.microsecondsSinceEpoch}|${item.orderAt.microsecondsSinceEpoch}|${item.deliveryState.name}',
+          '${item.id}|${item.authorName}|${item.sentAt.microsecondsSinceEpoch}|${item.orderAt.microsecondsSinceEpoch}|${item.deliveryState.name}|${item.attachmentState}|${item.attachmentBytes?.length}',
     )
     .join('\n');

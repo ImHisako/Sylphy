@@ -113,13 +113,17 @@ Verifica su dispositivi reali prima di una release:
 
 1. Installare build aggiornate su due dispositivi e importare reciprocamente gli ID.
 2. Chiudere B; inviare da A testo e un allegato, attendendo la spunta singola.
-3. Chiudere A; riaprire B, collegarsi a Veilid e verificare contenuto e assenza di duplicati.
+3. Chiudere A; riaprire B, collegarsi a Veilid e verificare testo e riferimenti
+   degli allegati senza duplicati. Premere «Scarica allegato» per recuperare il file.
 4. Riavviare B e verificare che la cronologia non raddoppi.
 5. Interrompere la rete di A prima del deposito, riavviare A e verificare il retry.
 6. Superare 32 messaggi con B offline: gli eccedenti devono restare in coda;
    riaprire B e verificare che le conferme consentano di proseguire.
 
 Non è stata eseguita in questa revisione una prova end-to-end su due dispositivi
-reali attraverso la DHT pubblica. Gli allegati mantengono il limite di 700 KiB
+reali attraverso la DHT pubblica. Gli allegati hanno un limite di 2 MiB
 e la loro conservazione di sette giorni; la disponibilità del relativo blob
-resta necessaria per completare la ricezione.
+resta necessaria per scaricare il file, ma non per salvare il messaggio e
+confermare il riferimento autenticato. I download sono espliciti e separati
+dalla ricezione (ABI 14); gli allegati non richiesti non consumano spazio per i
+contenuti nell'archivio locale.

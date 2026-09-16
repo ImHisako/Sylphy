@@ -9,7 +9,7 @@ import 'package:ffi/ffi.dart';
 
 import '../diagnostics/app_log.dart';
 
-const _expectedAbiVersion = 13;
+const _expectedAbiVersion = 14;
 
 /// A local group read may race an account transition on the other worker.
 /// Retry once through that worker's queue, after the transition completes.
@@ -509,6 +509,7 @@ class NativeCoreClient
   bool _isUrgentCommand(Object? command) =>
       command == 'send_text' ||
       command == 'send_attachment' ||
+      command == 'request_attachment' ||
       command == 'send_reply' ||
       command == 'send_channel_text' ||
       command == 'send_channel_attachment' ||

@@ -26,6 +26,7 @@ use crate::{
     ratchet_adapter, secure_packet, vault, veilid_adapter,
 };
 
+mod attachments;
 pub mod groups;
 mod receipts;
 mod search;
@@ -38,7 +39,8 @@ const MAX_MESSAGE_STORE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CONTACTS: usize = 1024;
 const MAX_MESSAGES: usize = 100_000;
 const MAX_OUTBOX_DELIVERIES: usize = 4096;
-const MAX_ATTACHMENT_BYTES: usize = 700 * 1024;
+const MAX_ATTACHMENT_BYTES: usize = crate::blob_transport::MAX_ATTACHMENT_BYTES;
+const MAX_GROUP_INVITATION_BYTES: usize = 700 * 1024;
 const MAX_ATTACHMENT_NAME_CHARS: usize = 128;
 const MAX_MESSAGE_BODY_BYTES: usize = 16 * 1024;
 const MAX_MESSAGE_ID_BYTES: usize = 128;
@@ -201,6 +203,8 @@ struct StoredMessage {
     attachment_name: Option<String>,
     #[serde(default)]
     attachment_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attachment_pointer: Option<AttachmentPointer>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -256,7 +260,7 @@ enum DeviceSyncEvent {
     },
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 struct AttachmentPointer {
     version: u8,
     file_name: String,
@@ -387,6 +391,7 @@ pub fn configure_storage(storage_directory: &str) -> CoreResult<()> {
     let groups = load_groups(&groups_path)?;
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     store.generation = store.generation.wrapping_add(1);
+    attachments::reset();
     store.path = Some(path);
     store.message_path = Some(directory.join(MESSAGE_LOG_FILE));
     store.legacy_message_path = Some(directory.join(MESSAGE_STORE_FILE));
@@ -570,6 +575,12 @@ fn validate_backup_messages(
 }
 
 fn validate_stored_message(message: &StoredMessage) -> CoreResult<()> {
+    if let Some(pointer) = &message.attachment_pointer {
+        validate_attachment_pointer(pointer)?;
+        if message.attachment_name.as_deref() != Some(pointer.file_name.as_str()) {
+            return Err(CoreError::VerificationFailed);
+        }
+    }
     if let Some(name) = &message.author_name {
         validate_display_name(name)?;
     }
@@ -592,6 +603,9 @@ fn validate_stored_message(message: &StoredMessage) -> CoreResult<()> {
     }
     match (&message.attachment_name, &message.attachment_base64) {
         (None, None) => {}
+        (Some(name), None) if message.attachment_pointer.is_some() => {
+            validate_attachment_name(name)?;
+        }
         (Some(name), Some(encoded)) => {
             validate_attachment_name(name)?;
             if encoded.len() > (MAX_ATTACHMENT_BYTES * 4 / 3) + 8 {
@@ -610,6 +624,7 @@ fn validate_stored_message(message: &StoredMessage) -> CoreResult<()> {
 }
 
 pub fn list_conversations() -> CoreResult<Value> {
+    attachments::poll()?;
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     ensure_messages_loaded(&mut store)?;
     let mut summaries: HashMap<&str, (Option<&StoredMessage>, usize)> = HashMap::new();
@@ -707,6 +722,7 @@ pub fn list_messages(
     before_id: Option<&str>,
     limit: Option<usize>,
 ) -> CoreResult<Value> {
+    attachments::poll()?;
     validate_conversation_id(conversation_id)?;
     if before_id.is_some() && before_ms.is_none() {
         return Err(CoreError::InvalidInput);
@@ -1101,6 +1117,7 @@ fn queue_created_group(
         receipts: Default::default(),
         attachment_name: None,
         attachment_base64: None,
+        attachment_pointer: None,
     };
     if let Err(error) = queue_outgoing(message_path, system_message, deliveries) {
         if let Ok(mut store) = contact_store().lock() {
@@ -1218,6 +1235,7 @@ fn send_text_with(
             receipts: Default::default(),
             attachment_name: None,
             attachment_base64: None,
+            attachment_pointer: None,
         };
         queue_outgoing(&message_path, message, deliveries)?;
         return Ok(json!({"message_id": message_id, "delivery_state": delivery_state}));
@@ -1251,6 +1269,7 @@ fn send_text_with(
         receipts: Default::default(),
         attachment_name: None,
         attachment_base64: None,
+        attachment_pointer: None,
     };
     queue_outgoing(&message_path, message.clone(), deliveries)?;
     Ok(json!({
@@ -1267,6 +1286,14 @@ pub fn send_attachment(
     send_attachment_in_channel(conversation_id, file_name, bytes_base64, None)
 }
 
+pub fn request_attachment(
+    conversation_id: &str,
+    message_id: &str,
+    cancel: bool,
+) -> CoreResult<Value> {
+    attachments::request(conversation_id, message_id, cancel)
+}
+
 pub fn send_attachment_in_channel(
     conversation_id: &str,
     file_name: &str,
@@ -1275,6 +1302,9 @@ pub fn send_attachment_in_channel(
 ) -> CoreResult<Value> {
     validate_conversation_id(conversation_id)?;
     let file_name = validate_attachment_name(file_name)?;
+    if bytes_base64.len() > MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 {
+        return Err(CoreError::LimitExceeded);
+    }
     let bytes = STANDARD
         .decode(bytes_base64)
         .map_err(|_| CoreError::InvalidInput)?;
@@ -1311,6 +1341,7 @@ pub fn send_attachment_in_channel(
                 receipts: Default::default(),
                 attachment_name: Some(file_name),
                 attachment_base64: Some(STANDARD.encode(bytes)),
+                attachment_pointer: None,
             };
             queue_outgoing(&message_path, message, vec![])?;
             return Ok(json!({"message_id": message_id, "delivery_state": "delivered"}));
@@ -1381,6 +1412,7 @@ pub fn send_attachment_in_channel(
             receipts: Default::default(),
             attachment_name: Some(file_name),
             attachment_base64: Some(STANDARD.encode(bytes)),
+            attachment_pointer: None,
         };
         if let Err(error) = queue_outgoing(&message_path, message, deliveries) {
             let _ = veilid_adapter::delete_attachment_blob(&record_key, chunk_count);
@@ -1455,6 +1487,7 @@ pub fn send_attachment_in_channel(
         receipts: Default::default(),
         attachment_name: Some(file_name),
         attachment_base64: Some(STANDARD.encode(bytes)),
+        attachment_pointer: None,
     };
     if let Err(error) = queue_outgoing(&message_path, message, deliveries) {
         let _ = veilid_adapter::delete_attachment_blob(&record_key, chunk_count);
@@ -1667,6 +1700,7 @@ pub fn set_contact_verified(conversation_id: &str, verified: bool) -> CoreResult
 }
 
 pub fn sync_inbound_messages() -> CoreResult<Value> {
+    attachments::poll()?;
     let Ok(_sync_guard) = SYNC_LOCK.try_lock() else {
         let revision = contact_store()
             .lock()
@@ -2098,9 +2132,15 @@ fn persist_inbound_payload_with(
             }
             (id.clone(), opened.plaintext.clone())
         };
-    // Attachment retrieval may perform network I/O and must never run while
-    // the global contact/message store is locked.
-    let (body, attachment_name, attachment_base64) = decode_incoming_content(&plaintext)?;
+    // Persist the authenticated reference and commit the ratchet without fetching
+    // any file. Downloads require an explicit local request on a separate worker.
+    let attachment_pointer = parse_attachment_pointer(&plaintext)?;
+    let (body, attachment_name) = if let Some(pointer) = &attachment_pointer {
+        (attachment_body(pointer)?, Some(pointer.file_name.clone()))
+    } else {
+        groups::text_metadata(&plaintext)?;
+        (plaintext, None)
+    };
     let message = StoredMessage {
         id: opened.message_id.clone(),
         conversation_id: conversation_id.clone(),
@@ -2114,7 +2154,8 @@ fn persist_inbound_payload_with(
         delivery_state: "delivered".to_owned(),
         receipts: Default::default(),
         attachment_name,
-        attachment_base64,
+        attachment_base64: None,
+        attachment_pointer,
     };
     validate_stored_message(&message)?;
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
@@ -2864,6 +2905,12 @@ fn merge_synced_message(
         merged.attachment_name = incoming.attachment_name.clone();
         merged.attachment_base64 = incoming.attachment_base64.clone();
     }
+    if merged.attachment_pointer.is_none() {
+        merged.attachment_pointer = incoming.attachment_pointer.clone();
+        if merged.attachment_name.is_none() {
+            merged.attachment_name = incoming.attachment_name.clone();
+        }
+    }
     // Reading on one device must not overwrite the local read state.
     Ok(merged)
 }
@@ -3505,6 +3552,10 @@ fn message_json(message: &StoredMessage, store: &ContactStore) -> Value {
         "delivery_state": message.delivery_state,
         "attachment_name": message.attachment_name,
         "attachment_base64": message.attachment_base64,
+        "attachment_size": message.attachment_pointer.as_ref().map(|pointer| pointer.size),
+        "attachment_state": if message.attachment_base64.is_some() { "ready" }
+            else if message.attachment_pointer.is_some() { attachments::status(store.generation, &message.id) }
+            else { "unavailable" },
     })
 }
 
@@ -3517,7 +3568,7 @@ fn encode_group_invitation(
     publish: impl FnOnce(&[u8]) -> CoreResult<(String, u16)>,
 ) -> CoreResult<(String, GroupInvitationPointer)> {
     let bytes = serde_json::to_vec(invitation).map_err(|_| CoreError::Internal)?;
-    if bytes.len() > MAX_ATTACHMENT_BYTES {
+    if bytes.len() > MAX_GROUP_INVITATION_BYTES {
         return Err(CoreError::LimitExceeded);
     }
     let mut key = zeroize::Zeroizing::new([0_u8; 32]);
@@ -3553,7 +3604,7 @@ fn decode_group_invitation_with(
             return Err(CoreError::UnsupportedVersion);
         }
         if pointer.size == 0
-            || pointer.size > MAX_ATTACHMENT_BYTES
+            || pointer.size > MAX_GROUP_INVITATION_BYTES
             || pointer.record_key.is_empty()
             || pointer.record_key.len() > 1024
             || pointer.chunk_count == 0
@@ -3612,48 +3663,96 @@ fn decode_group_message(plaintext: &str) -> CoreResult<Option<(String, String)>>
     Ok(Some((group_id.to_owned(), body)))
 }
 
-fn decode_incoming_content(
-    plaintext: &str,
-) -> CoreResult<(String, Option<String>, Option<String>)> {
+fn parse_attachment_pointer(plaintext: &str) -> CoreResult<Option<AttachmentPointer>> {
     let Some(encoded) = plaintext.strip_prefix(ATTACHMENT_PREFIX) else {
-        groups::text_metadata(plaintext)?;
-        return Ok((plaintext.to_owned(), None, None));
+        return Ok(None);
     };
+    if encoded.len() > MAX_MESSAGE_BODY_BYTES {
+        return Err(CoreError::LimitExceeded);
+    }
     let pointer_bytes = STANDARD_NO_PAD
         .decode(encoded)
         .map_err(|_| CoreError::InvalidInput)?;
     let pointer: AttachmentPointer =
         serde_json::from_slice(&pointer_bytes).map_err(|_| CoreError::InvalidInput)?;
+    validate_attachment_pointer(&pointer)?;
+    Ok(Some(pointer))
+}
+
+fn attachment_body(pointer: &AttachmentPointer) -> CoreResult<String> {
+    groups::encode_channel_text(
+        &format!("📎 {}", pointer.file_name),
+        None,
+        pointer.channel_id.as_deref(),
+    )
+}
+
+fn validate_attachment_pointer(pointer: &AttachmentPointer) -> CoreResult<()> {
     if pointer.version != 1 || pointer.size == 0 || pointer.size > MAX_ATTACHMENT_BYTES {
         return Err(CoreError::InvalidInput);
     }
-    let file_name = validate_attachment_name(&pointer.file_name)?;
-    let encrypted =
-        veilid_adapter::fetch_attachment_blob(&pointer.record_key, pointer.chunk_count)?;
-    let key = STANDARD_NO_PAD
-        .decode(&pointer.key_base64)
-        .map_err(|_| CoreError::InvalidInput)?;
+    validate_attachment_name(&pointer.file_name)?;
+    attachment_body(pointer)?;
+    if pointer.chunk_count as usize
+        != (pointer.size + 16).div_ceil(crate::blob_transport::CHUNK_BYTES)
+    {
+        return Err(CoreError::InvalidInput);
+    }
+    crate::blob_transport::records(&pointer.record_key, pointer.chunk_count)?;
+    let key = zeroize::Zeroizing::new(
+        STANDARD_NO_PAD
+            .decode(&pointer.key_base64)
+            .map_err(|_| CoreError::InvalidInput)?,
+    );
     let nonce = STANDARD_NO_PAD
         .decode(&pointer.nonce_base64)
         .map_err(|_| CoreError::InvalidInput)?;
     if key.len() != 32 || nonce.len() != 24 {
         return Err(CoreError::InvalidInput);
     }
+    Ok(())
+}
+
+fn decrypt_attachment(
+    pointer: &AttachmentPointer,
+    fetch: impl FnOnce(&str, u16) -> CoreResult<Vec<u8>>,
+) -> CoreResult<String> {
+    validate_attachment_pointer(pointer)?;
+    let key = zeroize::Zeroizing::new(
+        STANDARD_NO_PAD
+            .decode(&pointer.key_base64)
+            .map_err(|_| CoreError::InvalidInput)?,
+    );
+    let nonce = STANDARD_NO_PAD
+        .decode(&pointer.nonce_base64)
+        .map_err(|_| CoreError::InvalidInput)?;
+    let encrypted = fetch(&pointer.record_key, pointer.chunk_count)?;
+    if encrypted.len() != pointer.size + 16 {
+        return Err(CoreError::VerificationFailed);
+    }
     let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|_| CoreError::InvalidInput)?;
-    let bytes = cipher
-        .decrypt(XNonce::from_slice(&nonce), encrypted.as_slice())
-        .map_err(|_| CoreError::AuthenticationFailed)?;
+    let bytes = zeroize::Zeroizing::new(
+        cipher
+            .decrypt(XNonce::from_slice(&nonce), encrypted.as_slice())
+            .map_err(|_| CoreError::AuthenticationFailed)?,
+    );
     if bytes.len() != pointer.size {
         return Err(CoreError::VerificationFailed);
     }
+    Ok(STANDARD.encode(bytes.as_slice()))
+}
+
+#[cfg(test)]
+fn decode_incoming_content_with(
+    plaintext: &str,
+    fetch: impl FnOnce(&str, u16) -> CoreResult<Vec<u8>>,
+) -> CoreResult<(String, Option<String>, Option<String>)> {
+    let pointer = parse_attachment_pointer(plaintext)?.ok_or(CoreError::InvalidInput)?;
+    let bytes = decrypt_attachment(&pointer, fetch)?;
     Ok((
-        groups::encode_channel_text(
-            &format!("📎 {file_name}"),
-            None,
-            pointer.channel_id.as_deref(),
-        )?,
-        Some(file_name),
-        Some(STANDARD.encode(bytes)),
+        attachment_body(&pointer)?,
+        Some(pointer.file_name),
+        Some(bytes),
     ))
 }
 
@@ -3735,6 +3834,81 @@ fn grouped_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_attachments_authenticate_before_becoming_messages() {
+        let bytes = vec![42; MAX_ATTACHMENT_BYTES];
+        let key = [7; 32];
+        let nonce = [8; 24];
+        let encrypted = XChaCha20Poly1305::new_from_slice(&key)
+            .unwrap()
+            .encrypt(XNonce::from_slice(&nonce), bytes.as_slice())
+            .unwrap();
+        let mut records = Vec::new();
+        let (reference, count) = crate::blob_transport::publish(
+            &encrypted,
+            MAX_ATTACHMENT_BYTES + 16,
+            |part| {
+                records.push(part.to_vec());
+                Ok(format!("record-{}", records.len() - 1))
+            },
+            |_| panic!("unexpected cleanup"),
+        )
+        .unwrap();
+        let mut pointer = AttachmentPointer {
+            version: 1,
+            file_name: "large.bin".to_owned(),
+            size: bytes.len(),
+            record_key: reference,
+            chunk_count: count,
+            key_base64: STANDARD_NO_PAD.encode(key),
+            nonce_base64: STANDARD_NO_PAD.encode(nonce),
+            channel_id: None,
+        };
+        let control = |p: &AttachmentPointer| {
+            format!(
+                "{ATTACHMENT_PREFIX}{}",
+                STANDARD_NO_PAD.encode(serde_json::to_vec(p).unwrap())
+            )
+        };
+        let (_, name, encoded) = decode_incoming_content_with(&control(&pointer), |key, count| {
+            crate::blob_transport::fetch(key, count, MAX_ATTACHMENT_BYTES + 16, |key, _| {
+                let index: usize = key.strip_prefix("record-").unwrap().parse().unwrap();
+                Ok(records[index].clone())
+            })
+        })
+        .unwrap();
+        assert_eq!(name.as_deref(), Some("large.bin"));
+        assert_eq!(STANDARD.decode(encoded.unwrap()).unwrap(), bytes);
+        let mut corrupt = encrypted.clone();
+        corrupt[0] ^= 1;
+        assert!(matches!(
+            decode_incoming_content_with(&control(&pointer), |_, _| Ok(corrupt)),
+            Err(CoreError::AuthenticationFailed)
+        ));
+        pointer.key_base64 = "bad".to_owned();
+        assert!(
+            decode_incoming_content_with(&control(&pointer), |_, _| panic!(
+                "invalid key must not fetch"
+            ))
+            .is_err()
+        );
+        pointer.size = MAX_ATTACHMENT_BYTES + 1;
+        assert!(
+            decode_incoming_content_with(&control(&pointer), |_, _| panic!(
+                "invalid size must not fetch"
+            ))
+            .is_err()
+        );
+        assert!(matches!(
+            send_attachment(
+                "contact-test",
+                "large.bin",
+                &STANDARD.encode(vec![0; MAX_ATTACHMENT_BYTES + 1])
+            ),
+            Err(CoreError::LimitExceeded)
+        ));
+    }
 
     #[test]
     fn synced_messages_complete_attachments_and_never_regress_receipts() {
@@ -3893,6 +4067,15 @@ mod tests {
         message.id = id.clone();
         message.conversation_id = contact.id.clone();
         message.delivery_state = "queued".to_owned();
+        // Exercise the expanded attachment through backup, sync and log reload.
+        message.attachment_name = Some("large.bin".to_owned());
+        message.attachment_base64 = Some(STANDARD.encode(vec![42; MAX_ATTACHMENT_BYTES]));
+        let sync_event = serde_json::to_vec(&DeviceSyncEvent::UpsertMessage {
+            contact: contact.clone(),
+            message: message.clone(),
+        })
+        .unwrap();
+        assert!(vault::seal_with_key(&[9; 32], &sync_event).unwrap().len() <= 3 * 1024 * 1024);
         let mut delivery = pending_delivery(&id);
         delivery.payload = payload.clone();
         let backup = MessagingAccountBackup {
@@ -3911,6 +4094,10 @@ mod tests {
             serde_json::to_value(payload).unwrap()
         );
         assert_eq!(restored["messages"][0]["delivery_state"], "queued");
+        assert_eq!(
+            restored["messages"][0]["attachment_base64"],
+            message.attachment_base64.as_deref().unwrap()
+        );
         // Upsert updates the existing ID and survives restarting the store.
         message.delivery_state = "sent".to_owned();
         apply_device_sync_plaintext(
@@ -3987,7 +4174,7 @@ mod tests {
         assert_eq!(message_json(&message, &store)["author_name"], "Tu");
     }
 
-    fn history_message(index: usize) -> StoredMessage {
+    pub(super) fn history_message(index: usize) -> StoredMessage {
         StoredMessage {
             id: format!("message-{index:06}"),
             conversation_id: if index % 5 == 0 { "other" } else { "chat" }.to_owned(),
@@ -4002,6 +4189,7 @@ mod tests {
             receipts: Default::default(),
             attachment_name: None,
             attachment_base64: None,
+            attachment_pointer: None,
         }
     }
 
@@ -4306,6 +4494,7 @@ mod tests {
             receipts: Default::default(),
             attachment_name: None,
             attachment_base64: None,
+            attachment_pointer: None,
         };
         let path = contact_store()
             .lock()

@@ -29,6 +29,8 @@ class ChatMessage {
     this.deliveryState = DeliveryState.sent,
     this.attachmentName,
     this.attachmentBytes,
+    this.attachmentState = 'unavailable',
+    this.attachmentSize,
     this.replyTo,
     this.channelId,
     this.authorName,
@@ -44,6 +46,13 @@ class ChatMessage {
   final DeliveryState deliveryState;
   final String? attachmentName;
   final Uint8List? attachmentBytes;
+  final String attachmentState;
+  final int? attachmentSize;
+  bool get attachmentDownloading =>
+      attachmentState == 'queued' || attachmentState == 'downloading';
+  bool get canDownloadAttachment =>
+      attachmentBytes == null &&
+      {'pending', 'failed'}.contains(attachmentState);
   final String? replyTo;
   final String? channelId;
 
@@ -59,6 +68,8 @@ class ChatMessage {
       deliveryState: deliveryState ?? this.deliveryState,
       attachmentName: attachmentName,
       attachmentBytes: attachmentBytes,
+      attachmentState: attachmentState,
+      attachmentSize: attachmentSize,
       replyTo: replyTo,
       channelId: channelId,
     );

@@ -1887,6 +1887,7 @@ fn apply_local_effects(
             receipts: Default::default(),
             attachment_name: None,
             attachment_base64: None,
+            attachment_pointer: None,
         };
         append_message_event(
             &path,

@@ -659,9 +659,21 @@ pub(crate) fn publish_sync_blob(_data: &[u8]) -> CoreResult<(String, u16)> {
 
 #[cfg(feature = "veilid")]
 fn publish_blob_with_limit(data: &[u8], max_bytes: usize) -> CoreResult<(String, u16)> {
+    crate::blob_transport::publish(
+        data,
+        max_bytes,
+        |part| publish_blob_record(part).map(|(key, _)| key),
+        |key| {
+            let _ = delete_attachment_blob(key, 1);
+        },
+    )
+}
+
+#[cfg(feature = "veilid")]
+fn publish_blob_record(data: &[u8]) -> CoreResult<(String, u16)> {
     use veilid_core::{CRYPTO_KIND_VLD0, DHTSchema};
 
-    if data.is_empty() || data.len() > max_bytes {
+    if data.is_empty() || data.len() > ATTACHMENT_CHUNK_BYTES * 32 {
         return Err(CoreError::LimitExceeded);
     }
     let chunk_count = data.len().div_ceil(ATTACHMENT_CHUNK_BYTES);
@@ -706,17 +718,21 @@ pub fn delete_attachment_blob(record_key: &str, chunk_count: u16) -> CoreResult<
     use std::str::FromStr as _;
     use veilid_core::RecordKey;
 
-    if chunk_count == 0 || chunk_count > 128 {
-        return Err(CoreError::InvalidInput);
-    }
-    let key = RecordKey::from_str(record_key).map_err(|_| CoreError::InvalidInput)?;
+    let keys = crate::blob_transport::records(record_key, chunk_count)?
+        .into_iter()
+        .map(|(key, _)| RecordKey::from_str(&key).map_err(|_| CoreError::InvalidInput))
+        .collect::<CoreResult<Vec<_>>>()?;
     let (runtime, api) = network_executor()?;
     let routing = api
         .routing_context()
         .map_err(|_| CoreError::NetworkStartupFailed)?;
-    runtime
-        .block_on(routing.delete_dht_record(key))
-        .map_err(|_| CoreError::NetworkAttachFailed)
+    for key in keys {
+        match runtime.block_on(routing.delete_dht_record(key)) {
+            Ok(()) | Err(veilid_core::VeilidAPIError::KeyNotFound { .. }) => {}
+            Err(_) => return Err(CoreError::NetworkAttachFailed),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(not(feature = "veilid"))]
@@ -732,6 +748,30 @@ pub fn fetch_attachment_blob(record_key: &str, chunk_count: u16) -> CoreResult<V
         MAX_ATTACHMENT_CHUNKS,
         MAX_ATTACHMENT_BLOB_BYTES,
     )
+}
+
+#[cfg(feature = "veilid")]
+pub(crate) fn fetch_attachment_blob_cancellable(
+    record_key: &str,
+    chunk_count: u16,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> CoreResult<Vec<u8>> {
+    fetch_blob_with_cancellation(
+        record_key,
+        chunk_count,
+        MAX_ATTACHMENT_CHUNKS,
+        MAX_ATTACHMENT_BLOB_BYTES,
+        cancelled,
+    )
+}
+
+#[cfg(not(feature = "veilid"))]
+pub(crate) fn fetch_attachment_blob_cancellable(
+    _: &str,
+    _: u16,
+    _: &std::sync::atomic::AtomicBool,
+) -> CoreResult<Vec<u8>> {
+    Err(CoreError::FeatureUnavailable)
 }
 
 #[cfg(feature = "veilid")]
@@ -751,36 +791,95 @@ fn fetch_blob_with_limit(
     max_chunks: u16,
     max_bytes: usize,
 ) -> CoreResult<Vec<u8>> {
-    use std::str::FromStr as _;
-    use veilid_core::RecordKey;
+    fetch_blob_with_cancellation(
+        record_key,
+        chunk_count,
+        max_chunks,
+        max_bytes,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+}
 
+#[cfg(feature = "veilid")]
+fn fetch_blob_with_cancellation(
+    record_key: &str,
+    chunk_count: u16,
+    max_chunks: u16,
+    max_bytes: usize,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> CoreResult<Vec<u8>> {
     if chunk_count == 0 || chunk_count > max_chunks {
         return Err(CoreError::InvalidInput);
     }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    crate::blob_transport::fetch(record_key, chunk_count, max_bytes, |key, count| {
+        fetch_blob_record(key, count, max_bytes, deadline, cancelled)
+    })
+}
+
+#[cfg(feature = "veilid")]
+fn fetch_blob_record(
+    record_key: &str,
+    chunk_count: u16,
+    max_bytes: usize,
+    deadline: tokio::time::Instant,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> CoreResult<Vec<u8>> {
+    use std::str::FromStr as _;
+    use veilid_core::RecordKey;
+    if cancelled.load(std::sync::atomic::Ordering::Relaxed)
+        || tokio::time::Instant::now() >= deadline
+    {
+        return Err(CoreError::NetworkAttachFailed);
+    }
+
     let key = RecordKey::from_str(record_key).map_err(|_| CoreError::InvalidInput)?;
     let (runtime, api) = network_executor()?;
     let routing = api
         .routing_context()
         .map_err(|_| CoreError::NetworkStartupFailed)?;
     let _ = runtime
-        .block_on(routing.open_dht_record(key.clone(), None))
+        .block_on(async {
+            tokio::time::timeout_at(deadline, routing.open_dht_record(key.clone(), None)).await
+        })
+        .map_err(|_| CoreError::NetworkAttachFailed)?
         .map_err(|_| CoreError::NetworkStartupFailed)?;
     let result = (|| {
         let mut data = Vec::new();
         for subkey in 0..u32::from(chunk_count) {
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(CoreError::NetworkAttachFailed);
+            }
             let value = runtime
-                .block_on(routing.get_dht_value(key.clone(), subkey, true))
+                .block_on(async {
+                    tokio::time::timeout_at(
+                        deadline,
+                        routing.get_dht_value(key.clone(), subkey, true),
+                    )
+                    .await
+                })
+                .map_err(|_| CoreError::NetworkAttachFailed)?
                 .map_err(|_| CoreError::NetworkStartupFailed)?
                 .ok_or(CoreError::NetworkAttachFailed)?;
-            data.extend_from_slice(value.data());
-            if data.len() > max_bytes {
+            if value.data().is_empty()
+                || value.data().len() > ATTACHMENT_CHUNK_BYTES
+                || data.len() + value.data().len() > max_bytes
+            {
                 return Err(CoreError::LimitExceeded);
             }
+            data.extend_from_slice(value.data());
         }
         Ok(data)
     })();
     let closed = runtime
-        .block_on(routing.close_dht_record(key))
+        .block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                routing.close_dht_record(key),
+            )
+            .await
+        })
+        .map_err(|_| CoreError::NetworkAttachFailed)?
         .map_err(|_| CoreError::NetworkStartupFailed);
     result.and_then(|data| closed.map(|()| data))
 }
@@ -1336,11 +1435,12 @@ const MAILBOX_RETENTION_MS: u64 = 24 * 60 * 60 * 1000;
 const EMPTY_MAILBOX_SLOT: &[u8] = b"[]";
 
 #[cfg(feature = "veilid")]
-const ATTACHMENT_CHUNK_BYTES: usize = 24 * 1024;
+const ATTACHMENT_CHUNK_BYTES: usize = crate::blob_transport::CHUNK_BYTES;
 #[cfg(feature = "veilid")]
-const MAX_ATTACHMENT_CHUNKS: u16 = 32;
+const MAX_ATTACHMENT_CHUNKS: u16 =
+    MAX_ATTACHMENT_BLOB_BYTES.div_ceil(ATTACHMENT_CHUNK_BYTES) as u16;
 #[cfg(feature = "veilid")]
-const MAX_ATTACHMENT_BLOB_BYTES: usize = ATTACHMENT_CHUNK_BYTES * MAX_ATTACHMENT_CHUNKS as usize;
+const MAX_ATTACHMENT_BLOB_BYTES: usize = crate::blob_transport::MAX_ATTACHMENT_BYTES + 64;
 
 #[cfg(feature = "veilid")]
 #[derive(Clone, Debug, Deserialize, Serialize)]

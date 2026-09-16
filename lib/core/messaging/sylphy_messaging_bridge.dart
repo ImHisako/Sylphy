@@ -11,6 +11,7 @@ import 'secure_messaging_bridge.dart';
 class SylphyMessagingBridge
     implements
         SecureMessagingBridge,
+        AttachmentRetrievalBridge,
         GroupMessagingBridge,
         GroupManagementBridge,
         GroupChannelBridge,
@@ -23,6 +24,21 @@ class SylphyMessagingBridge
 
   final NativeCoreApi _core;
   final Map<String, int> _groupRevisions = {};
+
+  @override
+  Future<void> requestAttachment(
+    String conversationId,
+    String messageId, {
+    bool cancel = false,
+  }) async {
+    await _groupCommand({
+      'command': 'request_attachment',
+      'conversation_id': conversationId,
+      'message_id': messageId,
+      'cancel': cancel,
+    });
+    _messageListCache.remove(conversationId);
+  }
 
   @override
   Future<String> joinGroup(String invitationCode) async {
@@ -151,6 +167,7 @@ class SylphyMessagingBridge
     String fileName,
     List<int> bytes,
   ) async {
+    _validateAttachmentSize(bytes);
     await _groupCommand({
       'command': 'send_channel_attachment',
       'conversation_id': conversationId,
@@ -590,6 +607,7 @@ class SylphyMessagingBridge
     required String fileName,
     required List<int> bytes,
   }) async {
+    _validateAttachmentSize(bytes);
     await _waitUntilCoreIsAvailable();
     final core = _core;
     final encoded = base64Encode(bytes);
@@ -607,6 +625,12 @@ class SylphyMessagingBridge
             ),
     );
     _conversationCache = null;
+  }
+}
+
+void _validateAttachmentSize(List<int> bytes) {
+  if (bytes.isEmpty || bytes.length > maxAttachmentBytes) {
+    throw const SecureMessagingException('limit_exceeded');
   }
 }
 
@@ -733,6 +757,8 @@ ChatMessage _parseMessage(Object? value, {ChatMessage? cached}) {
     isUtc: true,
   ).toLocal();
   final attachmentName = value['attachment_name'] as String?;
+  final attachmentState = value['attachment_state'] as String? ?? 'unavailable';
+  final attachmentSize = value['attachment_size'] as int?;
   final deliveryState = switch (_requiredString(value, 'delivery_state')) {
     'queued' => DeliveryState.queued,
     'sent' => DeliveryState.sent,
@@ -752,6 +778,8 @@ ChatMessage _parseMessage(Object? value, {ChatMessage? cached}) {
       cached.orderAt == orderAt &&
       cached.isOutgoing == isOutgoing &&
       cached.attachmentName == attachmentName &&
+      cached.attachmentState == attachmentState &&
+      cached.attachmentSize == attachmentSize &&
       (cached.attachmentBytes != null) ==
           (value['attachment_base64'] is String &&
               (value['attachment_base64'] as String).isNotEmpty)) {
@@ -771,6 +799,8 @@ ChatMessage _parseMessage(Object? value, {ChatMessage? cached}) {
     isOutgoing: isOutgoing,
     deliveryState: deliveryState,
     attachmentName: attachmentName,
+    attachmentState: attachmentState,
+    attachmentSize: attachmentSize,
     attachmentBytes: switch (value['attachment_base64']) {
       final String encoded when encoded.isNotEmpty => base64Decode(encoded),
       _ => null,

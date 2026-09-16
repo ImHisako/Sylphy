@@ -101,6 +101,12 @@ enum CoreRequest {
         file_name: String,
         bytes_base64: String,
     },
+    RequestAttachment {
+        conversation_id: String,
+        message_id: String,
+        #[serde(default)]
+        cancel: bool,
+    },
     MarkChannelRead {
         conversation_id: String,
         channel_id: Option<String>,
@@ -238,6 +244,15 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
 
 fn dispatch_request(request: CoreRequest) -> Result<CoreResponse, CoreError> {
     match request {
+        CoreRequest::RequestAttachment {
+            conversation_id,
+            message_id,
+            cancel,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::request_attachment(&conversation_id, &message_id, cancel)?,
+        }),
         CoreRequest::JoinGroup { invitation_code } => Ok(CoreResponse {
             ok: true,
             code: "ok",

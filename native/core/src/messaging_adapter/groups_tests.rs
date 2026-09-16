@@ -650,6 +650,7 @@ fn inbound_antispam_timing_is_retryable_while_local_send_limits_remain_errors() 
             receipts: Default::default(),
             attachment_name: None,
             attachment_base64: None,
+            attachment_pointer: None,
         });
     }
     assert!(matches!(
@@ -860,6 +861,7 @@ fn group_permissions_restrictions_slow_mode_and_spam_are_enforced_natively() {
             receipts: Default::default(),
             attachment_name: None,
             attachment_base64: None,
+            attachment_pointer: None,
         });
     }
     value.management.policy.slow_mode_seconds = 30;

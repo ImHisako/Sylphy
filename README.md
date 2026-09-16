@@ -42,7 +42,8 @@ server holding accounts, contacts and conversations.
   until the user retries or explicitly continues without protection. Capture
   tools must honor Windows display affinity; check the sharing preview before
   relying on it. Linux and Android do not expose this setting.
-- Encrypted attachments, download controls and inline image previews.
+- Encrypted attachments downloaded on request by a bounded background worker,
+  with cancellation and image previews limited before bitmap decoding.
 - Encrypted computer-to-phone account linking through a password-protected
   account file containing identity, contacts and history. Each device creates
   its own device identity and Signal sessions to avoid cloning ratchet state.
@@ -109,7 +110,7 @@ flowchart TB
         UI --> DS --> BG
     end
 
-    BG -->|"JSON FFI · ABI 12"| FFI["C/Rust boundary"]
+    BG -->|"JSON FFI · ABI 14"| FFI["C/Rust boundary"]
 
     subgraph Core["Native Rust core"]
         FFI --> ID["Identity and vault"]
@@ -153,6 +154,8 @@ flowchart TB
 2. The core verifies signatures, recipient, bounds and keys before accepting
    decrypted content, and deduplicates repeated deliveries.
 3. It saves the message and commits the Signal session locally.
+   For attachments, this saves the authenticated reference; retrieving the file
+   requires a separate user action and does not hold up subsequent messages.
 4. Only after persistence does it acknowledge the DHT entry. Contact mailboxes
    use a separate acknowledgement subkey; the account journal clears processed
    slots. An interrupted receive can therefore be retried.
@@ -169,7 +172,7 @@ flowchart TB
 | Key agreement | Hybrid one-shot X25519 + ML-KEM-768 |
 | Message encryption | Official Signal ratchet inside authenticated XChaCha20-Poly1305 envelopes |
 | Local data | Argon2id identity protection; encrypted per-contact sessions and incremental XChaCha20-Poly1305 message logs |
-| Attachments | Random per-file keys, XChaCha20-Poly1305 and encrypted DHT chunks; application limit of 700 KiB |
+| Attachments | Random per-file keys, XChaCha20-Poly1305 and encrypted DHT chunks across bounded records; application limit of 2 MiB |
 | Public metadata | Signed identities, prekeys, routes and profiles; no plaintext message history |
 | Transport | Veilid private routing, contact-pair DHT mailboxes and a private journal for devices belonging to the same account |
 
@@ -287,7 +290,9 @@ See [September reliability fixes](specs/reliability.md) for backup recovery,
 linked-device synchronization, chat pagination, and Android signing setup.
 
 - The protocol and implementation have not undergone an independent audit.
-- Attachments are limited to 700 KiB.
+- Attachments are limited to 2 MiB (2,097,152 bytes). Both endpoints and linked
+  devices must be updated for files above 700 KiB. Large encrypted blobs span
+  records of at most 768 KiB, below Veilid's 1 MiB per-record ceiling.
 - Offline mailboxes have bounded retention and capacity. Availability depends
   on the DHT; they are not permanent storage.
 - The linked-device journal has finite capacity and eventual consistency.

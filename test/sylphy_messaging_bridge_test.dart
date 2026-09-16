@@ -3,10 +3,43 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sylphy/core/messaging/models.dart';
+import 'package:sylphy/core/messaging/secure_messaging_bridge.dart';
 import 'package:sylphy/core/messaging/sylphy_messaging_bridge.dart';
 import 'package:sylphy/core/native/native_core.dart';
 
 void main() {
+  test(
+    'download state changes invalidate placeholders without exposing keys',
+    () async {
+      final core = _FakeNativeCore();
+      final bridge = SylphyMessagingBridge(core: core);
+      core.messages.add({
+        ..._record('file', 1),
+        'attachment_name': 'file.bin',
+        'attachment_size': 1024,
+        'attachment_state': 'pending',
+      });
+      final pending = bridge.listMessages('chat').single;
+      expect(pending.canDownloadAttachment, isTrue);
+      expect(pending.attachmentSize, 1024);
+      core.messages.single['attachment_state'] = 'downloading';
+      final active = (await bridge.refreshMessages('chat')).single;
+      expect(active.attachmentDownloading, isTrue);
+      expect(identical(pending, active), isFalse);
+      core.messages.single['attachment_state'] = 'failed';
+      expect(
+        (await bridge.refreshMessages('chat')).single.canDownloadAttachment,
+        isTrue,
+      );
+      core.messages.single['attachment_state'] = 'ready';
+      core.messages.single['attachment_base64'] = base64Encode([1, 2, 3]);
+      expect((await bridge.refreshMessages('chat')).single.attachmentBytes, [
+        1,
+        2,
+        3,
+      ]);
+    },
+  );
   test(
     'history merges and paginates by local order while preserving sender time',
     () async {
@@ -189,6 +222,44 @@ void main() {
     expect(core.sentAttachmentName, 'documento.txt');
     expect(base64Decode(core.sentAttachmentBase64!), utf8.encode('contenuto'));
   });
+
+  test(
+    'sends a 2 MiB attachment and rejects oversized or empty files',
+    () async {
+      final core = _FakeNativeCore();
+      final bridge = SylphyMessagingBridge(core: core);
+      final bytes = List<int>.filled(2 * 1024 * 1024, 42);
+      await bridge.sendAttachment(
+        conversationId: 'contact-1',
+        fileName: 'large.bin',
+        bytes: bytes,
+      );
+      expect(base64Decode(core.sentAttachmentBase64!), bytes);
+      for (final invalid in [
+        <int>[],
+        [...bytes, 0],
+      ]) {
+        await expectLater(
+          bridge.sendAttachment(
+            conversationId: 'contact-1',
+            fileName: 'invalid.bin',
+            bytes: invalid,
+          ),
+          throwsA(isA<SecureMessagingException>()),
+        );
+        await expectLater(
+          bridge.sendChannelAttachment(
+            'group-1',
+            'channel-1',
+            'invalid.bin',
+            invalid,
+          ),
+          throwsA(isA<SecureMessagingException>()),
+        );
+      }
+      expect(core.sentAttachmentName, 'large.bin');
+    },
+  );
 
   test('reuses bounded UI caches and refreshes them explicitly', () async {
     final core = _FakeNativeCore();

@@ -25,11 +25,50 @@ class _EncryptedFileArchivePageState extends State<EncryptedFileArchivePage> {
   List<_ArchivedAttachment> _attachments = const [];
   bool _loading = true;
   bool _partialFailure = false;
+  Timer? _downloadPoll;
 
   @override
   void initState() {
     super.initState();
     unawaited(_load());
+    _downloadPoll = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!_loading &&
+          _attachments.any((a) => a.message.attachmentDownloading)) {
+        unawaited(_load());
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _downloadPoll?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _retrieve(
+    _ArchivedAttachment attachment, {
+    bool cancel = false,
+  }) async {
+    final bridge = widget.bridge;
+    if (bridge is! AttachmentRetrievalBridge) return;
+    try {
+      await (bridge as AttachmentRetrievalBridge).requestAttachment(
+        attachment.conversationId,
+        attachment.message.id,
+        cancel: cancel,
+      );
+      if (mounted) await _load();
+    } on Object {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Download non avviato. Attendi il trasferimento in corso e riprova.',
+            ),
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _load() async {
@@ -168,11 +207,24 @@ class _EncryptedFileArchivePageState extends State<EncryptedFileArchivePage> {
                           trailing: IconButton(
                             tooltip: available
                                 ? 'Salva file'
-                                : 'File non disponibile',
+                                : message.attachmentDownloading
+                                ? 'Annulla download'
+                                : 'Scarica allegato',
                             onPressed: available
                                 ? () => _save(attachment)
+                                : widget.bridge is AttachmentRetrievalBridge &&
+                                      (message.canDownloadAttachment ||
+                                          message.attachmentDownloading)
+                                ? () => _retrieve(
+                                    attachment,
+                                    cancel: message.attachmentDownloading,
+                                  )
                                 : null,
-                            icon: const Icon(Icons.download_rounded),
+                            icon: Icon(
+                              message.attachmentDownloading
+                                  ? Icons.close
+                                  : Icons.download_rounded,
+                            ),
                           ),
                         ),
                       );
