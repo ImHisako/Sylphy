@@ -1,4 +1,4 @@
-package com.example.sylphy
+package com.sylphy
 
 import android.app.NotificationChannel
 import android.app.NotificationManager

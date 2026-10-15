@@ -52,9 +52,9 @@ val verifySylphyNativeCore by tasks.registering {
         val metadata = Properties().apply {
             metadataFile.inputStream().use(::load)
         }
-        check(metadata.getProperty("abi") == "14") { "Stale Sylphy native ABI." }
-        check(metadata.getProperty("libsignal") == "signalapp/libsignal@v0.102.1") {
-            "Android native core was not built with libsignal v0.102.1."
+        check(metadata.getProperty("abi") == "15") { "Stale Sylphy native ABI." }
+        check(metadata.getProperty("libsignal") == "signalapp/libsignal@v0.105.0") {
+            "Android native core was not built with libsignal v0.105.0."
         }
         val nativeCore = file("../../native/core")
         val sourceFiles = (
@@ -83,7 +83,7 @@ tasks.configureEach {
 }
 
 android {
-    namespace = "com.example.sylphy"
+    namespace = "com.sylphy"
     compileSdk = flutter.compileSdkVersion
     // Veilid 0.5.x requires NDK r28c and its Android bridge targets Java 17.
     ndkVersion = "28.2.13676358"
@@ -98,8 +98,8 @@ android {
     }
 
     defaultConfig {
-        // Never change this value: Android identifies upgrades by applicationId.
-        applicationId = "com.example.sylphy"
+        // Stable identity for future upgrades; legacy com.example.sylphy is a separate app.
+        applicationId = "com.sylphy"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion

@@ -44,3 +44,21 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Private signing keys and credentials, wherever they are placed in the repo.
+*.jks
+*.keystore
+*.p12
+*.pfx
+key.properties
+
+# Base64 exports contain the same private signing key.
+*.jks.b64
+*.jks.base64
+*.keystore.b64
+*.keystore.base64
+sylphy-release*.b64
+sylphy-release*.base64
+sylphy-release*.txt
+keystore-base64.txt
+keystore_base64.txt

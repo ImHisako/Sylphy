@@ -20,6 +20,14 @@ struct Job {
     cancelled: Arc<AtomicBool>,
 }
 
+impl Drop for Job {
+    fn drop(&mut self) {
+        self.pointer.key_base64.zeroize();
+        self.pointer.nonce_base64.zeroize();
+        self.pointer.file_name.zeroize();
+    }
+}
+
 struct Active {
     job: Job,
     receiver: Receiver<CoreResult<String>>,
@@ -73,12 +81,22 @@ impl Transfers {
         let _ = std::thread::Builder::new()
             .name("sylphy-attachment".to_owned())
             .spawn(move || {
-                let result = if worker_job.cancelled.load(Ordering::Relaxed) {
+                let mut result = if worker_job.cancelled.load(Ordering::Relaxed) {
                     Err(CoreError::FeatureUnavailable)
                 } else {
                     fetch(&worker_job)
                 };
-                let _ = sender.send(result);
+                if worker_job.cancelled.load(Ordering::Relaxed) {
+                    if let Ok(bytes) = &mut result {
+                        bytes.zeroize();
+                    }
+                    result = Err(CoreError::FeatureUnavailable);
+                }
+                if let Err(mut error) = sender.send(result) {
+                    if let Ok(bytes) = &mut error.0 {
+                        bytes.zeroize();
+                    }
+                }
             });
         self.active = Some(Active { job, receiver });
     }
@@ -124,8 +142,13 @@ pub(super) fn reset() {
     if let Ok(mut transfers) = transfers().lock() {
         transfers.queue.clear();
         transfers.failed.clear();
-        if let Some(active) = &transfers.active {
+        if let Some(active) = &mut transfers.active {
             active.job.cancelled.store(true, Ordering::Relaxed);
+            active.job.pointer.key_base64.zeroize();
+            active.job.pointer.nonce_base64.zeroize();
+            if let Ok(Ok(mut result)) = active.receiver.try_recv() {
+                result.zeroize();
+            }
         }
     }
 }
@@ -341,7 +364,7 @@ mod tests {
                 .receiver
                 .recv_timeout(std::time::Duration::from_secs(2))
                 .unwrap()
-                .is_ok()
+                .is_err()
         );
     }
 
@@ -409,7 +432,7 @@ mod tests {
             route_blob: vec![1],
         };
         identity::ensure_identity(&alice, "test-alice-vault", None, None).unwrap();
-        let pointer = job("file", "alice").pointer;
+        let pointer = job("file", "alice").pointer.clone();
         let control = format!(
             "{ATTACHMENT_PREFIX}{}",
             STANDARD_NO_PAD.encode(serde_json::to_vec(&pointer).unwrap())

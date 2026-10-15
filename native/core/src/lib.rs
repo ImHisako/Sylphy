@@ -1,6 +1,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod account_backup;
+pub mod app_security;
 mod append_log;
 mod atomic_file;
 mod blob_transport;
@@ -22,5 +23,5 @@ pub mod veilid_adapter;
 #[cfg(all(feature = "veilid", target_os = "android"))]
 mod android;
 
-pub const CORE_ABI_VERSION: u32 = 14;
+pub const CORE_ABI_VERSION: u32 = 15;
 pub const PROTOCOL_VERSION: u16 = 1;

@@ -48,8 +48,13 @@ all'avvio; la pulizia è limitata ai nomi del formato updater.
 
 ## Android
 
-L'asset universale è `sylphy-vVERSION-android.apk`. Restano invariati
-`applicationId = com.example.sylphy`, storage, account e dati dell'app.
+L'asset universale è `sylphy-vVERSION-android.apk`. Il package Android e il
+namespace Kotlin sono `com.sylphy`, da mantenere stabili nelle release successive.
+Il precedente `com.example.sylphy` è un'app distinta per Android: la prima
+installazione di `com.sylphy` non aggiorna quella vecchia e non ne eredita storage,
+account o chat. Il passaggio richiede un'installazione separata e il trasferimento
+dell'account tramite esportazione/importazione prima di rimuovere la vecchia app.
+L'updater della vecchia app rifiuta correttamente il nuovo package.
 `versionCode` deriva dal numero dopo `+` in `pubspec.yaml` e cresce ad ogni
 release. La stessa chiave di firma deve essere usata sempre.
 
@@ -57,10 +62,24 @@ I secret CI richiesti restano `ANDROID_KEYSTORE_BASE64`, `ANDROID_STORE_PASSWORD
 `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`. Devono contenere la chiave degli APK
 già distribuiti. `tool/verify_android_release.py` verifica la firma effettiva
 con `apksigner`, confronta package e versioni con `pubspec.yaml` e confronta
-certificati e versionCode con l'APK della release pubblica precedente. Errori
+certificati e versionCode con l'APK della release pubblica precedente. Il solo
+passaggio da `com.example.sylphy` a `com.sylphy` è ammesso come nuova installazione,
+mantenendo i controlli sulla chiave di firma e sull'incremento di versionCode;
+qualsiasi altro cambio di package viene rifiutato. Errori
 di rete o impossibilità di stabilire la compatibilità fermano la pubblicazione.
-Le build senza tag possono usare la firma debug; non sono aggiornamenti di
-produzione compatibili e non vanno distribuite come tali.
+Le build su push e avvio manuale usano questi stessi secret anche senza tag:
+gli APK scaricati dagli artifact Actions mantengono quindi la stessa firma delle
+release. Senza configurazione della chiave la build Android si ferma. Le sole
+build di pull request usano la firma debug senza accedere ai secret: i relativi
+artifact sono di sviluppo e non aggiornano le installazioni firmate per rilascio.
+Anche negli artifact il numero di build in `pubspec.yaml` deve crescere per
+offrire un aggiornamento attraverso l'updater Sylphy.
+
+I vecchi artifact Actions senza tag usavano la chiave debug generata dal runner.
+Il workflow non ne salvava una copia: la sola disponibilità dell'APK non permette
+di ricostruire la chiave privata. Configurare una nuova chiave persistente rende
+aggiornabili le installazioni firmate con quella chiave; non modifica la firma
+delle app già installate con chiavi precedenti.
 
 Il bridge Android accetta solo APK dalla sottodirectory privata
 `files/updates/packages`, verifica package, versione annunciata, versionCode e

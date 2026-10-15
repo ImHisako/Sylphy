@@ -9,7 +9,7 @@ import 'package:ffi/ffi.dart';
 
 import '../diagnostics/app_log.dart';
 
-const _expectedAbiVersion = 14;
+const _expectedAbiVersion = 15;
 
 /// A local group read may race an account transition on the other worker.
 /// Retry once through that worker's queue, after the transition completes.
@@ -312,6 +312,10 @@ class NativeCoreClient
   Future<NativeCoreResponse> groupCommandInBackground(
     Map<String, dynamic> request,
   ) => _callInBackground(Map<String, Object>.from(request));
+
+  Future<NativeCoreResponse> securityCommandInBackground(
+    Map<String, Object> request,
+  ) => _callInBackground(request, priority: true);
 
   @override
   NativeCoreResponse sendText({
@@ -719,6 +723,10 @@ class NativeCoreClient
       );
       rethrow;
     } finally {
+      requestPointer
+          .cast<Uint8>()
+          .asTypedList(requestPointer.length)
+          .fillRange(0, requestPointer.length, 0);
       calloc.free(requestPointer);
       if (responsePointer != null && responsePointer != nullptr) {
         _freeString(responsePointer);

@@ -20,14 +20,22 @@ The core implements and tests:
   deterministic shutdown.
 
 The `signal-ratchet` feature uses official
-[`signalapp/libsignal v0.102.1`](https://github.com/signalapp/libsignal/releases/tag/v0.102.1),
-pinned to immutable commit `ea42ed0ed3e2ae119282d98253c35a28cce02414`.
+[`signalapp/libsignal v0.105.0`](https://github.com/signalapp/libsignal/releases/tag/v0.105.0),
+pinned to immutable commit `4beb029d8a941f81e7d9c6d8af1ed25a677569a8`.
 The production path keeps identity, signed prekeys, Kyber prekeys and persistent
 session stores inside the native boundary. Signal/PreKey ciphertexts travel
 inside authenticated encrypted Sylphy packets, subject to the 32 KiB packet
 limit. Account and individual session records are encrypted with the
 device-bound key and replaced atomically. Failed decryptions restore the
 previous ratchet state.
+
+The upgrade from v0.102.1 preserves the `signal-libsignal-v1` wire capability
+and the v2 account/session store. Regression fixtures produced with the original
+v0.102.1 commit verify prekey and identity deserialization, pending bootstrap
+messages, established sessions, skipped message keys, replay rejection and
+bidirectional messaging after loading the old state. See
+[the compatibility test](core/tests/libsignal_compat.rs) and
+[fixture provenance](core/tests/fixtures/README.md).
 
 ## Local build
 

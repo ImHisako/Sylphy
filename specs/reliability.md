@@ -95,12 +95,12 @@ richiedere un nuovo invito. Il recupero con churn reale richiede prove di rete.
 
 ## Firma Android
 
-Le release di produzione richiedono `android/key.properties`. I tag `v*` della
-CI preparano il file usando i secret `ANDROID_KEYSTORE_BASE64`,
+Le build firmate richiedono `android/key.properties`. Le build CI su push e
+avvio manuale preparano il file usando i secret `ANDROID_KEYSTORE_BASE64`,
 `ANDROID_STORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`; la
-pubblicazione si ferma se ne manca uno. Va configurata la chiave compatibile
+build Android si ferma se ne manca uno. Va configurata la chiave compatibile
 con gli APK già distribuiti, non una chiave nuova generata su ogni runner.
 
 Per build di sviluppo è disponibile l'opt-in `SYLPHY_ALLOW_DEBUG_SIGNING=true`;
-la CI lo usa solo per build senza tag di release. Le build firmate e gli
+la CI lo usa solo per le pull request, senza usare i secret. Le build firmate e gli
 aggiornamenti su Android non sono stati eseguiti in questa verifica locale.

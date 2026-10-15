@@ -16,6 +16,7 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 use crate::{
     atomic_file,
@@ -347,6 +348,74 @@ static OUTBOX_TRANSPORT: Mutex<Option<(u64, std::sync::mpsc::Receiver<TransportR
 
 fn contact_store() -> &'static Mutex<ContactStore> {
     CONTACT_STORE.get_or_init(|| Mutex::new(ContactStore::default()))
+}
+
+pub(crate) fn wipe_memory() -> CoreResult<()> {
+    fn wipe_message(message: &mut StoredMessage) {
+        message.body.zeroize();
+        message.author_name.zeroize();
+        message.attachment_name.zeroize();
+        message.attachment_base64.zeroize();
+        if let Some(pointer) = &mut message.attachment_pointer {
+            pointer.key_base64.zeroize();
+            pointer.nonce_base64.zeroize();
+            pointer.file_name.zeroize();
+        }
+    }
+    fn wipe_contact(contact: &mut StoredContact) {
+        contact.display_name.zeroize();
+        contact.invitation_code.zeroize();
+        if let Some(published) = &mut contact.published_identity {
+            published.profile.display_name.zeroize();
+            published.profile.avatar_base64.zeroize();
+        }
+    }
+    fn wipe_group(group: &mut StoredGroup) {
+        group.name.zeroize();
+        group.description.zeroize();
+        for member in &mut group.members {
+            member.display_name.zeroize();
+            member.identity.profile.display_name.zeroize();
+            member.identity.profile.avatar_base64.zeroize();
+        }
+    }
+    let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    for message in &mut store.messages {
+        wipe_message(message);
+    }
+    for contact in &mut store.contacts {
+        wipe_contact(contact);
+    }
+    for group in &mut store.groups {
+        wipe_group(group);
+    }
+    for pending in &mut store.device_sync_outbox {
+        match &mut pending.event {
+            DeviceSyncEvent::UpsertContact { contact } => wipe_contact(contact),
+            DeviceSyncEvent::UpsertMessage { contact, message } => {
+                wipe_contact(contact);
+                wipe_message(message);
+            }
+            DeviceSyncEvent::UpsertGroup { group } => wipe_group(group),
+            DeviceSyncEvent::UpsertGroupMessage { group, message } => {
+                wipe_group(group);
+                wipe_message(message);
+            }
+        }
+    }
+    let generation = store.generation.wrapping_add(1);
+    *store = ContactStore {
+        generation,
+        ..ContactStore::default()
+    };
+    search::wipe_memory()?;
+    attachments::reset();
+    *OUTBOX_TRANSPORT.lock().map_err(|_| CoreError::Internal)? = None;
+    if let Some(refresh) = PEER_REFRESH.get() {
+        *refresh.lock().map_err(|_| CoreError::Internal)? = PeerRefresh::default();
+    }
+    crate::peer_identity::wipe_memory()?;
+    Ok(())
 }
 
 pub fn configure_privacy(allow_unknown_contacts: bool) -> CoreResult<()> {

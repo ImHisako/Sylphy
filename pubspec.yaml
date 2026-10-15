@@ -18,7 +18,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # of the product and file versions while build-number is used as the build suffix.
 # Keep the build number strictly increasing: Android accepts an in-place APK
 # update only when versionCode is newer and the signing key is unchanged.
-version: 1.1.0+2
+version: 1.2.0+3
 
 environment:
   sdk: ^3.9.2

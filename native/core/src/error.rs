@@ -10,6 +10,8 @@ pub enum CoreError {
     UnsupportedVersion,
     #[error("authentication failed")]
     AuthenticationFailed,
+    #[error("vault locked")]
+    VaultLocked,
     #[error("group permission denied")]
     GroupPermissionDenied,
     #[error("group slow mode active")]

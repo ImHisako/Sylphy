@@ -89,6 +89,21 @@ impl Index {
 
 static INDEX: OnceLock<Mutex<Index>> = OnceLock::new();
 
+pub(super) fn wipe_memory() -> CoreResult<()> {
+    if let Some(index) = INDEX.get() {
+        let mut index = index.lock().map_err(|_| CoreError::Internal)?;
+        for text in &mut index.texts {
+            text.zeroize();
+        }
+        for (mut gram, mut positions) in index.grams.drain() {
+            gram.zeroize();
+            positions.zeroize();
+        }
+        *index = Index::default();
+    }
+    Ok(())
+}
+
 pub(super) fn search(id: &str, query: &str, offset: usize) -> CoreResult<Value> {
     validate_conversation_id(id)?;
     let query = query.trim().to_lowercase();

@@ -1,4 +1,4 @@
-package com.example.sylphy
+package com.sylphy
 
 import org.junit.Assert.assertEquals
 import org.junit.Test

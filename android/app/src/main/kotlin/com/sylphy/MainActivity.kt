@@ -1,4 +1,4 @@
-package com.example.sylphy
+package com.sylphy
 
 import android.content.Context
 import android.content.ContextWrapper
@@ -40,10 +40,12 @@ class MainActivity : FlutterActivity() {
     private var apkUpdates: ApkUpdateHandler? = null
 
     override fun onDestroy() {
+        wipePendingSave()
         apkUpdates?.close()
         super.onDestroy()
     }
     private external fun initializeVeilid(context: Context)
+    private external fun lockVaultOnBackground(): Boolean
     private var nativeLibraryLoaded = false
     private var veilidBootstrapReady = false
     private var veilidBootstrapCode = "not_started"
@@ -60,10 +62,25 @@ class MainActivity : FlutterActivity() {
         super.onPause()
     }
 
+    override fun onStop() {
+        super.onStop()
+        if (nativeLibraryLoaded) {
+            Thread({
+                if (!MessagingService.uiResumed) {
+                    try {
+                        if (lockVaultOnBackground()) runOnUiThread { wipePendingSave() }
+                    } catch (_: Throwable) { /* Flutter also locks via FFI. */ }
+                }
+            }, "sylphy-vault-lock").start()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         ensureVeilidInitialized()
         // Veilid needs Android's Context/JVM before Flutter can invoke FFI.
         super.onCreate(savedInstanceState)
+        // Hide task snapshots until Flutter has read the saved vault policy.
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         MessageNotificationSettings.createChannel(this)
     }
 
@@ -143,6 +160,18 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                     "saveFile" -> saveFile(call.arguments, result)
+                    "setVaultProtected" -> {
+                        if (call.arguments == true) {
+                            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+                        } else {
+                            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+                        }
+                        result.success(null)
+                    }
+                    "wipeSensitiveBuffers" -> {
+                        wipePendingSave()
+                        result.success(null)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -171,6 +200,14 @@ class MainActivity : FlutterActivity() {
         startActivityForResult(intent, SAVE_FILE_REQUEST)
     }
 
+    private fun wipePendingSave() {
+        pendingSaveBytes?.fill(0)
+        pendingSaveBytes = null
+        val pending = pendingSaveResult
+        pendingSaveResult = null
+        pending?.success(null)
+    }
+
     @Deprecated("Deprecated in Android; required by FlutterActivity compatibility")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode != SAVE_FILE_REQUEST) {
@@ -181,7 +218,9 @@ class MainActivity : FlutterActivity() {
         val bytes = pendingSaveBytes
         pendingSaveResult = null
         pendingSaveBytes = null
+        if (result == null || bytes == null) return
         if (resultCode != Activity.RESULT_OK || data?.data == null) {
+            bytes.fill(0)
             result?.success(null)
             return
         }
@@ -193,6 +232,8 @@ class MainActivity : FlutterActivity() {
             result?.success(destination.toString())
         } catch (error: Throwable) {
             result?.error("save_failed", "Impossibile salvare il file.", null)
+        } finally {
+            bytes.fill(0)
         }
     }
 

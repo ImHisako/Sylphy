@@ -55,23 +55,21 @@ class PlatformDeviceSecretStore implements DeviceSecretStore {
           );
 
   static const _storageKey = 'sylphy_identity_vault_secret_v1';
-  static Future<String>? _sharedSecret;
+  static bool passphraseProtected = false;
+  static Future<String>? _secretRead;
   final FlutterSecureStorage _storage;
 
   @override
   Future<String> getOrCreate() {
-    final pending = _sharedSecret;
-    if (pending != null) return pending;
-    final created = _readOrCreate();
-    _sharedSecret = created;
-    return created.onError((error, stackTrace) {
-      if (identical(_sharedSecret, created)) _sharedSecret = null;
-      Error.throwWithStackTrace(
-        error ?? StateError('device_secret_unavailable'),
-        stackTrace,
-      );
-    });
+    // An empty marker asks the native session to use its protected secret.
+    // The unwrapped key never returns to Dart once passphrase mode is enabled.
+    if (passphraseProtected) return Future.value('');
+    return _secretRead ??= _readOrCreate().whenComplete(
+      () => _secretRead = null,
+    );
   }
+
+  Future<void> removeLegacySecret() => _storage.delete(key: _storageKey);
 
   Future<String> _readOrCreate() async {
     final existing = await _storage.read(key: _storageKey);
@@ -104,6 +102,8 @@ class IdentityService extends ChangeNotifier {
   final Future<Directory> Function() _applicationSupportDirectory;
   IdentitySnapshot _snapshot;
   bool _disposed = false;
+  bool _suspended = false;
+  int _generation = 0;
   UserProfile? _publicProfile;
   bool _shareDisplayName = true;
   bool _shareProfilePhoto = true;
@@ -124,7 +124,7 @@ class IdentityService extends ChangeNotifier {
     if (profile != null) _publicProfile = profile;
     _shareDisplayName = shareDisplayName;
     _shareProfilePhoto = shareProfilePhoto;
-    if (_nativeCore == null || _disposed) {
+    if (_nativeCore == null || _disposed || _suspended) {
       return Future.value();
     }
     if (!forceRefresh &&
@@ -144,12 +144,13 @@ class IdentityService extends ChangeNotifier {
     do {
       _refreshPending = false;
       await _initializeOnce();
-    } while (_refreshPending && !_disposed);
+    } while (_refreshPending && !_disposed && !_suspended);
   }
 
   Future<void> _initializeOnce() async {
     final core = _nativeCore;
-    if (core == null || _disposed) return;
+    if (core == null || _disposed || _suspended) return;
+    final generation = _generation;
     final publishedProfile = _publicProfile;
     final publishDisplayName = _shareDisplayName;
     final publishProfilePhoto = _shareProfilePhoto;
@@ -181,6 +182,7 @@ class IdentityService extends ChangeNotifier {
           publishProfilePhoto && publishedProfile?.photoBytes != null
           ? await _encodePublishedAvatar(publishedProfile!.photoBytes!)
           : null;
+      if (_suspended || generation != _generation) return;
       final response = core is NativeCoreClient
           ? await core.ensureIdentityInBackground(
               storageDirectory: nativeDirectory.path,
@@ -194,6 +196,7 @@ class IdentityService extends ChangeNotifier {
               displayName: displayName,
               avatarBase64: avatarBase64,
             );
+      if (_suspended || generation != _generation) return;
       if (!response.ok) {
         AppLog.instance.record(
           category: 'identity',
@@ -252,6 +255,7 @@ class IdentityService extends ChangeNotifier {
         verbose: true,
       );
     } on Exception catch (error) {
+      if (_suspended || generation != _generation) return;
       AppLog.instance.recordError(
         category: 'identity',
         action: 'initialization_failed',
@@ -274,6 +278,20 @@ class IdentityService extends ChangeNotifier {
     if (_snapshot.phase == IdentityPhase.ready) {
       _setSnapshot(const IdentitySnapshot(phase: IdentityPhase.loading));
     }
+  }
+
+  void suspendForLock() {
+    _suspended = true;
+    _generation++;
+    _refreshPending = false;
+    _publicProfile = null;
+    _lastPublishedProfile = null;
+    _setSnapshot(const IdentitySnapshot(phase: IdentityPhase.loading));
+  }
+
+  void resumeAfterUnlock() {
+    _suspended = false;
+    invalidateAfterAccountImport();
   }
 
   bool _samePublishedConfiguration() {

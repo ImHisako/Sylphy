@@ -5069,7 +5069,7 @@ class _PrivacyLine extends StatelessWidget {
 }
 
 Color _networkColor(VeilidPhase phase) => switch (phase) {
-  VeilidPhase.attached => AppPalette.color(0xFF8CE6AC),
+  VeilidPhase.attached => AppPalette.primary,
   VeilidPhase.connecting => AppPalette.color(0xFFCFF36A),
   VeilidPhase.degraded => AppPalette.color(0xFFFFC56B),
   VeilidPhase.offline => AppPalette.color(0xFF95A0AF),

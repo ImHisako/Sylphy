@@ -17,7 +17,7 @@ pub fn capability_status() -> RatchetCapabilityStatus {
     RatchetCapabilityStatus {
         compiled: cfg!(feature = "signal-ratchet"),
         provider: if cfg!(feature = "signal-ratchet") {
-            "signalapp/libsignal@v0.102.1"
+            "signalapp/libsignal@v0.105.0"
         } else {
             "not-compiled"
         },
@@ -49,7 +49,7 @@ mod signal {
     use rand::{Rng as _, TryRngCore as _, rngs::OsRng};
     use serde::{Deserialize, Serialize};
     use sha2::{Digest, Sha256};
-    use zeroize::Zeroizing;
+    use zeroize::{Zeroize, Zeroizing};
 
     use super::{CoreError, CoreResult, SignalPreKeyBundle};
     use crate::{atomic_file, bundle::MAX_SIGNAL_DEVICE_ID, identity, vault};
@@ -374,6 +374,35 @@ mod signal {
 
     fn store() -> &'static Mutex<RuntimeStore> {
         STORE.get_or_init(|| Mutex::new(RuntimeStore::default()))
+    }
+
+    pub fn wipe_memory() -> CoreResult<()> {
+        let mut runtime = store().lock().map_err(|_| CoreError::Internal)?;
+        if let Some(global) = &mut runtime.global {
+            global.identity.key_pair.zeroize();
+            for value in global.identity.known_keys.values_mut() {
+                value.zeroize();
+            }
+            for value in global.pre_keys.records.values_mut() {
+                value.zeroize();
+            }
+            for value in global.signed_pre_keys.records.values_mut() {
+                value.zeroize();
+            }
+            for value in global.kyber_pre_keys.records.values_mut() {
+                value.zeroize();
+            }
+            for values in global.kyber_pre_keys.used_base_keys.values_mut() {
+                for value in values {
+                    value.zeroize();
+                }
+            }
+        }
+        for value in runtime.sessions.records.values_mut() {
+            value.zeroize();
+        }
+        *runtime = RuntimeStore::default();
+        Ok(())
     }
 
     pub fn configure(storage_directory: &str) -> CoreResult<()> {
@@ -901,6 +930,16 @@ mod signal {
             Ok(())
         })
     }
+}
+
+#[cfg(feature = "signal-ratchet")]
+pub(crate) fn wipe_memory() -> CoreResult<()> {
+    signal::wipe_memory()
+}
+
+#[cfg(not(feature = "signal-ratchet"))]
+pub(crate) fn wipe_memory() -> CoreResult<()> {
+    Ok(())
 }
 
 #[cfg(feature = "signal-ratchet")]

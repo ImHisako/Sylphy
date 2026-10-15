@@ -2,13 +2,17 @@
 
 ## ABI
 
-Il confine Flutter/Rust è una singola ABI C JSON, attualmente alla versione 14. Le richieste sono UTF-8; le risposte di stato non riportano password, chiavi, plaintext o diagnostica crittografica. I comandi messaging possono restituire soltanto read model già autenticati e decrittati dal core. Ogni stringa restituita viene liberata esclusivamente tramite `sylphy_core_free_string`.
+Il confine Flutter/Rust è una singola ABI C JSON, attualmente alla versione 15. Le richieste sono UTF-8; le risposte di stato non riportano password, chiavi, plaintext o diagnostica crittografica. I comandi messaging possono restituire soltanto read model già autenticati e decrittati dal core. Ogni stringa restituita viene liberata esclusivamente tramite `sylphy_core_free_string`.
 
-`ensure_identity` crea o riapre un record Argon2id/XChaCha20-Poly1305 contenente la chiave Ed25519 stabile, la prekey privata X25519 e il seed ML-KEM-768. Le prekey pubbliche sono firmate e ruotate alla scadenza, mentre il fingerprint Ed25519 rimane stabile. Il boundary restituisce esclusivamente fingerprint, scadenza e invito pubblico `sylphy:`; il segreto del vault è device-bound e proviene dal secure storage della piattaforma.
+ABI 15 aggiunge configurazione sicurezza, protezione con passphrase, blocco/sblocco,
+policy di inattività e pulizia delle sessioni. Il contratto e la migrazione dei
+dati esistenti sono descritti in [app-security.md](app-security.md).
+
+`ensure_identity` crea o riapre un record Argon2id/XChaCha20-Poly1305 contenente la chiave Ed25519 stabile, la prekey privata X25519 e il seed ML-KEM-768. Le prekey pubbliche sono firmate e ruotate alla scadenza, mentre il fingerprint Ed25519 rimane stabile. Il boundary restituisce esclusivamente fingerprint, scadenza e invito pubblico `sylphy:`. Nella modalità standard il segreto del vault proviene dal secure storage; con la protezione opzionale viene custodito soltanto nella sessione nativa sbloccata con passphrase.
 
 ## Verifica del bundle Android
 
-`native/build-android.ps1` registra ABI 14 e hash SHA-256 in `sylphy-core.properties`.
+`native/build-android.ps1` registra ABI 15 e hash SHA-256 in `sylphy-core.properties`.
 
 ABI 14 aggiunge `request_attachment` (`conversation_id`, `message_id`, `cancel`)
 per avviare o annullare un download esplicito senza attendere la rete. I read
@@ -39,7 +43,9 @@ Il layer di trasporto riceve esclusivamente pacchetti già autenticati e cifrati
 
 ## Ratchet
 
-La feature `signal-ratchet` integra `signalapp/libsignal` v0.102.1 tramite commit immutabile. Il percorso di produzione invoca direttamente `process_prekey_bundle`, `message_encrypt` e `message_decrypt`; il bundle pubblico contiene identity key, signed prekey EC e Kyber prekey Signal, tutte legate al fingerprint Sylphy dalla firma Ed25519. Root key, chain key, contatori e skipped-message keys non attraversano mai FFI.
+La feature `signal-ratchet` integra `signalapp/libsignal` v0.105.0 tramite commit immutabile `4beb029d8a941f81e7d9c6d8af1ed25a677569a8` (SPQR v1.6.0). Il percorso di produzione invoca direttamente `process_prekey_bundle`, `message_encrypt` e `message_decrypt`; il bundle pubblico contiene identity key, signed prekey EC e Kyber prekey Signal, tutte legate al fingerprint Sylphy dalla firma Ed25519. Root key, chain key, contatori e skipped-message keys non attraversano mai FFI.
+
+L'aggiornamento dalla v0.102.1 mantiene il formato v2 dello stato Signal e la capability `signal-libsignal-v1`. Il test `native/core/tests/libsignal_compat.rs` usa record e ciphertext sintetici generati dalla versione precedente: verifica la lettura di identità e prekey, bootstrap pendenti, sessioni persistenti con skipped-message keys, rifiuto dei replay e scambio bidirezionale dopo il caricamento. Non occorre azzerare identità o conversazioni. La verifica su dispositivi reali resta distinta dai test automatici e dalla compilazione Android.
 
 Il ciphertext opaco Signal/PreKey viene inserito in un envelope Sylphy ibrido e autenticato. Il self-test ABI usa lo stesso provider ufficiale e verifica un round trip PreKey completo.
 

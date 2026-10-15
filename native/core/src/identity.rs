@@ -70,6 +70,8 @@ impl Drop for IdentityRecord {
         self.x25519_secret.zeroize();
         self.mlkem_seed.zeroize();
         self.message_storage_secret.zeroize();
+        self.dht_descriptor_json.zeroize();
+        self.mailbox_descriptor_json.zeroize();
     }
 }
 
@@ -168,6 +170,13 @@ pub(crate) static TEST_IDENTITY_LOCK: Mutex<()> = Mutex::new(());
 
 fn active_identity_store() -> &'static Mutex<Option<IdentityRecord>> {
     ACTIVE_IDENTITY.get_or_init(|| Mutex::new(None))
+}
+
+pub(crate) fn wipe_memory() -> CoreResult<()> {
+    *active_identity_store()
+        .lock()
+        .map_err(|_| CoreError::Internal)? = None;
+    Ok(())
 }
 
 pub(crate) fn active_identity() -> CoreResult<IdentityRecord> {

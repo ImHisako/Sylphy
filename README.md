@@ -15,6 +15,11 @@ server holding accounts, contacts and conversations.
 
 ## Features
 
+- Optional passphrase protection of existing encrypted local data, automatic
+  locking on inactivity/background and a best-effort native RAM wiper on every
+  lock. Configure these under Settings → Local security; see
+  [local security](specs/app-security.md) for migration and memory limits.
+
 - Signed Sylphy identities shared through an ID or a `sylphy:` invitation.
 - Peer-to-peer contacts with names, profile pictures and verifiable fingerprints.
 - Groups with additional channels open an ordered channel list before showing
@@ -304,8 +309,8 @@ linked-device synchronization, chat pagination, and Android signing setup.
 ## Dependencies and licenses
 
 The core uses `veilid-core 0.5.7` and official
-[`signalapp/libsignal v0.102.1`](https://github.com/signalapp/libsignal/releases/tag/v0.102.1),
-pinned to commit `ea42ed0ed3e2ae119282d98253c35a28cce02414`. The native
+[`signalapp/libsignal v0.105.0`](https://github.com/signalapp/libsignal/releases/tag/v0.105.0),
+pinned to commit `4beb029d8a941f81e7d9c6d8af1ed25a677569a8`. The native
 `Cargo.lock` records the resolved dependencies for reproducible builds.
 
 Libsignal is licensed under AGPL-3.0-only. Review the obligations documented in

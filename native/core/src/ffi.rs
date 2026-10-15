@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    CORE_ABI_VERSION, PROTOCOL_VERSION, account_backup, bundle::PublicBundle, error::CoreError,
-    hybrid, identity, messaging_adapter, ratchet_adapter, vault, veilid_adapter,
+    CORE_ABI_VERSION, PROTOCOL_VERSION, account_backup, app_security, bundle::PublicBundle,
+    error::CoreError, hybrid, identity, messaging_adapter, ratchet_adapter, vault, veilid_adapter,
 };
 
 // Flutter and Android's background service share one vault and ratchet. A
@@ -23,6 +23,23 @@ static ACCOUNT_STATE_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 #[derive(Debug, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum CoreRequest {
+    ConfigureSecurity {
+        storage_directory: String,
+    },
+    SecurityStatus,
+    EnablePassphrase {
+        passphrase: String,
+        device_secret: String,
+    },
+    UnlockVault {
+        passphrase: String,
+    },
+    LockVault,
+    SecurityTouch,
+    SetLockPolicy {
+        inactivity_seconds: u64,
+        lock_on_background: bool,
+    },
     Status,
     StartVeilid {
         storage_directory: String,
@@ -189,7 +206,7 @@ pub unsafe extern "C" fn sylphy_core_call(request: *const c_char) -> *mut c_char
         } else {
             unsafe { CStr::from_ptr(request) }
                 .to_str()
-                .map(str::to_owned)
+                .map(|text| zeroize::Zeroizing::new(text.to_owned()))
                 .map_err(|_| CoreError::InvalidInput)
         };
         match request_text.and_then(|body| dispatch(&body)) {
@@ -211,7 +228,9 @@ pub unsafe extern "C" fn sylphy_core_call(request: *const c_char) -> *mut c_char
 pub unsafe extern "C" fn sylphy_core_free_string(value: *mut c_char) {
     if !value.is_null() {
         unsafe {
-            drop(CString::from_raw(value));
+            use zeroize::Zeroize;
+            let mut bytes = CString::from_raw(value).into_bytes_with_nul();
+            bytes.zeroize();
         }
     }
 }
@@ -222,6 +241,9 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
         let _account_guard = ACCOUNT_STATE_LOCK
             .try_read()
             .map_err(|_| CoreError::FeatureUnavailable)?;
+        if app_security::is_locked() {
+            return Err(CoreError::VaultLocked);
+        }
         return dispatch_request(request);
     }
     let _command_guard = COMMAND_LOCK.lock().map_err(|_| CoreError::Internal)?;
@@ -230,6 +252,8 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
         CoreRequest::EnsureIdentity { .. }
             | CoreRequest::ImportAccount { .. }
             | CoreRequest::StartVeilid { .. }
+            | CoreRequest::LockVault
+            | CoreRequest::ConfigureSecurity { .. }
     ) {
         Some(
             ACCOUNT_STATE_LOCK
@@ -239,11 +263,79 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
     } else {
         None
     };
+    if !matches!(
+        request,
+        CoreRequest::ConfigureSecurity { .. }
+            | CoreRequest::SecurityStatus
+            | CoreRequest::UnlockVault { .. }
+            | CoreRequest::LockVault
+            | CoreRequest::Status
+            | CoreRequest::VeilidStatus
+            | CoreRequest::StopVeilid
+    ) {
+        app_security::require_unlocked()?;
+    }
     dispatch_request(request)
 }
 
 fn dispatch_request(request: CoreRequest) -> Result<CoreResponse, CoreError> {
     match request {
+        CoreRequest::ConfigureSecurity { storage_directory } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: app_security::configure(&storage_directory)?,
+        }),
+        CoreRequest::SecurityStatus => {
+            if app_security::is_locked() {
+                app_security::lock_vault()?;
+            }
+            Ok(CoreResponse {
+                ok: true,
+                code: "ok",
+                data: app_security::status()?,
+            })
+        }
+        CoreRequest::EnablePassphrase {
+            passphrase,
+            device_secret,
+        } => {
+            let passphrase = zeroize::Zeroizing::new(passphrase);
+            let device_secret = zeroize::Zeroizing::new(device_secret);
+            Ok(CoreResponse {
+                ok: true,
+                code: "ok",
+                data: app_security::enable(&passphrase, &device_secret)?,
+            })
+        }
+        CoreRequest::UnlockVault { passphrase } => {
+            let passphrase = zeroize::Zeroizing::new(passphrase);
+            Ok(CoreResponse {
+                ok: true,
+                code: "ok",
+                data: app_security::unlock(&passphrase)?,
+            })
+        }
+        CoreRequest::LockVault => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: app_security::lock_vault()?,
+        }),
+        CoreRequest::SecurityTouch => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: app_security::touch()?,
+        }),
+        CoreRequest::SetLockPolicy {
+            inactivity_seconds,
+            lock_on_background,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: app_security::update_policy(app_security::LockPolicy {
+                inactivity_seconds,
+                lock_on_background,
+            })?,
+        }),
         CoreRequest::RequestAttachment {
             conversation_id,
             message_id,
@@ -472,16 +564,20 @@ fn dispatch_request(request: CoreRequest) -> Result<CoreResponse, CoreError> {
             vault_password,
             display_name,
             avatar_base64,
-        } => Ok(CoreResponse {
-            ok: true,
-            code: "ok",
-            data: identity::ensure_identity(
-                &storage_directory,
-                &vault_password,
-                display_name,
-                avatar_base64,
-            )?,
-        }),
+        } => {
+            let supplied = zeroize::Zeroizing::new(vault_password);
+            let vault_password = app_security::vault_password(&supplied)?;
+            Ok(CoreResponse {
+                ok: true,
+                code: "ok",
+                data: identity::ensure_identity(
+                    &storage_directory,
+                    &vault_password,
+                    display_name,
+                    avatar_base64,
+                )?,
+            })
+        }
         CoreRequest::ValidatePublicBundle { bundle } => {
             bundle.validate()?;
             Ok(CoreResponse {
@@ -542,23 +638,31 @@ fn dispatch_request(request: CoreRequest) -> Result<CoreResponse, CoreError> {
             backup_base64,
             storage_directory,
             vault_password,
-        } => Ok(CoreResponse {
-            ok: true,
-            code: "ok",
-            data: account_backup::import(
-                &transfer_password,
-                &backup_base64,
-                &storage_directory,
-                &vault_password,
-            )?,
-        }),
+        } => {
+            let supplied = zeroize::Zeroizing::new(vault_password);
+            let vault_password = app_security::vault_password(&supplied)?;
+            Ok(CoreResponse {
+                ok: true,
+                code: "ok",
+                data: account_backup::import(
+                    &transfer_password,
+                    &backup_base64,
+                    &storage_directory,
+                    &vault_password,
+                )?,
+            })
+        }
         CoreRequest::ProtectLocalData {
             vault_password,
             value_base64,
         } => {
-            let value = STANDARD_NO_PAD
-                .decode(value_base64)
-                .map_err(|_| CoreError::InvalidInput)?;
+            let supplied = zeroize::Zeroizing::new(vault_password);
+            let vault_password = app_security::vault_password(&supplied)?;
+            let value = zeroize::Zeroizing::new(
+                STANDARD_NO_PAD
+                    .decode(value_base64)
+                    .map_err(|_| CoreError::InvalidInput)?,
+            );
             let record = vault::seal(&vault_password, &value)?;
             Ok(CoreResponse {
                 ok: true,
@@ -570,6 +674,8 @@ fn dispatch_request(request: CoreRequest) -> Result<CoreResponse, CoreError> {
             vault_password,
             record_base64,
         } => {
+            let supplied = zeroize::Zeroizing::new(vault_password);
+            let vault_password = app_security::vault_password(&supplied)?;
             let record = STANDARD_NO_PAD
                 .decode(record_base64)
                 .map_err(|_| CoreError::InvalidInput)?;
@@ -588,6 +694,7 @@ fn error_response(error: CoreError) -> CoreResponse {
         CoreError::InvalidInput => "invalid_input",
         CoreError::UnsupportedVersion => "unsupported_version",
         CoreError::AuthenticationFailed => "authentication_failed",
+        CoreError::VaultLocked => "vault_locked",
         CoreError::GroupPermissionDenied => "group_permission_denied",
         CoreError::SlowModeActive => "slow_mode_active",
         CoreError::InboundDeferred => "inbound_deferred",

@@ -1,4 +1,4 @@
-"""Reject APK releases that cannot update the preceding public GitHub APK."""
+"""Verify APK release continuity, including the explicit com.sylphy identity change."""
 import hashlib
 import json
 import os
@@ -12,9 +12,23 @@ import urllib.request
 from release import app_version
 
 
+APPLICATION_ID = 'com.sylphy'
+LEGACY_APPLICATION_ID = 'com.example.sylphy'
+
+
+def verify_release_continuity(current, previous):
+    if current[0] != APPLICATION_ID or previous[0] not in (APPLICATION_ID, LEGACY_APPLICATION_ID):
+        raise ValueError('Unexpected APK applicationId')
+    if current[1] <= previous[1] or not current[3] or current[3] != previous[3]:
+        raise ValueError('APK must preserve the signing key and increase versionCode')
+    if previous[0] == LEGACY_APPLICATION_ID:
+        return 'Package changed to com.sylphy: separate installation required; legacy app data is not migrated automatically.'
+    return 'APK signature, applicationId and increasing versionCode verified against previous release.'
+
+
 def apk_details(apk, build_tools):
     signed = subprocess.check_output([str(build_tools / 'apksigner'), 'verify', '--print-certs', str(apk)], text=True)
-    certs = set(re.findall(r'Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]+)', signed))
+    certs = signing_certificates(signed)
     if not certs:
         raise ValueError('APK has no verified signing certificate')
     badging = subprocess.check_output([str(build_tools / 'aapt'), 'dump', 'badging', str(apk)], text=True)
@@ -24,13 +38,20 @@ def apk_details(apk, build_tools):
     return match[1], int(match[2]), match[3], certs
 
 
+def signing_certificates(output):
+    # Build Tools 37 prints "V2 Signer:"; older releases print "Signer #1".
+    return {digest.lower() for digest in re.findall(
+        r'(?:Signer #\d+|V\d+(?:\.\d+)? Signer):? certificate SHA-256 digest: ([0-9a-fA-F]{64})\b',
+        output)}
+
+
 def main():
     tools = pathlib.Path(os.environ['ANDROID_HOME']) / 'build-tools'
     build_tools = sorted((p for p in tools.iterdir() if re.fullmatch(r'\d+\.\d+\.\d+', p.name)),
                          key=lambda p: tuple(map(int, p.name.split('.'))))[-1]
     current = apk_details(pathlib.Path('build/app/outputs/flutter-apk/app-release.apk'), build_tools)
     version, build = app_version(pathlib.Path('pubspec.yaml').read_text())
-    if current[:3] != ('com.example.sylphy', build, version):
+    if current[:3] != (APPLICATION_ID, build, version):
         raise ValueError('APK identity/version differs from pubspec.yaml')
     repository = os.environ['GITHUB_REPOSITORY']
     request = urllib.request.Request(f'https://api.github.com/repos/{repository}/releases/latest',
@@ -60,9 +81,8 @@ def main():
             if 'sha256:' + digest != asset['digest']:
                 raise ValueError('Previous APK checksum mismatch')
         old = apk_details(previous, build_tools)
-        if current[0] != old[0] or current[1] <= old[1] or current[3] != old[3]:
-            raise ValueError('APK cannot update the previous release: preserve applicationId and signing key, and increase versionCode')
-    print('APK signature, applicationId and increasing versionCode verified against previous release.')
+        message = verify_release_continuity(current, old)
+    print(message)
 
 
 if __name__ == '__main__':

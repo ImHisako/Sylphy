@@ -68,6 +68,16 @@ impl PublicProfile {
 static PUBLIC_PROFILE: OnceLock<Mutex<PublicProfile>> = OnceLock::new();
 static PUBLIC_MAILBOX: OnceLock<Mutex<Option<MailboxAddress>>> = OnceLock::new();
 
+pub(crate) fn wipe_memory() -> CoreResult<()> {
+    use zeroize::Zeroize;
+    if let Some(profile) = PUBLIC_PROFILE.get() {
+        let mut profile = profile.lock().map_err(|_| CoreError::Internal)?;
+        profile.display_name.zeroize();
+        profile.avatar_base64.zeroize();
+    }
+    set_public_mailbox(None)
+}
+
 pub(crate) fn set_public_profile(profile: PublicProfile) -> CoreResult<()> {
     profile.validate()?;
     *PUBLIC_PROFILE
@@ -86,13 +96,18 @@ pub(crate) fn current_public_profile() -> PublicProfile {
 }
 
 pub(crate) fn set_public_mailbox(mailbox: Option<MailboxAddress>) -> CoreResult<()> {
+    use zeroize::Zeroize;
     if let Some(address) = &mailbox {
         address.validate()?;
     }
-    *PUBLIC_MAILBOX
+    let mut current = PUBLIC_MAILBOX
         .get_or_init(|| Mutex::new(None))
         .lock()
-        .map_err(|_| CoreError::Internal)? = mailbox;
+        .map_err(|_| CoreError::Internal)?;
+    if let Some(previous) = &mut *current {
+        previous.writer_keypair_json.zeroize();
+    }
+    *current = mailbox;
     Ok(())
 }
 

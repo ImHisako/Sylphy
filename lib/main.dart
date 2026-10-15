@@ -12,6 +12,8 @@ import 'core/identity/identity_service.dart';
 import 'core/native/native_core.dart';
 import 'core/profile/user_profile.dart';
 import 'core/privacy/privacy_settings.dart';
+import 'core/privacy/app_security.dart';
+import 'features/settings/app_security_widgets.dart';
 import 'core/platform/message_notifications.dart';
 import 'core/platform/stream_proof_host.dart';
 import 'core/veilid/veilid_service.dart';
@@ -71,6 +73,7 @@ class SylphyApp extends StatefulWidget {
     this.identityService,
     this.privacySettings,
     this.updates,
+    this.appSecurity,
   });
 
   final SecureMessagingBridge? bridge;
@@ -81,6 +84,7 @@ class SylphyApp extends StatefulWidget {
   final IdentityService? identityService;
   final PrivacySettingsController? privacySettings;
   final AppUpdateController? updates;
+  final AppSecurityController? appSecurity;
 
   @override
   State<SylphyApp> createState() => _SylphyAppState();
@@ -95,6 +99,10 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   late final IdentityService _identityService;
   late final bool _ownsIdentityService;
   late final PrivacySettingsController _privacySettings;
+  late final AppSecurityController? _appSecurity;
+  bool _initialSecurityResolved = false;
+  bool _lastSecurityLocked = true;
+  int _localGeneration = 0;
   late final Future<void> _profileLoadFuture;
   UserProfile? _profile;
   bool _profileLoaded = false;
@@ -138,9 +146,16 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     _privacySettings =
         widget.privacySettings ??
         PrivacySettingsController(cipher: profileCipher);
+    final core = widget.nativeCore;
+    _appSecurity =
+        widget.appSecurity ??
+        (core is NativeCoreClient
+            ? AppSecurityController(command: core.securityCommandInBackground)
+            : null);
+    _appSecurity?.addListener(_onSecurityChanged);
     _privacySettings.addListener(_onPrivacyChanged);
     _veilidService.addListener(_onRouteChanged);
-    _profileLoadFuture = _loadProfile();
+    _profileLoadFuture = _prepareLocalData();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         _runGuarded(
@@ -152,7 +167,68 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     });
   }
 
+  Future<void> _prepareLocalData() async {
+    await _appSecurity?.initialize();
+    _initialSecurityResolved = true;
+    _lastSecurityLocked = _appSecurity?.locked ?? false;
+    if (!_localDataAccessible) return;
+    await _loadProfile();
+  }
+
+  bool get _localDataAccessible =>
+      _appSecurity == null || (_appSecurity.loaded && !_appSecurity.locked);
+
+  void _onSecurityChanged() {
+    if (!mounted) return;
+    if (!_initialSecurityResolved) {
+      setState(() {});
+      return;
+    }
+    final locked = !_localDataAccessible;
+    if (locked == _lastSecurityLocked) {
+      setState(() {});
+      return;
+    }
+    _lastSecurityLocked = locked;
+    if (locked) {
+      _localGeneration++;
+      _identityRepublishTimer?.cancel();
+      _identityRepublishTimer = null;
+      _nativeServicesReady = false;
+      _identityService.suspendForLock();
+      if (_bridge is SylphyMessagingBridge) {
+        _bridge.clearCachesAfterAccountImport();
+      }
+      _profile?.photoBytes?.fillRange(0, _profile!.photoBytes!.length, 0);
+      _profile = null;
+      _profileLoaded = false;
+      _isEditingProfile = false;
+      PaintingBinding.instance.imageCache.clear();
+      PaintingBinding.instance.imageCache.clearLiveImages();
+    } else {
+      _runGuarded(
+        _restoreAfterUnlock(),
+        category: 'security',
+        action: 'unlock_restore_failed',
+      );
+    }
+    setState(() {});
+  }
+
+  Future<void> _restoreAfterUnlock() async {
+    final generation = _localGeneration;
+    await _loadProfile();
+    if (!_localDataAccessible || generation != _localGeneration) return;
+    await _privacySettings.load();
+    if (!_localDataAccessible || generation != _localGeneration) return;
+    _identityService.resumeAfterUnlock();
+    await _initializeNativeServices();
+  }
+
   Future<void> _initializeNativeServices() async {
+    await _profileLoadFuture;
+    if (!_localDataAccessible) return;
+    final generation = _localGeneration;
     try {
       _runGuarded(
         MessageNotifications().initialize(),
@@ -163,6 +239,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
         if (!_privacySettings.loaded) _privacySettings.load(),
         _profileLoadFuture,
       ]);
+      if (!_localDataAccessible || generation != _localGeneration) return;
       await _configureNativePrivacy();
       // Unlock the local identity before waiting for the P2P node to attach.
       // On a cold desktop start this makes the profile usable immediately.
@@ -170,18 +247,22 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
         await _publishProfile();
       }
       await _veilidService.start();
+      if (!_localDataAccessible || generation != _localGeneration) return;
       if (_profile != null && !_identityService.snapshot.hasShortInvitation) {
         await _publishProfile();
       }
     } finally {
-      _nativeServicesReady = true;
-      if (mounted) {
+      if (_localDataAccessible && generation == _localGeneration) {
+        _nativeServicesReady = true;
+      }
+      if (mounted && _localDataAccessible) {
         setState(() => _nativeServicesGeneration++);
       }
     }
   }
 
   Future<void> _publishProfile({bool forceRefresh = false}) async {
+    if (!_localDataAccessible) return;
     await _identityService.initialize(
       profile: _profile,
       shareDisplayName: _privacySettings.value.shareDisplayName,
@@ -212,6 +293,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   }
 
   void _scheduleShortInvitationRefresh() {
+    if (!_localDataAccessible || _profile == null) return;
     if (_identityService.snapshot.hasShortInvitation) {
       _identityRepublishTimer?.cancel();
       _identityRepublishTimer = null;
@@ -253,7 +335,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
 
   void _onPrivacyChanged() {
     if (mounted) setState(() {});
-    if (!_nativeServicesReady) {
+    if (!_nativeServicesReady || !_localDataAccessible) {
       return;
     }
     _runGuarded(
@@ -299,6 +381,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   }
 
   Future<void> _loadProfile() async {
+    final generation = _localGeneration;
     AppLog.instance.record(
       category: 'profile',
       action: 'load_started',
@@ -321,7 +404,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
         error: error,
       );
     }
-    if (!mounted) {
+    if (!mounted || generation != _localGeneration || !_localDataAccessible) {
       return;
     }
     setState(() {
@@ -377,6 +460,8 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _appSecurity?.removeListener(_onSecurityChanged);
+    if (widget.appSecurity == null) _appSecurity?.dispose();
     widget.updates?.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _privacySettings.removeListener(_onPrivacyChanged);
@@ -401,6 +486,10 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       verbose: true,
     );
     final foreground = state == AppLifecycleState.resumed;
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      _appSecurity?.backgrounded();
+    }
     _veilidService.setForeground(foreground);
     _identityRepublishTimer?.cancel();
     _identityRepublishTimer = null;
@@ -408,14 +497,20 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     if (_profile != null) _scheduleShortInvitationRefresh();
     if (foreground) {
       _runGuarded(
-        _resumeNativeServices(),
+        _checkSecurityAndResume(),
         category: 'lifecycle',
         action: 'resume_failed',
       );
     }
   }
 
+  Future<void> _checkSecurityAndResume() async {
+    await _appSecurity?.resumed();
+    if (_localDataAccessible) await _resumeNativeServices();
+  }
+
   Future<void> _resumeNativeServices() async {
+    if (!_localDataAccessible) return;
     await _veilidService.refresh();
     if (_veilidService.snapshot.phase == VeilidPhase.offline ||
         _veilidService.snapshot.phase == VeilidPhase.error) {
@@ -455,7 +550,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       navigatorObservers: [_DiagnosticNavigatorObserver()],
       builder: (context, child) {
         final media = MediaQuery.of(context);
-        return MediaQuery(
+        final contents = MediaQuery(
           data: media.copyWith(
             disableAnimations:
                 media.disableAnimations || _privacySettings.value.reduceMotion,
@@ -477,6 +572,9 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
                   ),
           ),
         );
+        return _appSecurity == null
+            ? contents
+            : AppSecurityHost(controller: _appSecurity, child: contents);
       },
       theme: ThemeData(
         useMaterial3: true,

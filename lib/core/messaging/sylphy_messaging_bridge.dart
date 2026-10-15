@@ -198,6 +198,10 @@ class SylphyMessagingBridge
 
   void clearCachesAfterAccountImport() {
     _cacheGeneration++;
+    for (final message in _messageCache.values) {
+      final bytes = message.attachmentBytes;
+      bytes?.fillRange(0, bytes.length, 0);
+    }
     inboxStorageFull = false;
     _conversationCache = null;
     _messageCache.clear();

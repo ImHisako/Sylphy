@@ -13,6 +13,7 @@ import '../../core/platform/stream_proof_host.dart';
 import '../../core/veilid/veilid_service.dart';
 import 'account_qr_scanner_page.dart';
 import 'android_notification_settings.dart';
+import 'app_security_widgets.dart';
 import '../updates/update_host.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -514,6 +515,10 @@ class _SettingsPageState extends State<SettingsPage> {
                   ],
                 ),
               ),
+              SizedBox(height: 16),
+              _SectionTitle('SICUREZZA LOCALE'),
+              SizedBox(height: 8),
+              AppSecuritySettings(),
               SizedBox(height: 16),
               _SectionTitle('PRIVACY DEL PROFILO'),
               SizedBox(height: 8),
