@@ -62,9 +62,12 @@ void main() {
     (tester) async {
       final settings = _Settings(PrivacySettings(streamProof: true));
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
-        _,
+        call,
       ) async {
-        throw PlatformException(code: 'unsupported');
+        if (call.arguments == true) {
+          throw PlatformException(code: 'unsupported');
+        }
+        return null;
       });
       await tester.pumpWidget(_app(settings));
       await tester.pumpAndSettle();
@@ -105,6 +108,85 @@ void main() {
     variant: TargetPlatformVariant.only(TargetPlatform.windows),
   );
 
+  testWidgets(
+    'Android keeps routes covered until screenshot policy is acknowledged',
+    (tester) async {
+      final settings = _Settings(const PrivacySettings(), loaded: false);
+      final reply = Completer<void>();
+      final calls = <bool>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        platformChannel,
+        (call) async {
+          expect(call.method, 'setAllowScreenshots');
+          calls.add(call.arguments as bool);
+          if (calls.length == 1) await reply.future;
+          return null;
+        },
+      );
+      await tester.pumpWidget(_app(settings));
+      expect(find.text('Private chat'), findsNothing);
+      settings.finishLoading();
+      await tester.pump();
+      expect(calls, [false]);
+      expect(find.text('Private chat'), findsNothing);
+      reply.complete();
+      await tester.pumpAndSettle();
+      expect(find.text('Private chat'), findsOneWidget);
+      await settings.update(settings.value.copyWith(allowScreenshots: true));
+      await tester.pumpAndSettle();
+      expect(calls, [false, true]);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
+
+  testWidgets(
+    'Android capture failure cannot reveal private routes',
+    (tester) async {
+      final settings = _Settings(const PrivacySettings());
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        platformChannel,
+        (_) async {
+          throw PlatformException(code: 'capture_policy_failed');
+        },
+      );
+      await tester.pumpWidget(_app(settings));
+      await tester.pumpAndSettle();
+      expect(find.text('Private chat'), findsNothing);
+      expect(find.text('Riprova'), findsOneWidget);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
+
+  testWidgets(
+    'failed capture toggle must reapply the last confirmed protection',
+    (tester) async {
+      final settings = _Settings(const PrivacySettings(streamProof: true));
+      var nativeProtected = false;
+      final calls = <bool>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+        call,
+      ) async {
+        nativeProtected = call.arguments as bool;
+        calls.add(nativeProtected);
+        if (!nativeProtected) {
+          throw PlatformException(code: 'acknowledgement_lost');
+        }
+        return null;
+      });
+      await tester.pumpWidget(_app(settings));
+      await tester.pumpAndSettle();
+      await settings.update(settings.value.copyWith(streamProof: false));
+      await tester.pumpAndSettle();
+      expect(find.text('Private chat'), findsNothing);
+      await tester.tap(find.text('Mantieni la protezione attiva'));
+      await tester.pumpAndSettle();
+      expect(nativeProtected, true);
+      expect(calls, [true, false, true]);
+      expect(find.text('Private chat'), findsOneWidget);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.windows),
+  );
+
   for (final platform in [
     TargetPlatform.android,
     TargetPlatform.linux,
@@ -129,6 +211,7 @@ void main() {
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
           platformChannel,
           (call) async {
+            if (call.method == 'setAllowScreenshots') return null;
             if (call.method == 'getNotificationSettings') {
               return {
                 'enabled': true,
@@ -162,6 +245,16 @@ void main() {
             ),
           ),
         );
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('settings-section-privacy')),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('allow-screenshots')),
+          platform == TargetPlatform.linux ? findsNothing : findsOneWidget,
+        );
+        await tester.tap(find.byType(BackButton));
         await tester.pumpAndSettle();
         await tester.ensureVisible(
           find.byKey(const ValueKey('settings-section-appearance')),
@@ -211,8 +304,11 @@ void main() {
 }
 
 Widget _app(PrivacySettingsController settings) => MaterialApp(
-  builder: (context, child) =>
-      StreamProofHost(settings: settings, child: child!),
+  builder: (context, child) => StreamProofHost(
+    settings: settings,
+    androidCaptureAvailable: true,
+    child: child!,
+  ),
   home: Scaffold(body: Text('Private chat')),
 );
 

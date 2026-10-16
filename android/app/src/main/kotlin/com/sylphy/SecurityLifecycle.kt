@@ -1,6 +1,7 @@
 package com.sylphy
 
 import java.util.concurrent.Executors
+import android.content.Context
 
 /** Orders native security events independently of the Flutter engine. */
 internal object SecurityLifecycle {
@@ -11,15 +12,18 @@ internal object SecurityLifecycle {
         Thread(task, "sylphy-security")
     }
 
-    private external fun applyEvent(event: Int): Boolean
+    private external fun applyEvent(event: Int): Int
 
-    fun submit(event: Int) {
+    fun submit(context: Context, event: Int) {
         worker.execute {
             try {
                 System.loadLibrary("sylphy_core")
-                if (!applyEvent(event)) android.util.Log.w("Sylphy", "Native memory cleanup unavailable")
+                when (applyEvent(event)) {
+                    1 -> MemoryWipeService.start(context.applicationContext)
+                    -1 -> MemoryCleanupNotifications.show(context, "Pulizia non completata", false)
+                }
             } catch (_: Throwable) {
-                android.util.Log.w("Sylphy", "Native memory cleanup unavailable")
+                MemoryCleanupNotifications.show(context, "Pulizia non completata", false)
             }
         }
     }

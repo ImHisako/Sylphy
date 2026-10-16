@@ -21,6 +21,71 @@ void main() {
   });
   tearDown(() => PlatformDeviceSecretStore.passphraseProtected = false);
 
+  test(
+    'removing passphrase verifies and stages the existing key before commit',
+    () async {
+      final backend = _SecurityBackend();
+      final controller = backend.controller();
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      await controller.unlock('twelve random words');
+      await controller.disable('twelve random words');
+      expect(controller.enabled, false);
+      expect(controller.locked, false);
+      expect(await PlatformDeviceSecretStore().getOrCreate(), 'a' * 43);
+      expect(
+        await const FlutterSecureStorage().read(
+          key: 'sylphy_pending_unprotect_secret_v1',
+        ),
+        isNull,
+      );
+      await controller.close();
+      expect(controller.locked, true);
+      await controller.resumed();
+      expect(controller.locked, false);
+    },
+  );
+
+  test(
+    'wrong passphrase preserves protection and never stages an opening key',
+    () async {
+      final backend = _SecurityBackend();
+      final controller = backend.controller();
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      await controller.unlock('twelve random words');
+      await expectLater(controller.disable('incorrect'), throwsException);
+      expect(controller.enabled, true);
+      expect(
+        await const FlutterSecureStorage().read(
+          key: 'sylphy_identity_vault_secret_v1',
+        ),
+        isNull,
+      );
+      expect(
+        await const FlutterSecureStorage().read(
+          key: 'sylphy_pending_unprotect_secret_v1',
+        ),
+        isNull,
+      );
+    },
+  );
+
+  test(
+    'restart recovers the staged key after native removal committed',
+    () async {
+      FlutterSecureStorage.setMockInitialValues({
+        'sylphy_pending_unprotect_secret_v1': 'a' * 43,
+      });
+      final backend = _SecurityBackend(enabled: false);
+      final controller = backend.controller();
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      expect(controller.enabled, false);
+      expect(await PlatformDeviceSecretStore().getOrCreate(), 'a' * 43);
+    },
+  );
+
   test('closing wipes and suspends an account without a passphrase', () async {
     final backend = _SecurityBackend(enabled: false);
     final controller = backend.controller();
@@ -256,12 +321,16 @@ void main() {
       await tester.pumpAndSettle();
       expect(profiles.loads, 1);
       final exiting = tester.binding.handleRequestAppExit();
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump();
+      expect(controller.cleaning, isTrue);
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
       expect(controller.locked, isTrue);
       expect(backend.suspended, isFalse);
       expect(find.text('Nessuna conversazione sicura'), findsNothing);
       release.complete();
       expect(await exiting, AppExitResponse.exit);
+      expect(controller.cleaning, isFalse);
       expect(backend.suspended, isTrue);
       await controller.resumed();
       await tester.pumpAndSettle();
@@ -308,6 +377,26 @@ void main() {
         findsOneWidget,
       );
       expect(find.byKey(const ValueKey('wipe-and-lock')), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('passphrase-encryption')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('remove-passphrase-input')),
+        findsOneWidget,
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('remove-passphrase-input')),
+        'twelve random words',
+      );
+      await tester.tap(find.byKey(const ValueKey('confirm-remove-passphrase')));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pumpAndSettle();
+      expect(controller.enabled, false);
+      expect(
+        find.byKey(const ValueKey('automatic-lock-timeout')),
+        findsNothing,
+      );
+
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
       controller.dispose();
@@ -467,6 +556,28 @@ class _SecurityBackend {
         }
         expect(request['device_secret'], 'a' * 43);
         enabled = true;
+        locked = false;
+      case 'prepare_disable_passphrase':
+        if (request['passphrase'] != 'twelve random words') {
+          return const NativeCoreResponse(
+            ok: false,
+            code: 'authentication_failed',
+            data: {},
+          );
+        }
+        return NativeCoreResponse(
+          ok: true,
+          code: 'ok',
+          data: {'device_secret': 'a' * 43},
+        );
+      case 'disable_passphrase':
+        expect(
+          await const FlutterSecureStorage().read(
+            key: 'sylphy_pending_unprotect_secret_v1',
+          ),
+          request['device_secret'],
+        );
+        enabled = false;
         locked = false;
       case 'unlock_vault':
         if (request['passphrase'] != 'twelve random words') {

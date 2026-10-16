@@ -126,8 +126,12 @@ impl VeilidNode {
                         {
                             *route = None;
                             callback_dirty.store(true, std::sync::atomic::Ordering::Release);
+                            crate::activity_events::notify();
                         }
                     }
+                }
+                veilid_core::VeilidUpdate::Attachment(_) => {
+                    crate::activity_events::notify();
                 }
                 _ => {}
             }),
@@ -183,8 +187,12 @@ impl VeilidNode {
         Ok(VeilidNodeStatus {
             compiled: true,
             running: true,
-            attachment_state: state.attachment.state.to_string(),
-            public_internet_ready: state.attachment.public_internet_ready,
+            attachment_state: if network_available() {
+                state.attachment.state.to_string()
+            } else {
+                "detached".into()
+            },
+            public_internet_ready: network_available() && state.attachment.public_internet_ready,
             live_peer_count: state.attachment.live_peer_count.to_string(),
             route_needs_publish: self
                 .route_needs_publish
@@ -274,10 +282,30 @@ pub fn publish_identity(
     descriptor_json: Option<&str>,
     identity: &PublishedIdentity,
 ) -> CoreResult<(String, String)> {
-    use veilid_core::{CRYPTO_KIND_VLD0, DHTRecordDescriptor, DHTSchema};
-
     identity.validate()?;
-    let bytes = serde_json::to_vec(identity).map_err(|_| CoreError::Internal)?;
+    let result = publish_record(
+        descriptor_json,
+        serde_json::to_vec(identity).map_err(|_| CoreError::Internal)?,
+    )?;
+    if let Ok(state) = lock_runtime() {
+        if let Some(node) = &state.node {
+            if let Ok(route) = node.private_route.lock() {
+                if route
+                    .as_ref()
+                    .is_some_and(|route| route.blob == identity.route_blob)
+                {
+                    node.route_needs_publish
+                        .store(false, std::sync::atomic::Ordering::Release);
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(feature = "veilid")]
+fn publish_record(descriptor_json: Option<&str>, bytes: Vec<u8>) -> CoreResult<(String, String)> {
+    use veilid_core::{CRYPTO_KIND_VLD0, DHTRecordDescriptor, DHTSchema};
     let (runtime, api) = network_executor()?;
     let routing = api
         .routing_context()
@@ -306,21 +334,26 @@ pub fn publish_identity(
         .block_on(routing.close_dht_record(key.clone()))
         .map_err(|_| CoreError::NetworkStartupFailed);
     written.and(closed)?;
-    if let Ok(state) = lock_runtime() {
-        if let Some(node) = &state.node {
-            if let Ok(route) = node.private_route.lock() {
-                if route
-                    .as_ref()
-                    .is_some_and(|route| route.blob == identity.route_blob)
-                {
-                    node.route_needs_publish
-                        .store(false, std::sync::atomic::Ordering::Release);
-                }
-            }
-        }
-    }
     let persisted = serde_json::to_string(&descriptor).map_err(|_| CoreError::Internal)?;
     Ok((format!("sylphy:{key}"), persisted))
+}
+
+#[cfg(feature = "veilid")]
+pub(crate) fn publish_invitation(
+    descriptor: Option<&str>,
+    invitation: &crate::invitation::ShareInvitation,
+) -> CoreResult<(String, String)> {
+    publish_record(
+        descriptor,
+        serde_json::to_vec(invitation).map_err(|_| CoreError::Internal)?,
+    )
+}
+#[cfg(not(feature = "veilid"))]
+pub(crate) fn publish_invitation(
+    _: Option<&str>,
+    _: &crate::invitation::ShareInvitation,
+) -> CoreResult<(String, String)> {
+    Err(CoreError::FeatureUnavailable)
 }
 
 #[cfg(not(feature = "veilid"))]
@@ -332,7 +365,10 @@ pub fn publish_identity(
 }
 
 #[cfg(feature = "veilid")]
-pub fn resolve_identity(code: &str) -> CoreResult<PublishedIdentity> {
+fn read_identity_record(code: &str) -> CoreResult<Vec<u8>> {
+    if code.len() > 128 {
+        return Err(CoreError::InvalidInput);
+    }
     use std::str::FromStr as _;
 
     use veilid_core::RecordKey;
@@ -354,10 +390,35 @@ pub fn resolve_identity(code: &str) -> CoreResult<PublishedIdentity> {
         .block_on(routing.close_dht_record(key))
         .map_err(|_| CoreError::NetworkStartupFailed);
     let value = value.and_then(|value| closed.map(|()| value))?;
+    Ok(value.data().to_vec())
+}
+
+#[cfg(feature = "veilid")]
+pub fn resolve_identity(code: &str) -> CoreResult<PublishedIdentity> {
+    let bytes = read_identity_record(code)?;
     let identity: PublishedIdentity =
-        serde_json::from_slice(value.data()).map_err(|_| CoreError::VerificationFailed)?;
+        serde_json::from_slice(&bytes).map_err(|_| CoreError::VerificationFailed)?;
     identity.validate()?;
     Ok(identity)
+}
+
+#[cfg(feature = "veilid")]
+pub(crate) fn resolve_invitation(code: &str) -> CoreResult<(PublishedIdentity, String)> {
+    let bytes = read_identity_record(code)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| CoreError::Internal)?
+        .as_millis();
+    crate::invitation::resolve_record(
+        code,
+        &bytes,
+        u64::try_from(now).map_err(|_| CoreError::Internal)?,
+        resolve_identity,
+    )
+}
+#[cfg(not(feature = "veilid"))]
+pub(crate) fn resolve_invitation(_: &str) -> CoreResult<(PublishedIdentity, String)> {
+    Err(CoreError::FeatureUnavailable)
 }
 
 #[cfg(feature = "veilid")]
@@ -900,9 +961,12 @@ pub fn send_payload(route_blob: &[u8], payload: Vec<u8>) -> CoreResult<()> {
         .map_err(|_| CoreError::NetworkAttachFailed)?;
     let result = runtime.block_on(async {
         let routing = api.routing_context()?.with_default_safety()?;
-        routing
-            .app_message(veilid_core::Target::RouteId(route_id.clone()), payload)
-            .await
+        tokio::time::timeout(
+            std::time::Duration::from_secs(12),
+            routing.app_message(veilid_core::Target::RouteId(route_id.clone()), payload),
+        )
+        .await
+        .map_err(|_| veilid_core::VeilidAPIError::generic("direct send timeout"))?
     });
     let _ = api.release_private_route(route_id);
     result.map_err(|_| CoreError::NetworkAttachFailed)
@@ -1236,6 +1300,71 @@ async fn read_offline_frame(
     keys.open(first, &second, now)
 }
 
+static NETWORK_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub(crate) fn network_available() -> bool {
+    NETWORK_AVAILABLE.load(std::sync::atomic::Ordering::Acquire)
+}
+
+#[cfg(feature = "veilid")]
+static NETWORK_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+#[cfg(feature = "veilid")]
+pub(crate) fn platform_network_changed(available: bool) -> CoreResult<()> {
+    NETWORK_AVAILABLE.store(available, std::sync::atomic::Ordering::Release);
+    NETWORK_WAKE.notify_one();
+    crate::activity_events::notify();
+    if !available {
+        return Ok(());
+    }
+    let state = lock_runtime()?;
+    let Some(node) = state.node.as_ref() else {
+        return Ok(());
+    };
+    let previous_route = node
+        .private_route
+        .lock()
+        .map_err(|_| CoreError::Internal)?
+        .take();
+    if let Some(route) = previous_route {
+        let _ = node.api.release_private_route(route.route_id);
+    }
+    node.route_needs_publish
+        .store(true, std::sync::atomic::Ordering::Release);
+    state.runtime.block_on(reattach_if_detached(node))
+}
+
+#[cfg(all(feature = "veilid", target_os = "android"))]
+pub(crate) fn recover_existing_connection() -> CoreResult<()> {
+    let state = lock_runtime()?;
+    let Some(node) = state.node.as_ref() else {
+        return Ok(());
+    };
+    state.runtime.block_on(reattach_if_detached(node))
+}
+
+#[cfg(not(feature = "veilid"))]
+pub(crate) fn platform_network_changed(available: bool) -> CoreResult<()> {
+    NETWORK_AVAILABLE.store(available, std::sync::atomic::Ordering::Release);
+    Ok(())
+}
+
+#[cfg(feature = "veilid")]
+async fn reattach_if_detached(node: &VeilidNode) -> CoreResult<()> {
+    let state = node
+        .api
+        .get_state()
+        .await
+        .map_err(|_| CoreError::NetworkStartupFailed)?;
+    if state.attachment.state.is_detached() && network_available() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), node.api.attach())
+            .await
+            .map_err(|_| CoreError::NetworkAttachFailed)?
+            .map_err(|error| classify_attach_error(&error))?;
+    }
+    Ok(())
+}
+
 #[cfg(feature = "veilid")]
 async fn poll_offline_mailboxes(
     api: veilid_core::VeilidAPI,
@@ -1244,14 +1373,27 @@ async fn poll_offline_mailboxes(
     seen: Arc<Mutex<HashMap<[u8; 32], bool>>>,
 ) {
     loop {
+        if !network_available() {
+            tokio::select! {
+                _ = NETWORK_WAKE.notified() => {},
+                _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {},
+            }
+            continue;
+        }
         let snapshot = targets
             .lock()
             .map(|targets| targets.clone())
             .unwrap_or_default();
         for keys in snapshot {
+            if !network_available() {
+                break;
+            }
             let _ = poll_offline_mailbox_once(&api, &inbox, &seen, &keys).await;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        tokio::select! {
+            _ = NETWORK_WAKE.notified() => {},
+            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {},
+        }
     }
 }
 
@@ -1631,6 +1773,7 @@ pub fn start_node(storage_directory: &str) -> CoreResult<VeilidNodeStatus> {
         state.node = Some(node);
     }
     let node = state.node.as_ref().ok_or(CoreError::Internal)?;
+    state.runtime.block_on(reattach_if_detached(node))?;
     state
         .runtime
         .block_on(node.status())

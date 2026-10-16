@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -26,8 +27,15 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
       expect(attempts, 2);
       service.setForeground(true);
-      await tester.pump(const Duration(seconds: 8));
+      await tester.pump();
+      expect(
+        attempts,
+        3,
+      ); // Bootstrap retries immediately on foreground resume.
+      await tester.pump(const Duration(seconds: 7));
       expect(attempts, 3);
+      await tester.pump(const Duration(seconds: 1));
+      expect(attempts, 4);
       service.dispose();
     },
   );
@@ -212,6 +220,103 @@ void main() {
       expect(bootstrapAttempts, 2);
     },
   );
+  test(
+    'native attachment events coalesce and recover detached nodes before periodic polling',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'sylphy-network-events-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final core = _EventCore();
+      addTearDown(core.events.close);
+      final timers = <_EventTimer>[];
+      final service = VeilidService(
+        nativeCore: core,
+        applicationSupportDirectory: () async => root,
+        eventTimerFactory: (delay, callback) {
+          final timer = _EventTimer(callback);
+          timers.add(timer);
+          return timer;
+        },
+      );
+      addTearDown(service.dispose);
+      await service.start();
+      core.statusResponse = const NativeCoreResponse(
+        ok: true,
+        code: 'ok',
+        data: {
+          'compiled': true,
+          'running': true,
+          'attachment_state': 'detached',
+        },
+      );
+      core.events.add(null);
+      core.events.add(null);
+      await Future<void>.delayed(Duration.zero);
+      expect(timers.length, 1);
+      timers.single.fire();
+      await service.refresh();
+      expect(core.starts, 2);
+      expect(service.snapshot.isAttached, isTrue);
+      expect(core.statusReads, 1);
+      await service.stop();
+      core.events.add(null);
+      await Future<void>.delayed(Duration.zero);
+      expect(timers.length, 1);
+    },
+  );
+
+  test(
+    'resuming requests network status immediately and background events stay quiet',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'sylphy-network-resume-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final core = _EventCore();
+      addTearDown(core.events.close);
+      final service = VeilidService(
+        nativeCore: core,
+        applicationSupportDirectory: () async => root,
+      );
+      addTearDown(service.dispose);
+      await service.start();
+      service.setForeground(false);
+      core.events.add(null);
+      await Future<void>.delayed(Duration.zero);
+      expect(core.statusReads, 0);
+      service.setForeground(true);
+      await service.refresh();
+      expect(core.statusReads, 1);
+    },
+  );
+
+  test(
+    'stopping during bootstrap prevents a delayed startup from reviving the node',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'sylphy-network-stop-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final core = _EventCore();
+      addTearDown(core.events.close);
+      final bootstrap = Completer<AndroidBootstrapResult>();
+      final service = VeilidService(
+        nativeCore: core,
+        applicationSupportDirectory: () async => root,
+        ensureAndroidBootstrap: () => bootstrap.future,
+      );
+      addTearDown(service.dispose);
+      final starting = service.start();
+      final stopping = service.stop();
+      bootstrap.complete(
+        const AndroidBootstrapResult(ready: true, code: 'ready'),
+      );
+      await Future.wait([starting, stopping]);
+      expect(core.starts, 0);
+      expect(service.snapshot.phase, VeilidPhase.offline);
+    },
+  );
 }
 
 class _FakeNativeCore implements NativeCoreApi {
@@ -307,3 +412,43 @@ const _attachedResponse = NativeCoreResponse(
     'live_peer_count': '4',
   },
 );
+
+class _EventCore extends _FakeNativeCore implements NativeActivityEventsApi {
+  final events = StreamController<void>.broadcast();
+  int starts = 0;
+  int statusReads = 0;
+  NativeCoreResponse statusResponse = _attachedResponse;
+  @override
+  Stream<void> get activityEvents => events.stream;
+  @override
+  NativeCoreResponse startVeilid(String storageDirectory) {
+    starts++;
+    return super.startVeilid(storageDirectory);
+  }
+
+  @override
+  NativeCoreResponse veilidStatus() {
+    statusReads++;
+    return statusResponse;
+  }
+}
+
+class _EventTimer implements Timer {
+  _EventTimer(this.callback);
+  final void Function() callback;
+  @override
+  bool isActive = true;
+  @override
+  int get tick => isActive ? 0 : 1;
+  @override
+  void cancel() {
+    isActive = false;
+  }
+
+  void fire() {
+    if (isActive) {
+      isActive = false;
+      callback();
+    }
+  }
+}

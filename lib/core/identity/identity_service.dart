@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
@@ -55,6 +56,7 @@ class PlatformDeviceSecretStore implements DeviceSecretStore {
           );
 
   static const _storageKey = 'sylphy_identity_vault_secret_v1';
+  static const _pendingStorageKey = 'sylphy_pending_unprotect_secret_v1';
   static bool passphraseProtected = false;
   static Future<String>? _secretRead;
   final FlutterSecureStorage _storage;
@@ -69,9 +71,36 @@ class PlatformDeviceSecretStore implements DeviceSecretStore {
     );
   }
 
-  Future<void> removeLegacySecret() => _storage.delete(key: _storageKey);
+  Future<void> removeLegacySecret() async {
+    await _storage.delete(key: _storageKey);
+    await _storage.delete(key: _pendingStorageKey);
+  }
+
+  Future<void> stageUnprotectedSecret(String secret) async {
+    if (secret.length < 43 || secret.length > 512) {
+      throw StateError('invalid_secret');
+    }
+    await _storage.write(key: _pendingStorageKey, value: secret);
+    if (await _storage.read(key: _pendingStorageKey) != secret) {
+      throw StateError('secure_storage_verification_failed');
+    }
+  }
+
+  Future<void> recoverUnprotectedSecret() async {
+    final pending = await _storage.read(key: _pendingStorageKey);
+    if (pending == null) return;
+    if (pending.length < 43 || pending.length > 512) {
+      throw StateError('invalid_secret');
+    }
+    await _storage.write(key: _storageKey, value: pending);
+    if (await _storage.read(key: _storageKey) != pending) {
+      throw StateError('secure_storage_verification_failed');
+    }
+    await _storage.delete(key: _pendingStorageKey);
+  }
 
   Future<String> _readOrCreate() async {
+    await recoverUnprotectedSecret();
     final existing = await _storage.read(key: _storageKey);
     if (existing != null && existing.length >= 43) {
       return existing;
@@ -84,12 +113,28 @@ class PlatformDeviceSecretStore implements DeviceSecretStore {
   }
 }
 
+typedef IdentityPublisher =
+    Future<NativeCoreResponse> Function({
+      required String storageDirectory,
+      required String vaultPassword,
+      String? displayName,
+      String? avatarBase64,
+      int? rotationIntervalSeconds,
+      bool rotateInvitation,
+    });
+
 class IdentityService extends ChangeNotifier {
   IdentityService({
     required NativeCoreApi? nativeCore,
+    IdentityPublisher? publisher,
+    DateTime Function()? now,
+    Timer Function(Duration, void Function())? timerFactory,
     DeviceSecretStore? deviceSecretStore,
     Future<Directory> Function()? applicationSupportDirectory,
   }) : _nativeCore = nativeCore,
+       _publisher = publisher,
+       _now = now ?? DateTime.now,
+       _timerFactory = timerFactory ?? Timer.new,
        _deviceSecretStore = deviceSecretStore ?? PlatformDeviceSecretStore(),
        _applicationSupportDirectory =
            applicationSupportDirectory ?? getApplicationSupportDirectory,
@@ -98,6 +143,9 @@ class IdentityService extends ChangeNotifier {
            : const IdentitySnapshot(phase: IdentityPhase.loading);
 
   final NativeCoreApi? _nativeCore;
+  final IdentityPublisher? _publisher;
+  final DateTime Function() _now;
+  final Timer Function(Duration, void Function()) _timerFactory;
   final DeviceSecretStore _deviceSecretStore;
   final Future<Directory> Function() _applicationSupportDirectory;
   IdentitySnapshot _snapshot;
@@ -112,6 +160,83 @@ class IdentityService extends ChangeNotifier {
   bool? _lastShareProfilePhoto;
   Future<void>? _initializationLoop;
   bool _refreshPending = false;
+  int _rotationIntervalSeconds = 0;
+  int? _lastRotationIntervalSeconds;
+  Timer? _rotationTimer;
+  DateTime? _nextRotationAt;
+  bool _manualRotationPending = false;
+  bool _rotationInProgress = false;
+  String? _rotationError;
+  bool _revocationPending = false;
+  bool get revocationPending => _revocationPending;
+  bool get rotationPolicyPending =>
+      _rotationIntervalSeconds != _lastRotationIntervalSeconds;
+
+  Future<void> retry() => initialize(
+    forceRefresh: true,
+    shareDisplayName: _shareDisplayName,
+    shareProfilePhoto: _shareProfilePhoto,
+  );
+
+  DateTime? get nextRotationAt => _nextRotationAt;
+  bool get rotationInProgress => _rotationInProgress;
+  String? get rotationError => _rotationError;
+  bool get canRotate =>
+      !_disposed &&
+      !_suspended &&
+      _snapshot.phase == IdentityPhase.ready &&
+      (_nativeCore is NativeCoreClient || _publisher != null);
+
+  Future<bool> rotateNow() async {
+    if (!canRotate || _rotationInProgress) return false;
+    final previous = _snapshot.invitationCode;
+    _rotationInProgress = true;
+    _manualRotationPending = true;
+    _rotationError = null;
+    notifyListeners();
+    try {
+      await initialize(
+        forceRefresh: true,
+        shareDisplayName: _shareDisplayName,
+        shareProfilePhoto: _shareProfilePhoto,
+      );
+      return !_suspended &&
+          !_disposed &&
+          _rotationError == null &&
+          _snapshot.hasShortInvitation &&
+          _snapshot.invitationCode != previous;
+    } finally {
+      _rotationInProgress = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  void _scheduleRotation({bool retry = false}) {
+    _rotationTimer?.cancel();
+    _rotationTimer = null;
+    if (_disposed ||
+        _suspended ||
+        (_rotationIntervalSeconds == 0 && !_revocationPending)) {
+      return;
+    }
+    final deadline = _nextRotationAt;
+    var delay = deadline?.difference(_now()) ?? const Duration(seconds: 60);
+    if (retry ||
+        delay <= Duration.zero ||
+        (_revocationPending && delay > const Duration(seconds: 60))) {
+      delay = const Duration(seconds: 60);
+    }
+    _rotationTimer = _timerFactory(delay, () {
+      _rotationTimer = null;
+      unawaited(
+        initialize(
+          forceRefresh: true,
+          shareDisplayName: _shareDisplayName,
+          shareProfilePhoto: _shareProfilePhoto,
+        ),
+      );
+    });
+  }
 
   IdentitySnapshot get snapshot => _snapshot;
 
@@ -120,17 +245,38 @@ class IdentityService extends ChangeNotifier {
     bool shareDisplayName = true,
     bool shareProfilePhoto = true,
     bool forceRefresh = false,
+    int? rotationIntervalSeconds,
   }) {
+    if (rotationIntervalSeconds != null) {
+      if (rotationIntervalSeconds != 0 &&
+          (rotationIntervalSeconds < 3600 ||
+              rotationIntervalSeconds > 31536000)) {
+        throw ArgumentError.value(
+          rotationIntervalSeconds,
+          'rotationIntervalSeconds',
+        );
+      }
+      _rotationIntervalSeconds = rotationIntervalSeconds;
+      if (_rotationIntervalSeconds == 0) {
+        _rotationTimer?.cancel();
+        _rotationTimer = null;
+      }
+    }
     if (profile != null) _publicProfile = profile;
     _shareDisplayName = shareDisplayName;
     _shareProfilePhoto = shareProfilePhoto;
-    if (_nativeCore == null || _disposed || _suspended) {
+    if ((_nativeCore == null && _publisher == null) ||
+        _disposed ||
+        _suspended) {
       return Future.value();
     }
     if (!forceRefresh &&
         _snapshot.phase == IdentityPhase.ready &&
         _snapshot.hasShortInvitation &&
-        (_snapshot.expiresAt?.isAfter(DateTime.now()) ?? false) &&
+        !_revocationPending &&
+        (_snapshot.expiresAt?.isAfter(_now()) ?? false) &&
+        !(_nextRotationAt?.isBefore(_now()) ?? false) &&
+        _rotationIntervalSeconds == _lastRotationIntervalSeconds &&
         _samePublishedConfiguration()) {
       return Future.value();
     }
@@ -149,7 +295,10 @@ class IdentityService extends ChangeNotifier {
 
   Future<void> _initializeOnce() async {
     final core = _nativeCore;
-    if (core == null || _disposed || _suspended) return;
+    if ((core == null && _publisher == null) || _disposed || _suspended) return;
+    final rotateInvitation = _manualRotationPending;
+    _manualRotationPending = false;
+    final rotationIntervalSeconds = _rotationIntervalSeconds;
     final generation = _generation;
     final publishedProfile = _publicProfile;
     final publishDisplayName = _shareDisplayName;
@@ -183,14 +332,19 @@ class IdentityService extends ChangeNotifier {
           ? await _encodePublishedAvatar(publishedProfile!.photoBytes!)
           : null;
       if (_suspended || generation != _generation) return;
-      final response = core is NativeCoreClient
-          ? await core.ensureIdentityInBackground(
+      final publisher =
+          _publisher ??
+          (core is NativeCoreClient ? core.ensureIdentityInBackground : null);
+      final response = publisher != null
+          ? await publisher(
+              rotationIntervalSeconds: rotationIntervalSeconds,
+              rotateInvitation: rotateInvitation,
               storageDirectory: nativeDirectory.path,
               vaultPassword: vaultPassword,
               displayName: displayName,
               avatarBase64: avatarBase64,
             )
-          : core.ensureIdentity(
+          : core!.ensureIdentity(
               storageDirectory: nativeDirectory.path,
               vaultPassword: vaultPassword,
               displayName: displayName,
@@ -205,12 +359,18 @@ class IdentityService extends ChangeNotifier {
           result: response.code,
           force: true,
         );
-        _setSnapshot(
-          IdentitySnapshot(
-            phase: IdentityPhase.error,
-            errorCode: response.code,
-          ),
-        );
+        _rotationError = response.code;
+        if (_snapshot.phase != IdentityPhase.ready) {
+          _setSnapshot(
+            IdentitySnapshot(
+              phase: IdentityPhase.error,
+              errorCode: response.code,
+            ),
+          );
+        } else {
+          notifyListeners();
+        }
+        _scheduleRotation(retry: true);
         return;
       }
       final identityId = response.data['identity_id'];
@@ -235,6 +395,14 @@ class IdentityService extends ChangeNotifier {
         );
         return;
       }
+      _rotationError = null;
+      _revocationPending = response.data['revocation_pending'] == true;
+      final nextMs = response.data['next_rotation_at_ms'];
+      _nextRotationAt = nextMs is int
+          ? DateTime.fromMillisecondsSinceEpoch(nextMs, isUtc: true).toLocal()
+          : null;
+      _lastRotationIntervalSeconds = rotationIntervalSeconds;
+      _scheduleRotation();
       _setSnapshot(
         IdentitySnapshot(
           phase: IdentityPhase.ready,
@@ -261,16 +429,27 @@ class IdentityService extends ChangeNotifier {
         action: 'initialization_failed',
         error: error,
       );
-      _setSnapshot(
-        const IdentitySnapshot(
-          phase: IdentityPhase.error,
-          errorCode: 'identity_initialization_failed',
-        ),
-      );
+      _rotationError = 'identity_initialization_failed';
+      if (_snapshot.phase != IdentityPhase.ready) {
+        _setSnapshot(
+          const IdentitySnapshot(
+            phase: IdentityPhase.error,
+            errorCode: 'identity_initialization_failed',
+          ),
+        );
+      } else {
+        notifyListeners();
+      }
+      _scheduleRotation(retry: true);
     } finally {}
   }
 
   void invalidateAfterAccountImport() {
+    _rotationTimer?.cancel();
+    _rotationTimer = null;
+    _nextRotationAt = null;
+    _revocationPending = false;
+    _lastRotationIntervalSeconds = null;
     _lastPublishedProfile = null;
     _lastShareDisplayName = null;
     _lastShareProfilePhoto = null;
@@ -282,6 +461,11 @@ class IdentityService extends ChangeNotifier {
 
   void suspendForLock() {
     _suspended = true;
+    _rotationTimer?.cancel();
+    _rotationTimer = null;
+    _manualRotationPending = false;
+    _nextRotationAt = null;
+    _rotationError = null;
     _generation++;
     _refreshPending = false;
     _publicProfile = null;
@@ -312,6 +496,7 @@ class IdentityService extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _rotationTimer?.cancel();
     super.dispose();
   }
 }

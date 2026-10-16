@@ -79,10 +79,8 @@ pub fn configure(storage_directory: &str) -> CoreResult<Value> {
     {
         return Err(CoreError::InvalidInput);
     }
-    if state.path.as_ref() == Some(&path) && !state.configuration_failed {
-        drop(state);
-        return status();
-    }
+    // Re-read the committed envelope during recovery, including a disable
+    // transaction whose response was lost after the atomic rename.
     state.configuration_failed = true;
     state.path = Some(path.clone());
     state.secret = None;
@@ -91,13 +89,15 @@ pub fn configure(storage_directory: &str) -> CoreResult<Value> {
             if bytes.len() > 4096 {
                 return Err(CoreError::InvalidInput);
             }
-            let value: ProtectedSecret =
+            let value: Option<ProtectedSecret> =
                 serde_json::from_slice(&bytes).map_err(|_| CoreError::VerificationFailed)?;
-            if value.version != 1 || value.wrapped_secret.len() > 2048 {
-                return Err(CoreError::UnsupportedVersion);
+            if let Some(value) = &value {
+                if value.version != 1 || value.wrapped_secret.len() > 2048 {
+                    return Err(CoreError::UnsupportedVersion);
+                }
+                value.policy.validate()?;
             }
-            value.policy.validate()?;
-            Some(value)
+            value
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) => return Err(CoreError::Internal),
@@ -207,6 +207,52 @@ pub fn enable(passphrase: &str, device_secret: &str) -> CoreResult<Value> {
     state.protected = Some(protected);
     state.secret = Some(Zeroizing::new(device_secret.to_owned()));
     state.last_activity = Some(Instant::now());
+    drop(state);
+    status()
+}
+// Explicit transition only: the platform stages this existing key in secure
+// storage and verifies it before requesting the final commit.
+pub fn prepare_disable(passphrase: &str) -> CoreResult<Value> {
+    let state = session().lock().map_err(|_| CoreError::Internal)?;
+    let secret = verify_disable(&state, passphrase)?;
+    Ok(json!({"device_secret": &**secret}))
+}
+fn verify_disable(state: &Session, passphrase: &str) -> CoreResult<Zeroizing<String>> {
+    if locked(state) {
+        return Err(CoreError::VaultLocked);
+    }
+    if passphrase.is_empty() || passphrase.len() > 512 {
+        return Err(CoreError::InvalidInput);
+    }
+    let protected = state.protected.as_ref().ok_or(CoreError::InvalidInput)?;
+    let record = STANDARD_NO_PAD
+        .decode(&protected.wrapped_secret)
+        .map_err(|_| CoreError::VerificationFailed)?;
+    let bytes = vault::open(passphrase, &record)?;
+    let secret = Zeroizing::new(
+        String::from_utf8(bytes.to_vec()).map_err(|_| CoreError::VerificationFailed)?,
+    );
+    if secret.len() < 43 || state.secret.as_deref() != Some(&*secret) {
+        return Err(CoreError::VerificationFailed);
+    }
+    Ok(secret)
+}
+pub fn disable(passphrase: &str, device_secret: &str) -> CoreResult<Value> {
+    let mut state = session().lock().map_err(|_| CoreError::Internal)?;
+    let secret = verify_disable(&state, passphrase)?;
+    if secret.as_bytes() != device_secret.as_bytes() {
+        return Err(CoreError::VerificationFailed);
+    }
+    let path = state.path.as_ref().ok_or(CoreError::InvalidInput)?;
+    // A durable, secret-free tombstone makes restart recovery unambiguous.
+    if let Err(error) = atomic_file::replace(path, b"null") {
+        if fs::read(path).ok().as_deref() != Some(b"null") {
+            return Err(error);
+        }
+    }
+    state.protected = None;
+    state.secret = None;
+    state.last_activity = None;
     drop(state);
     status()
 }
@@ -457,6 +503,24 @@ mod tests {
         assert_eq!(resume_vault().unwrap()["locked"], true);
         assert!(vault_password(&secret).is_err());
         unlock("a long test passphrase").unwrap();
+        assert!(prepare_disable("wrong passphrase").is_err());
+        assert_eq!(
+            prepare_disable("a long test passphrase").unwrap()["device_secret"],
+            secret
+        );
+        assert!(disable("a long test passphrase", &"b".repeat(43)).is_err());
+        assert_eq!(status().unwrap()["enabled"], true);
+        disable("a long test passphrase", &secret).unwrap();
+        assert_eq!(status().unwrap()["enabled"], false);
+        *session().lock().unwrap() = Session::default();
+        assert_eq!(configure(&root).unwrap()["enabled"], false);
+        let unprotected = identity::ensure_identity(&root, &secret, None, None).unwrap();
+        assert_eq!(unprotected["identity_id"], original["identity_id"]);
+        assert_eq!(
+            &**vault::open(&secret, &old_data).unwrap(),
+            b"existing encrypted history"
+        );
+        enable("a long test passphrase", &secret).unwrap();
         fs::write(directory.join("app-security-v1.json"), b"corrupt").unwrap();
         *session().lock().unwrap() = Session::default();
         assert!(configure(&root).is_err());

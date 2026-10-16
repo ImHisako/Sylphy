@@ -9,7 +9,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
-import android.util.Log
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 
 class MessagingService : Service() {
@@ -40,15 +40,23 @@ class MessagingService : Service() {
     }
     private val poll = object : Runnable {
         override fun run() {
+            var outcome = 0
+            val wake = getSystemService(PowerManager::class.java)
+                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Sylphy:inbox-commit").apply { setReferenceCounted(false) }
             try {
                 // Flutter owns foreground polling and knows which chat is visible.
-                if (uiResumed) return
-                val received = syncInbound()
-                if (received > 0 && !uiResumed) showIncomingNotification((received and 0x40000000) != 0)
+                if (uiResumed || stopped) return
+                // Protect only bounded local processing, never the waiting thread.
+                wake.acquire(10_000)
+                outcome = syncInbound()
+                if (outcome > 0 && !uiResumed) showIncomingNotification((outcome and 0x40000000) != 0)
             } catch (error: Throwable) {
-                Log.w("Sylphy", "Background inbox poll unavailable", error)
+                outcome = -1
+                AppDiagnostics.w("Sylphy", "Background inbox poll unavailable", error)
             } finally {
-                if (!stopped && !uiResumed) worker.postDelayed(this, POLL_INTERVAL_MS)
+                try { if (wake.isHeld) wake.release() } catch (_: RuntimeException) { }
+                if (!stopped && !uiResumed) worker.postDelayed(this,
+                    BackgroundPollPolicy.delay(NetworkRecovery.available, outcome))
             }
         }
     }
@@ -96,9 +104,10 @@ class MessagingService : Service() {
             eventWorker = Handler(eventThread.looper)
             eventWorker.post(watchEvents)
             activeService = this
+            NetworkRecovery.start(this)
             updatePolling()
         } catch (error: Throwable) {
-            Log.e("Sylphy", "Unable to start native inbox worker", error)
+            AppDiagnostics.e("Sylphy", "Unable to start native inbox worker", error)
             stopSelf()
         }
     }
@@ -109,7 +118,7 @@ class MessagingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        SecurityLifecycle.submit(SecurityLifecycle.CLOSE)
+        SecurityLifecycle.submit(this, SecurityLifecycle.CLOSE)
         super.onTaskRemoved(rootIntent)
     }
 
@@ -118,7 +127,7 @@ class MessagingService : Service() {
         try { wakeEventWaiters() } catch (_: Throwable) { }
         if (::eventWorker.isInitialized) eventWorker.removeCallbacksAndMessages(null)
         if (::eventThread.isInitialized) eventThread.quitSafely()
-        if (!uiResumed) SecurityLifecycle.submit(SecurityLifecycle.CLOSE)
+        if (!uiResumed) SecurityLifecycle.submit(this, SecurityLifecycle.CLOSE)
         if (activeService === this) activeService = null
         if (::worker.isInitialized) worker.removeCallbacksAndMessages(null)
         if (::workerThread.isInitialized) workerThread.quitSafely()
@@ -168,6 +177,6 @@ class MessagingService : Service() {
         const val CHANNEL_ID = "sylphy_background_messaging"
         const val NOTIFICATION_ID = 4104
         const val INCOMING_NOTIFICATION_ID = 4105
-        const val POLL_INTERVAL_MS = 10_000L
+        internal fun requestInboxPoll() { activeService?.updatePolling() }
     }
 }

@@ -88,6 +88,15 @@ installs in `bundle/lib`.
 
 ## Native API and persistence
 
+ABI v20 adds Android network-change recovery, bounded direct delivery attempts,
+authenticated rerouting of pending ciphertext, and distinct busy/locked results
+for event-driven background reception. Device measurements are documented in
+`docs/network-background-validation.md` and require two physical phones.
+ABI v19 adds device-local rotating share IDs via signed version-1 DHT records,
+validated one-hop resolution, persistent intervals and explicit immediate rotation.
+Stable account keys, contact discovery and existing sessions are preserved.
+ABI v18 adds authenticated two-phase passphrase removal and cleanup result codes
+for the Android lifecycle bridge. See [local security](../specs/app-security.md).
 ABI v17 adds independent local reads, metadata-only message pages, on-demand
 attachment content and content-free activity wakeups. See [performance](../specs/performance.md).
 ABI v16 added close/resume suspension even without a passphrase and an independent

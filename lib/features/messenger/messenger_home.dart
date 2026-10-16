@@ -538,6 +538,7 @@ class _MessengerHomeState extends State<MessengerHome>
       MaterialPageRoute(
         settings: RouteSettings(name: '/settings'),
         builder: (context) => SettingsPage(
+          identityService: widget.identityService,
           nativeCore: widget.nativeCore,
           veilidService: widget.veilidService,
           privacySettings: widget.privacySettings,

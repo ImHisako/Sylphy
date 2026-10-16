@@ -353,7 +353,12 @@ jobs:
               exit 1
             }
           else
-            gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes --title "Sylphy $GITHUB_REF_NAME"
+            notes="docs/releases/${GITHUB_REF_NAME#v}.md"
+            if test -f "$notes"; then
+              gh release create "$GITHUB_REF_NAME" --draft --verify-tag --notes-file "$notes" --title "Sylphy $GITHUB_REF_NAME"
+            else
+              gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes --title "Sylphy $GITHUB_REF_NAME"
+            fi
           fi
           gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest

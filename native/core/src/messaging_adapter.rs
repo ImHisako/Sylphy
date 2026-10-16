@@ -29,6 +29,8 @@ use crate::{
 
 mod attachments;
 pub mod groups;
+#[cfg(test)]
+mod latency_tests;
 mod receipts;
 mod search;
 
@@ -40,6 +42,7 @@ const MAX_MESSAGE_STORE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CONTACTS: usize = 1024;
 const MAX_MESSAGES: usize = 100_000;
 const MAX_OUTBOX_DELIVERIES: usize = 4096;
+const MAX_OUTBOX_IN_FLIGHT: usize = 4;
 const MAX_ATTACHMENT_BYTES: usize = crate::blob_transport::MAX_ATTACHMENT_BYTES;
 const MAX_GROUP_INVITATION_BYTES: usize = 700 * 1024;
 const MAX_ATTACHMENT_NAME_CHARS: usize = 128;
@@ -336,6 +339,7 @@ static ALLOW_UNKNOWN_CONTACTS: OnceLock<Mutex<bool>> = OnceLock::new();
 static SYNC_LOCK: Mutex<()> = Mutex::new(());
 #[derive(Default)]
 struct PeerRefresh {
+    preferred: Option<String>,
     generation: u64,
     cursor: usize,
     next_attempt_ms: u64,
@@ -343,8 +347,26 @@ struct PeerRefresh {
 }
 static PEER_REFRESH: OnceLock<Mutex<PeerRefresh>> = OnceLock::new();
 type TransportResults = Vec<(PendingDelivery, bool)>;
-static OUTBOX_TRANSPORT: Mutex<Option<(u64, std::sync::mpsc::Receiver<TransportResults>)>> =
-    Mutex::new(None);
+struct OutboxTransport {
+    generation: u64,
+    in_flight: HashSet<String>,
+    completed: TransportResults,
+    sender: std::sync::mpsc::Sender<(PendingDelivery, bool)>,
+    receiver: std::sync::mpsc::Receiver<(PendingDelivery, bool)>,
+}
+impl OutboxTransport {
+    fn new(generation: u64) -> Self {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        Self {
+            generation,
+            in_flight: HashSet::new(),
+            completed: Vec::new(),
+            sender,
+            receiver,
+        }
+    }
+}
+static OUTBOX_TRANSPORT: Mutex<Option<OutboxTransport>> = Mutex::new(None);
 
 fn contact_store() -> &'static Mutex<ContactStore> {
     CONTACT_STORE.get_or_init(|| Mutex::new(ContactStore::default()))
@@ -987,7 +1009,7 @@ fn select_message_page<'a>(
 }
 
 pub fn add_contact(_legacy_display_name: &str, invitation_code: &str) -> CoreResult<Value> {
-    let (bundle, published_identity) = decode_invitation(invitation_code)?;
+    let (bundle, published_identity, discovery_code) = decode_invitation(invitation_code)?;
     // A contact name is identity data, not local input. It is covered by the
     // Ed25519 signature of PublishedIdentity and therefore cannot be replaced
     // by the person importing the invitation.
@@ -1027,7 +1049,7 @@ pub fn add_contact(_legacy_display_name: &str, invitation_code: &str) -> CoreRes
         bundle,
         published_identity: Some(published_identity),
         verified: false,
-        invitation_code: Some(invitation_code.trim().to_owned()),
+        invitation_code: Some(discovery_code),
         previous_bundles: Vec::new(),
     };
     let mut updated = store.contacts.clone();
@@ -1172,10 +1194,10 @@ pub fn create_group(
     let mut members = Vec::with_capacity(invitation_codes.len());
     let mut ids = HashSet::new();
     for code in invitation_codes {
-        let (_, published) = decode_invitation(code)?;
+        let (_, published, discovery_code) = decode_invitation(code)?;
         let mut member = group_member(published.ok_or(CoreError::VerificationFailed)?)?;
         if code.trim().starts_with("sylphy:VLD") || code.trim().starts_with("VLD") {
-            member.invitation_code = Some(code.trim().to_owned());
+            member.invitation_code = Some(discovery_code);
         }
         if member.identity.delivery_devices()?.iter().any(|device| {
             !device
@@ -1421,7 +1443,9 @@ fn send_text_with(
             .ok_or(CoreError::FeatureUnavailable)?
     };
     let recipient = refreshed_recipient(conversation_id)?;
-    let (deliveries, message_id) = secure_packet::seal_for_all(&recipient, plaintext)?;
+    let mut id_bytes = [0_u8; 16];
+    OsRng.fill_bytes(&mut id_bytes);
+    let (deliveries, message_id) = seal(&recipient, plaintext, &id_bytes)?;
     let now_ms = current_time_ms()?;
     let message = StoredMessage {
         id: message_id.clone(),
@@ -2036,6 +2060,31 @@ fn refresh_contact_directory() {
     if let Some(receiver) = &refresh.receiver {
         match receiver.try_recv() {
             Ok((id, Ok(published))) => {
+                let previous = store
+                    .contacts
+                    .iter()
+                    .find(|contact| contact.id == id)
+                    .and_then(|contact| contact.published_identity.clone())
+                    .or_else(|| {
+                        store
+                            .groups
+                            .iter()
+                            .flat_map(|group| &group.members)
+                            .find(|member| member.id == id)
+                            .map(|member| member.identity.clone())
+                    });
+                if let Some(previous) = previous {
+                    let mut outbox = store.outbox.clone();
+                    if reroute_pending_deliveries(&mut outbox, &previous, &published)
+                        .unwrap_or(false)
+                    {
+                        if let Some(path) = &store.outbox_path {
+                            if persist_outbox(path, &outbox).is_ok() {
+                                store.outbox = outbox;
+                            }
+                        }
+                    }
+                }
                 let mut contacts = store.contacts.clone();
                 if let Some(contact) = contacts.iter_mut().find(|contact| contact.id == id) {
                     let changed = contact
@@ -2087,7 +2136,10 @@ fn refresh_contact_directory() {
     if contacts.is_empty() {
         return;
     }
-    let (id, invitation) = contacts[refresh.cursor % contacts.len()].clone();
+    let preferred = refresh.preferred.take();
+    let (id, invitation) = preferred
+        .and_then(|id| contacts.iter().find(|(known, _)| known == &id).cloned())
+        .unwrap_or_else(|| contacts[refresh.cursor % contacts.len()].clone());
     refresh.cursor = refresh.cursor.wrapping_add(1);
     refresh.next_attempt_ms = now.saturating_add(10_000);
     let (sender, receiver) = mpsc::channel();
@@ -2095,6 +2147,7 @@ fn refresh_contact_directory() {
         .name("sylphy-contact-refresh".to_owned())
         .spawn(move || {
             let _ = sender.send((id, veilid_adapter::resolve_identity(&invitation)));
+            crate::activity_events::notify();
         })
         .is_ok()
     {
@@ -2664,36 +2717,34 @@ fn queue_outgoing(
     store.messages.push(message);
     store.revision = store.revision.wrapping_add(1);
     let _ = compact_message_log_if_needed(&mut store);
+    let generation = store.generation;
+    drop(store);
+    // Ciphertext and its local read model are durable before any network handoff.
+    // Start now rather than waiting for the next three-second inbox poll.
+    let _ = poll_current_outbox(generation, None);
+    crate::activity_events::notify();
     Ok(())
 }
 
 fn flush_outbox(only_message_id: Option<&str>) -> bool {
     let now = current_time_ms().unwrap_or(0);
-    let (generation, pending) = match contact_store().lock() {
-        Ok(store) => (
-            store.generation,
-            store
-                .outbox
-                .iter()
-                .filter(|item| only_message_id.is_none_or(|id| item.message_id == id))
-                .filter(|item| item.next_attempt_ms <= now)
-                .take(4)
-                .cloned()
-                .collect::<Vec<_>>(),
-        ),
+    let generation = match contact_store().lock() {
+        Ok(store) => store.generation,
         Err(_) => return false,
     };
-    let Some(results) = poll_outbox_transport(generation, pending) else {
+    let Some(results) = poll_current_outbox(generation, only_message_id) else {
         return false;
     };
     let mut delivered_ids = HashSet::new();
     let mut delivered_counts: HashMap<String, usize> = HashMap::new();
     let mut failed_ids = HashSet::new();
+    let mut failed_routes = HashMap::new();
     for (item, delivered) in results {
         if delivered {
             delivered_ids.insert(item.id);
             *delivered_counts.entry(item.message_id).or_default() += 1;
         } else {
+            failed_routes.insert(item.id.clone(), item.route_blob);
             failed_ids.insert(item.id);
         }
     }
@@ -2719,7 +2770,11 @@ fn flush_outbox(only_message_id: Option<&str>) -> bool {
         for entry in &mut retained {
             if failed_ids.contains(&entry.id) {
                 entry.attempts = entry.attempts.saturating_add(1);
-                entry.next_attempt_ms = now.saturating_add(retry_delay_ms(entry.attempts));
+                entry.next_attempt_ms = if failed_routes.get(&entry.id) != Some(&entry.route_blob) {
+                    0 // A signed endpoint refresh superseded the failed worker's route.
+                } else {
+                    now.saturating_add(retry_delay_ms(entry.attempts))
+                };
             }
         }
         let delivered_messages = delivered_counts
@@ -2771,6 +2826,27 @@ fn flush_outbox(only_message_id: Option<&str>) -> bool {
     let Ok(sync_events) = sync_events else {
         return false;
     };
+    // Only acknowledge worker results after persisting the new outbox state.
+    // A storage failure keeps the result available for the next sync attempt.
+    acknowledge_outbox_results(generation, &delivered_ids, &failed_ids);
+    if !failed_ids.is_empty() {
+        let preferred = contact_store().lock().ok().and_then(|store| {
+            store
+                .outbox
+                .iter()
+                .find(|item| failed_ids.contains(&item.id))
+                .and_then(|item| {
+                    store
+                        .messages
+                        .iter()
+                        .find(|message| message.id == item.message_id)
+                        .map(|message| message.conversation_id.clone())
+                })
+        });
+        request_contact_refresh(preferred);
+        crate::activity_events::notify();
+    }
+    let _ = poll_current_outbox(generation, only_message_id);
     for event in sync_events {
         queue_device_sync(&event);
     }
@@ -2782,41 +2858,35 @@ fn flush_outbox(only_message_id: Option<&str>) -> bool {
     })
 }
 
-// Only network work runs on this thread. Vault mutations are applied by the
-// next sync command, after checking the account generation. Slow/offline peers
-// therefore cannot monopolize Flutter's native command queue.
-fn poll_outbox_transport(
-    generation: u64,
-    pending: Vec<PendingDelivery>,
-) -> Option<TransportResults> {
-    use std::sync::mpsc::{self, TryRecvError};
-    let mut active = OUTBOX_TRANSPORT.lock().ok()?;
-    if let Some((previous, receiver)) = active.as_ref() {
-        if *previous == generation {
-            match receiver.try_recv() {
-                Ok(results) => {
-                    // Keep collecting this batch: each destination reports
-                    // independently, without waiting for slower/offline peers.
-                    return Some(results);
-                }
-                Err(TryRecvError::Empty) => return None,
-                Err(TryRecvError::Disconnected) => {}
+// Network workers never mutate account storage. Completed results stay buffered
+// until the command thread commits them, and each free slot can serve a new
+// message without waiting for the slowest destination in a previous batch.
+fn poll_current_outbox(generation: u64, only_message_id: Option<&str>) -> Option<TransportResults> {
+    poll_outbox_transport_with(
+        generation,
+        |in_flight, capacity| {
+            let Ok(store) = contact_store().lock() else {
+                return Vec::new();
+            };
+            if store.generation != generation {
+                return Vec::new();
             }
-        }
-        *active = None;
-    }
-    if pending.is_empty() {
-        return None;
-    }
-    let (sender, receiver) = mpsc::channel();
-    std::thread::Builder::new()
-        .name("sylphy-outbox".to_owned())
-        .spawn(move || {
-            std::thread::scope(|scope| {
-                for item in pending {
-                    let sender = sender.clone();
-                    scope.spawn(move || {
-                        let delivered = deliver_with_offline_fallback(
+            let now = current_time_ms().unwrap_or(0);
+            store
+                .outbox
+                .iter()
+                .filter(|item| only_message_id.is_none_or(|id| item.message_id == id))
+                .filter(|item| item.next_attempt_ms <= now && !in_flight.contains(&item.id))
+                .take(capacity)
+                .cloned()
+                .collect()
+        },
+        |item, sender| {
+            std::thread::Builder::new()
+                .name("sylphy-outbox".to_owned())
+                .spawn(move || {
+                    let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        deliver_with_offline_fallback(
                             || {
                                 veilid_adapter::deliver_payload(
                                     &item.route_blob,
@@ -2832,16 +2902,66 @@ fn poll_outbox_transport(
                                     },
                                 )
                             },
-                        );
-                        let _ = sender.send(vec![(item, delivered)]);
-                        crate::activity_events::notify();
-                    });
-                }
-            });
-        })
-        .ok()?;
-    *active = Some((generation, receiver));
-    None
+                        )
+                    }))
+                    .unwrap_or(false);
+                    let _ = sender.send((item, delivered));
+                    crate::activity_events::notify();
+                })
+                .is_ok()
+        },
+    )
+}
+
+fn poll_outbox_transport_with(
+    generation: u64,
+    select: impl FnOnce(&HashSet<String>, usize) -> Vec<PendingDelivery>,
+    mut spawn: impl FnMut(PendingDelivery, std::sync::mpsc::Sender<(PendingDelivery, bool)>) -> bool,
+) -> Option<TransportResults> {
+    let mut state = OUTBOX_TRANSPORT.lock().ok()?;
+    if state
+        .as_ref()
+        .is_none_or(|state| state.generation != generation)
+    {
+        *state = Some(OutboxTransport::new(generation));
+    }
+    let state = state.as_mut()?;
+    while let Ok(result) = state.receiver.try_recv() {
+        state.completed.push(result);
+    }
+    let capacity = MAX_OUTBOX_IN_FLIGHT.saturating_sub(state.in_flight.len());
+    for item in select(&state.in_flight, capacity)
+        .into_iter()
+        .take(capacity)
+    {
+        let id = item.id.clone();
+        if !state.in_flight.contains(&id) && spawn(item, state.sender.clone()) {
+            state.in_flight.insert(id);
+        }
+    }
+    (!state.completed.is_empty()).then(|| state.completed.clone())
+}
+
+fn acknowledge_outbox_results(
+    generation: u64,
+    delivered: &HashSet<String>,
+    failed: &HashSet<String>,
+) {
+    let Ok(mut state) = OUTBOX_TRANSPORT.lock() else {
+        return;
+    };
+    let Some(state) = state
+        .as_mut()
+        .filter(|state| state.generation == generation)
+    else {
+        return;
+    };
+    state
+        .completed
+        .retain(|(item, _)| !delivered.contains(&item.id) && !failed.contains(&item.id));
+    state
+        .in_flight
+        .retain(|id| !delivered.contains(id) && !failed.contains(id));
 }
 
 fn deliver_with_offline_fallback(
@@ -2853,11 +2973,93 @@ fn deliver_with_offline_fallback(
     direct().is_ok() || offline().is_ok()
 }
 
+fn reroute_pending_deliveries(
+    outbox: &mut [PendingDelivery],
+    previous: &PublishedIdentity,
+    refreshed: &PublishedIdentity,
+) -> CoreResult<bool> {
+    refreshed.validate()?;
+    if previous.bundle.identity_ed25519 != refreshed.bundle.identity_ed25519
+        || refreshed.bundle.expires_at_ms <= current_time_ms()?
+    {
+        return Err(CoreError::VerificationFailed);
+    }
+    let old_devices = previous.delivery_devices()?;
+    let new_devices = refreshed.delivery_devices()?;
+    let mut changed = false;
+    for item in outbox {
+        let Some(old) = old_devices
+            .iter()
+            .find(|device| device.route_blob == item.route_blob)
+        else {
+            continue;
+        };
+        let Some(old_key) = &old.bundle.signal_pre_key else {
+            continue;
+        };
+        let Some(new) = new_devices.iter().find(|device| {
+            device.bundle.signal_pre_key.as_ref().is_some_and(|key| {
+                key.device_id == old_key.device_id && key.identity_key == old_key.identity_key
+            })
+        }) else {
+            continue;
+        };
+        if item.route_blob != new.route_blob {
+            item.route_blob = new.route_blob.clone();
+            item.next_attempt_ms = 0;
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+pub(crate) fn network_recovered() -> CoreResult<()> {
+    {
+        let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+        let mut outbox = store.outbox.clone();
+        let mut changed = false;
+        for item in &mut outbox {
+            if item.next_attempt_ms != 0 {
+                item.next_attempt_ms = 0;
+                changed = true;
+            }
+        }
+        if changed {
+            if let Some(path) = &store.outbox_path {
+                persist_outbox(path, &outbox)?;
+                store.outbox = outbox;
+            }
+        }
+    }
+    request_contact_refresh(None);
+    crate::activity_events::notify();
+    Ok(())
+}
+
+fn request_contact_refresh(preferred: Option<String>) {
+    if let Ok(mut refresh) = PEER_REFRESH
+        .get_or_init(|| Mutex::new(PeerRefresh::default()))
+        .lock()
+    {
+        refresh.next_attempt_ms = 0;
+        if preferred.is_some() {
+            refresh.preferred = preferred;
+        }
+    }
+}
+
 fn retry_delay_ms(attempts: u32) -> u64 {
     (5_000_u64 << attempts.saturating_sub(1).min(6)).min(300_000)
 }
 
 fn refreshed_recipient(conversation_id: &str) -> CoreResult<PublishedIdentity> {
+    refreshed_recipient_with(conversation_id, veilid_adapter::resolve_identity)
+}
+
+fn refreshed_recipient_with(
+    conversation_id: &str,
+    resolve: impl FnOnce(&str) -> CoreResult<PublishedIdentity>,
+) -> CoreResult<PublishedIdentity> {
     let (current, invitation, contact_path) = {
         let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
         let contact = store
@@ -2865,23 +3067,31 @@ fn refreshed_recipient(conversation_id: &str) -> CoreResult<PublishedIdentity> {
             .iter()
             .find(|contact| contact.id == conversation_id)
             .ok_or(CoreError::InvalidInput)?;
+        let current = contact
+            .published_identity
+            .clone()
+            .ok_or(CoreError::FeatureUnavailable)?;
+        if current.bundle.identity_ed25519 != contact.bundle.identity_ed25519 {
+            return Err(CoreError::VerificationFailed);
+        }
         (
-            contact
-                .published_identity
-                .clone()
-                .ok_or(CoreError::FeatureUnavailable)?,
+            current,
             contact.invitation_code.clone(),
             store.path.clone().ok_or(CoreError::FeatureUnavailable)?,
         )
     };
-    let Some(invitation) = invitation else {
+    if current.bundle.expires_at_ms > current_time_ms()? {
+        current.validate()?;
         return Ok(current);
+    }
+    let Some(invitation) = invitation else {
+        return Err(CoreError::VerificationFailed);
     };
-    let refreshed = match veilid_adapter::resolve_identity(&invitation) {
-        Ok(value) => value,
-        Err(_error) if current.bundle.expires_at_ms > current_time_ms()? => return Ok(current),
-        Err(error) => return Err(error),
-    };
+    let refreshed = resolve(&invitation)?;
+    refreshed.validate()?;
+    if refreshed.bundle.expires_at_ms <= current_time_ms()? {
+        return Err(CoreError::VerificationFailed);
+    }
     if refreshed.bundle.identity_ed25519 != current.bundle.identity_ed25519 {
         return Err(CoreError::VerificationFailed);
     }
@@ -3131,14 +3341,14 @@ fn same_contact(first: &StoredContact, second: &StoredContact) -> bool {
     }
 }
 
-fn decode_invitation(code: &str) -> CoreResult<(PublicBundle, Option<PublishedIdentity>)> {
+fn decode_invitation(code: &str) -> CoreResult<(PublicBundle, Option<PublishedIdentity>, String)> {
     let trimmed = code.trim();
     if trimmed.is_empty() || trimmed.len() > MAX_INVITATION_TEXT_BYTES {
         return Err(CoreError::InvalidInput);
     }
     if trimmed.starts_with("sylphy:VLD") || trimmed.starts_with("VLD") {
-        let published = veilid_adapter::resolve_identity(trimmed)?;
-        return Ok((published.bundle.clone(), Some(published)));
+        let (published, discovery) = veilid_adapter::resolve_invitation(trimmed)?;
+        return Ok((published.bundle.clone(), Some(published), discovery));
     }
     let normalized = trimmed.strip_prefix("sylphy:").unwrap_or(trimmed);
     let bytes = STANDARD_NO_PAD
@@ -3147,7 +3357,7 @@ fn decode_invitation(code: &str) -> CoreResult<(PublicBundle, Option<PublishedId
     let bundle: PublicBundle =
         serde_json::from_slice(&bytes).map_err(|_| CoreError::InvalidInput)?;
     bundle.validate()?;
-    Ok((bundle, None))
+    Ok((bundle, None, trimmed.to_owned()))
 }
 
 fn load_contacts(path: &Path, legacy_path: &Path) -> CoreResult<(Vec<StoredContact>, bool)> {
@@ -4744,13 +4954,24 @@ mod tests {
             let store = contact_store().lock().unwrap();
             (store.generation, store.outbox.clone())
         };
-        let (sender, receiver) = std::sync::mpsc::channel();
-        sender.send(vec![(pending[0].clone(), true)]).unwrap();
-        *OUTBOX_TRANSPORT.lock().unwrap() = Some((generation, receiver));
+        {
+            let transport = OUTBOX_TRANSPORT.lock().unwrap();
+            let transport = transport
+                .as_ref()
+                .expect("send starts without an inbox poll");
+            assert_eq!(transport.generation, generation);
+            assert!(
+                pending
+                    .iter()
+                    .all(|item| transport.in_flight.contains(&item.id))
+            );
+        }
+        let sender = mock_outbox_transport(generation, &pending);
+        sender.send((pending[0].clone(), true)).unwrap();
         assert!(!flush_outbox(Some("message-one")));
         assert_eq!(contact_store().lock().unwrap().outbox.len(), 1);
         // A late result must use the same receiver, never start a duplicate batch.
-        sender.send(vec![(pending[1].clone(), false)]).unwrap();
+        sender.send((pending[1].clone(), false)).unwrap();
         assert!(!flush_outbox(Some("message-one")));
         {
             let store = contact_store().lock().unwrap();
@@ -4761,18 +4982,19 @@ mod tests {
             let bytes = fs::read(store.outbox_path.as_ref().unwrap()).unwrap();
             assert!(!bytes.windows(11).any(|value| value == b"message-one"));
         }
+        network_recovered().unwrap();
         configure_storage(&root).unwrap();
         let mut store = contact_store().lock().unwrap();
         ensure_messages_loaded(&mut store).unwrap();
         assert_eq!(store.outbox.len(), 1);
+        assert_eq!(store.outbox[0].next_attempt_ms, 0);
         assert_eq!(store.outbox[0].payload, vec![8; 32]);
         assert_eq!(store.messages[0].delivery_state, "queued");
         let generation = store.generation;
         let pending = store.outbox[0].clone();
         drop(store);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        sender.send(vec![(pending, true)]).unwrap();
-        *OUTBOX_TRANSPORT.lock().unwrap() = Some((generation, receiver));
+        let sender = mock_outbox_transport(generation, &[pending.clone()]);
+        sender.send((pending, true)).unwrap();
         assert!(flush_outbox(Some("message-one")));
         configure_storage(&root).unwrap();
         let mut store = contact_store().lock().unwrap();
@@ -4789,6 +5011,19 @@ mod tests {
         );
         drop(store);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn mock_outbox_transport(
+        generation: u64,
+        pending: &[PendingDelivery],
+    ) -> std::sync::mpsc::Sender<(PendingDelivery, bool)> {
+        let mut state = OutboxTransport::new(generation);
+        state
+            .in_flight
+            .extend(pending.iter().map(|item| item.id.clone()));
+        let sender = state.sender.clone();
+        *OUTBOX_TRANSPORT.lock().unwrap() = Some(state);
+        sender
     }
 
     fn pending_delivery(message_id: &str) -> PendingDelivery {

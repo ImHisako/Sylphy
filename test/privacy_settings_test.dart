@@ -6,6 +6,28 @@ import 'package:sylphy/core/privacy/privacy_settings.dart';
 import 'package:sylphy/core/profile/user_profile.dart';
 
 void main() {
+  test(
+    'rotation defaults to manual and rejects malformed stored intervals',
+    () {
+      expect(const PrivacySettings().identityRotationHours, 0);
+      for (final value in [-1, 8761, '24', 1.5, true, null]) {
+        expect(
+          PrivacySettings.fromJson({
+            'version': 2,
+            'identity_rotation_hours': value,
+          }).identityRotationHours,
+          0,
+        );
+      }
+      expect(
+        PrivacySettings.fromJson({
+          'version': 2,
+          'identity_rotation_hours': 8760,
+        }).identityRotationHours,
+        8760,
+      );
+    },
+  );
   test('keyboard and theme preferences survive encrypted reload', () async {
     final directory = await Directory.systemTemp.createTemp(
       'sylphy-appearance-',
@@ -20,7 +42,9 @@ void main() {
       settings.value.copyWith(
         incognitoKeyboard: true,
         streamProof: true,
+        allowScreenshots: true,
         themeName: 'pink',
+        identityRotationHours: 13,
         sendReadReceipts: false,
       ),
     );
@@ -31,7 +55,9 @@ void main() {
     await restored.load();
     expect(restored.value.incognitoKeyboard, isTrue);
     expect(restored.value.streamProof, isTrue);
+    expect(restored.value.allowScreenshots, isTrue);
     expect(restored.value.themeName, 'pink');
+    expect(restored.value.identityRotationHours, 13);
     expect(restored.value.sendReadReceipts, isFalse);
     expect(restored.value.showReadReceipts, isTrue);
   });
@@ -50,6 +76,8 @@ void main() {
   test('accepts the first authenticated contact request by default', () {
     expect(const PrivacySettings().allowUnknownContacts, isTrue);
     expect(PrivacySettings.fromJson({'version': 2}).streamProof, isFalse);
+    expect(PrivacySettings.fromJson({'version': 2}).allowScreenshots, isFalse);
+    expect(PrivacySettings.failClosed.allowScreenshots, isFalse);
   });
 
   test('migrates the version 1 incoming-contact default to enabled', () {

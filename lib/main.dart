@@ -37,7 +37,9 @@ Future<void> main() async {
       action: 'framework_error',
       error: details.exception,
     );
-    FlutterError.presentError(details);
+    if (AppLog.instance.initialized && AppLog.instance.loggingEnabled) {
+      FlutterError.presentError(details);
+    }
   };
   PlatformDispatcher.instance.onError = (error, stack) {
     AppLog.instance.recordError(
@@ -118,6 +120,8 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   int _identityRetrySeconds = 6;
   bool _identityRetryInProgress = false;
   DateTime? _lastRouteRefresh;
+  Timer? _routeRefreshTimer;
+  bool _routeRefreshInProgress = false;
 
   @override
   void initState() {
@@ -200,6 +204,8 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       _localGeneration++;
       _identityRepublishTimer?.cancel();
       _identityRepublishTimer = null;
+      _routeRefreshTimer?.cancel();
+      _routeRefreshTimer = null;
       _nativeServicesReady = false;
       _identityService.suspendForLock();
       if (_bridge is SylphyMessagingBridge) {
@@ -275,28 +281,59 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       shareDisplayName: _privacySettings.value.shareDisplayName,
       shareProfilePhoto: _privacySettings.value.shareProfilePhoto,
       forceRefresh: forceRefresh,
+      rotationIntervalSeconds:
+          _privacySettings.value.identityRotationHours * 3600,
     );
     _scheduleShortInvitationRefresh();
   }
 
+  void _scheduleRouteRefresh(Duration delay) {
+    _routeRefreshTimer ??= Timer(delay, () {
+      _routeRefreshTimer = null;
+      if (mounted) _onRouteChanged();
+    });
+  }
+
   void _onRouteChanged() {
     if (!_nativeServicesReady ||
+        !_localDataAccessible ||
         _profile == null ||
+        _routeRefreshInProgress ||
         !_veilidService.snapshot.isAttached ||
         !_veilidService.snapshot.routeNeedsPublish) {
       return;
     }
     final now = DateTime.now();
-    if (_lastRouteRefresh != null &&
-        now.difference(_lastRouteRefresh!) < Duration(seconds: 15)) {
+    final elapsed = _lastRouteRefresh == null
+        ? const Duration(seconds: 2)
+        : now.difference(_lastRouteRefresh!);
+    if (elapsed < const Duration(seconds: 2)) {
+      _scheduleRouteRefresh(const Duration(seconds: 2) - elapsed);
       return;
     }
+    _routeRefreshTimer?.cancel();
+    _routeRefreshTimer = null;
     _lastRouteRefresh = now;
     _runGuarded(
-      _publishProfile(forceRefresh: true),
+      _refreshOwnRoute(),
       category: 'identity',
       action: 'route_republish_failed',
     );
+  }
+
+  Future<void> _refreshOwnRoute() async {
+    _routeRefreshInProgress = true;
+    try {
+      await _publishProfile(forceRefresh: true);
+      await _veilidService.refresh();
+    } finally {
+      _routeRefreshInProgress = false;
+      if (mounted &&
+          _localDataAccessible &&
+          _veilidService.snapshot.routeNeedsPublish) {
+        _scheduleRouteRefresh(const Duration(seconds: 5));
+      }
+    }
   }
 
   void _scheduleShortInvitationRefresh() {
@@ -531,6 +568,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _privacySettings.removeListener(_onPrivacyChanged);
     _veilidService.removeListener(_onRouteChanged);
+    _routeRefreshTimer?.cancel();
     _identityRepublishTimer?.cancel();
     if (_ownsVeilidService) {
       unawaited(_veilidService.stop());

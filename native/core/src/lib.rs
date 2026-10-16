@@ -13,6 +13,7 @@ pub mod error;
 pub mod ffi;
 pub mod hybrid;
 pub mod identity;
+mod invitation;
 pub mod messaging_adapter;
 mod offline_mailbox;
 pub mod peer_identity;
@@ -24,5 +25,5 @@ pub mod veilid_adapter;
 #[cfg(all(feature = "veilid", target_os = "android"))]
 mod android;
 
-pub const CORE_ABI_VERSION: u32 = 17;
+pub const CORE_ABI_VERSION: u32 = 20;
 pub const PROTOCOL_VERSION: u16 = 1;

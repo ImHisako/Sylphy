@@ -19,7 +19,9 @@ class PrivacySettings {
     this.reduceMotion = false,
     this.incognitoKeyboard = false,
     this.streamProof = false,
+    this.allowScreenshots = false,
     this.themeName = 'sylphy',
+    this.identityRotationHours = 0,
   });
 
   final bool shareProfilePhoto;
@@ -32,7 +34,11 @@ class PrivacySettings {
   final bool reduceMotion;
   final bool incognitoKeyboard;
   final bool streamProof;
+  final bool allowScreenshots;
   final String themeName;
+
+  /// Zero disables automatic changes; the manual action remains available.
+  final int identityRotationHours;
 
   static const failClosed = PrivacySettings(
     shareProfilePhoto: false,
@@ -55,7 +61,9 @@ class PrivacySettings {
     bool? reduceMotion,
     bool? incognitoKeyboard,
     bool? streamProof,
+    bool? allowScreenshots,
     String? themeName,
+    int? identityRotationHours,
   }) => PrivacySettings(
     shareProfilePhoto: shareProfilePhoto ?? this.shareProfilePhoto,
     shareDisplayName: shareDisplayName ?? this.shareDisplayName,
@@ -67,7 +75,9 @@ class PrivacySettings {
     reduceMotion: reduceMotion ?? this.reduceMotion,
     incognitoKeyboard: incognitoKeyboard ?? this.incognitoKeyboard,
     streamProof: streamProof ?? this.streamProof,
+    allowScreenshots: allowScreenshots ?? this.allowScreenshots,
     themeName: themeName ?? this.themeName,
+    identityRotationHours: identityRotationHours ?? this.identityRotationHours,
   );
 
   Map<String, Object> toJson() => {
@@ -82,13 +92,20 @@ class PrivacySettings {
     'reduce_motion': reduceMotion,
     'incognito_keyboard': incognitoKeyboard,
     'stream_proof': streamProof,
+    'allow_screenshots': allowScreenshots,
     'theme_name': themeName,
+    'identity_rotation_hours': identityRotationHours,
   };
 
   factory PrivacySettings.fromJson(Map<String, dynamic> json) {
     bool value(String key, bool fallback) =>
         json[key] is bool ? json[key] as bool : fallback;
+    final rotationHours = json['identity_rotation_hours'];
     return PrivacySettings(
+      identityRotationHours:
+          rotationHours is int && rotationHours >= 0 && rotationHours <= 8760
+          ? rotationHours
+          : 0,
       shareProfilePhoto: value('share_profile_photo', true),
       shareDisplayName: value('share_display_name', true),
       sendReadReceipts:
@@ -107,6 +124,7 @@ class PrivacySettings {
       reduceMotion: value('reduce_motion', false),
       incognitoKeyboard: value('incognito_keyboard', false),
       streamProof: value('stream_proof', false),
+      allowScreenshots: value('allow_screenshots', false),
       themeName: json['theme_name'] is String
           ? json['theme_name'] as String
           : 'sylphy',

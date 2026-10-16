@@ -1,5 +1,51 @@
 # Prestazioni della messaggistica
 
+Riconnessione e ricezione in background (ABI 20), strumento di misura e prove
+fisiche ancora da eseguire: [procedura](../docs/network-background-validation.md).
+
+## Invio immediato e destinatari lenti — 16 ottobre 2026
+
+`queue_outgoing` avvia i worker di trasporto appena ciphertext e messaggio
+locale sono persistenti. Prima dipendeva da un successivo `sync_inbound`: la UI
+lo richiedeva dopo la rilettura dei messaggi locali, oppure interveniva il timer
+Flutter di tre secondi. L'avvio di rete ora precede questi aggiornamenti della
+UI; non si deduce un risparmio fisso di tre secondi per ogni messaggio.
+Un risveglio senza contenuti aggiorna poi gli stati nell'interfaccia. Le ricevute
+autenticate continuano a distinguere invio al trasporto, consegna e lettura.
+
+Il trasporto mantiene al massimo quattro invii contemporanei. Ogni destinazione
+completa separatamente; uno slot libero può prendere un nuovo messaggio anche
+mentre un peer precedente è ancora lento o offline. Gli ID in corso impediscono
+la partenza di copie concorrenti dello stesso invio. Un risultato rimane in
+memoria finché il thread dei comandi non salva la nuova outbox: un errore di
+archiviazione non perde la conferma e non lascia il messaggio bloccato in coda.
+Il controllo della generazione separa i risultati fra account e dopo il wiper.
+Una saturazione di tutti e quattro gli slot richiede ancora il completamento
+di un tentativo; non vengono creati thread illimitati.
+
+Gli invii privati e gli allegati usano il record del destinatario già verificato
+quando la sua firma è valida e il bundle non è scaduto. Non richiedono più una
+lettura DHT sincrona per ogni messaggio. La directory continua ad aggiornare i
+contatti in background; il completamento di una lettura sveglia subito il ciclo
+di sincronizzazione. Un bundle scaduto deve essere recuperato dalla rete, avere
+una firma valida, essere ancora valido nel tempo e mantenere la stessa identità
+Ed25519 prima dell'uso. Non vengono accettate chiavi sostitutive o firme errate.
+Un endpoint modificato può quindi richiedere l'aggiornamento in background e
+un nuovo tentativo; non è garantito che il primo invio usi già la nuova rotta.
+
+Nella coda Flutter gli invii restano prioritari; la ripubblicazione dell'identità
+non passa più davanti agli invii interattivi già accodati. Un comando nativo già
+iniziato mantiene comunque la sua posizione fino al completamento.
+
+I test verificano avvio senza polling dopo il commit cifrato, prosecuzione con
+un peer lento, limite dei worker, assenza di duplicati, ripetizione dei risultati
+non ancora salvati, cambio account, errori di avvio dei thread e uso dei bundle
+locali con rifiuto di scadenze, firme e identità non valide. Il test di restart
+verifica ancora outbox cifrata, retry parziale e cancellazione persistente.
+Questi controlli dimostrano la rimozione delle attese applicative; non misurano
+la latenza end-to-end su Veilid o su telefoni reali. I parametri crittografici,
+la persistenza prima dell'invio e il backoff dei tentativi falliti restano attivi.
+
 ## Avvio e ripubblicazione dell’identità (ABI 17)
 
 La sessione nativa conserva l’identità già autenticata, il percorso del suo vault

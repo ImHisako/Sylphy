@@ -914,7 +914,14 @@ void main() {
   ) async {
     await tester.binding.setSurfaceSize(const Size(390, 844));
     addTearDown(() => tester.binding.setSurfaceSize(null));
-    addTearDown(() => AppLog.instance.setVerboseEnabled(false));
+    addTearDown(() async {
+      await AppLog.instance.setLoggingEnabled(false);
+      await AppLog.instance.setVerboseEnabled(false);
+    });
+    await tester.runAsync(() async {
+      await AppLog.instance.initialize();
+      await AppLog.instance.setLoggingEnabled(true);
+    });
     await tester.pumpWidget(SylphyApp(profileStore: _completedProfileStore()));
     await tester.pumpAndSettle();
 
@@ -927,6 +934,10 @@ void main() {
       400,
       scrollable: find.byType(Scrollable).first,
     );
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('settings-section-diagnostics')),
+    );
+    await tester.pumpAndSettle();
     await tester.tap(
       find.byKey(const ValueKey('settings-section-diagnostics')),
     );
@@ -944,9 +955,23 @@ void main() {
       -250,
       scrollable: find.byType(Scrollable).first,
     );
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('developer-logging-switch')));
-    await tester.pump();
+    await tester.pumpAndSettle();
     expect(AppLog.instance.verboseEnabled, isTrue);
+
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('basic-logging-switch')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('basic-logging-switch')));
+    await tester.pumpAndSettle();
+    expect(AppLog.instance.loggingEnabled, isFalse);
+    final detailed = tester.widget<SwitchListTile>(
+      find.byKey(const ValueKey('developer-logging-switch')),
+    );
+    expect(detailed.value, isFalse);
+    expect(detailed.onChanged, isNull);
   });
 
   testWidgets('starts closed without demonstration conversations', (

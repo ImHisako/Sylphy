@@ -31,6 +31,13 @@ enum CoreRequest {
         passphrase: String,
         device_secret: String,
     },
+    PrepareDisablePassphrase {
+        passphrase: String,
+    },
+    DisablePassphrase {
+        passphrase: String,
+        device_secret: String,
+    },
     UnlockVault {
         passphrase: String,
     },
@@ -174,6 +181,10 @@ enum CoreRequest {
         verified: bool,
     },
     EnsureIdentity {
+        #[serde(default)]
+        rotation_interval_seconds: Option<u64>,
+        #[serde(default)]
+        rotate_invitation: bool,
         storage_directory: String,
         vault_password: String,
         #[serde(default)]
@@ -421,6 +432,26 @@ fn dispatch_request(request: CoreRequest) -> Result<CoreResponse, CoreError> {
                 ok: true,
                 code: "ok",
                 data: app_security::enable(&passphrase, &device_secret)?,
+            })
+        }
+        CoreRequest::PrepareDisablePassphrase { passphrase } => {
+            let passphrase = zeroize::Zeroizing::new(passphrase);
+            Ok(CoreResponse {
+                ok: true,
+                code: "ok",
+                data: app_security::prepare_disable(&passphrase)?,
+            })
+        }
+        CoreRequest::DisablePassphrase {
+            passphrase,
+            device_secret,
+        } => {
+            let passphrase = zeroize::Zeroizing::new(passphrase);
+            let device_secret = zeroize::Zeroizing::new(device_secret);
+            Ok(CoreResponse {
+                ok: true,
+                code: "ok",
+                data: app_security::disable(&passphrase, &device_secret)?,
             })
         }
         CoreRequest::UnlockVault { passphrase } => {
@@ -688,6 +719,8 @@ fn dispatch_request(request: CoreRequest) -> Result<CoreResponse, CoreError> {
             data: messaging_adapter::set_contact_verified(&conversation_id, verified)?,
         }),
         CoreRequest::EnsureIdentity {
+            rotation_interval_seconds,
+            rotate_invitation,
             storage_directory,
             vault_password,
             display_name,
@@ -698,11 +731,13 @@ fn dispatch_request(request: CoreRequest) -> Result<CoreResponse, CoreError> {
             Ok(CoreResponse {
                 ok: true,
                 code: "ok",
-                data: identity::ensure_identity(
+                data: identity::ensure_identity_with_rotation(
                     &storage_directory,
                     &vault_password,
                     display_name,
                     avatar_base64,
+                    rotation_interval_seconds,
+                    rotate_invitation,
                 )?,
             })
         }

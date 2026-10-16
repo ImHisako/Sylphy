@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../storage/atomic_file.dart';
@@ -45,7 +46,13 @@ class AppLogEntry {
 /// It records action names and result codes, never message bodies, invitation
 /// codes, passwords, keys, file contents, or native request payloads.
 class AppLog extends ChangeNotifier {
-  AppLog._();
+  AppLog._({Future<Directory> Function()? supportDirectory})
+    : _supportDirectory = supportDirectory ?? getApplicationSupportDirectory;
+
+  @visibleForTesting
+  factory AppLog.forTesting({
+    required Future<Directory> Function() supportDirectory,
+  }) => AppLog._(supportDirectory: supportDirectory);
 
   static final AppLog instance = AppLog._();
   static const int _maxEntries = 1000;
@@ -53,23 +60,27 @@ class AppLog extends ChangeNotifier {
   static const String _logFileName = 'sylphy-diagnostics.jsonl';
 
   final List<AppLogEntry> _entries = [];
+  final Future<Directory> Function() _supportDirectory;
   File? _settingsFile;
   File? _logFile;
   bool _verboseEnabled = false;
+  bool _loggingEnabled = false;
   bool _initialized = false;
+  int _loggingGeneration = 0;
+  Future<void>? _initialization;
   Future<void> _writeQueue = Future.value();
 
   List<AppLogEntry> get entries => List.unmodifiable(_entries);
   bool get verboseEnabled => _verboseEnabled;
+  bool get loggingEnabled => _loggingEnabled;
   bool get initialized => _initialized;
   String? get logFilePath => _logFile?.path;
 
-  Future<void> initialize() async {
-    if (_initialized) {
-      return;
-    }
+  Future<void> initialize() => _initialization ??= _initialize();
+
+  Future<void> _initialize() async {
     try {
-      final supportDirectory = await getApplicationSupportDirectory();
+      final supportDirectory = await _supportDirectory();
       final diagnosticsDirectory = Directory(
         '${supportDirectory.path}${Platform.pathSeparator}diagnostics',
       );
@@ -81,13 +92,21 @@ class AppLog extends ChangeNotifier {
       _logFile = File(
         '${diagnosticsDirectory.path}${Platform.pathSeparator}$_logFileName',
       );
-      if (await _settingsFile!.exists()) {
-        final decoded = jsonDecode(await _settingsFile!.readAsString());
+      final recovered = await recoverFile(_settingsFile!);
+      if (recovered != null) {
+        final decoded = jsonDecode(await recovered.readAsString());
         if (decoded is Map<String, dynamic>) {
           _verboseEnabled = decoded['verbose_logging'] == true;
+          _loggingEnabled = decoded['logging_enabled'] == true;
         }
       }
       _initialized = true;
+      await _syncPlatformLogging();
+      if (!_loggingEnabled) {
+        _entries.clear();
+        notifyListeners();
+        return;
+      }
       for (final entry in List<AppLogEntry>.of(_entries)) {
         if (_verboseEnabled || entry.level == AppLogLevel.error) {
           _appendToDisk(entry);
@@ -110,6 +129,7 @@ class AppLog extends ChangeNotifier {
   }
 
   Future<void> setVerboseEnabled(bool value) async {
+    if (!_initialized) await initialize();
     if (_verboseEnabled == value) {
       return;
     }
@@ -120,13 +140,45 @@ class AppLog extends ChangeNotifier {
       force: true,
     );
     notifyListeners();
+    await _persistSettings();
+  }
+
+  Future<void> setLoggingEnabled(bool value) async {
+    if (!_initialized) await initialize();
+    if (_loggingEnabled == value) return;
+    _loggingEnabled = value;
+    _loggingGeneration++;
+    notifyListeners();
+    await _syncPlatformLogging();
+    await _persistSettings();
+    // Any write already in flight must finish before disabling returns.
+    if (_logFile != null) await _writeQueue;
+  }
+
+  Future<void> _syncPlatformLogging() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await const MethodChannel(
+        'sylphy/platform',
+      ).invokeMethod<void>('setDiagnosticLogging', _loggingEnabled);
+    } on Object {
+      /* Logging must never block startup. */
+    }
+  }
+
+  Future<void> _persistSettings() async {
     final settingsFile = _settingsFile;
     if (settingsFile != null) {
       try {
         await writeFileRecoverably(
           settingsFile,
           Uint8List.fromList(
-            utf8.encode(jsonEncode({'verbose_logging': value})),
+            utf8.encode(
+              jsonEncode({
+                'logging_enabled': _loggingEnabled,
+                'verbose_logging': _verboseEnabled,
+              }),
+            ),
           ),
         );
       } on Object {
@@ -143,6 +195,7 @@ class AppLog extends ChangeNotifier {
     bool verbose = false,
     bool force = false,
   }) {
+    if (!_loggingEnabled) return;
     if (verbose && !_verboseEnabled && !force) {
       return;
     }
@@ -161,7 +214,7 @@ class AppLog extends ChangeNotifier {
     if (_verboseEnabled || level == AppLogLevel.error || force) {
       _appendToDisk(entry);
     }
-    if (kDebugMode) {
+    if (kDebugMode && _initialized) {
       debugPrint(entry.formatted);
     }
   }
@@ -185,6 +238,7 @@ class AppLog extends ChangeNotifier {
       'Sylphy diagnostics',
       'generated=${DateTime.now().toUtc().toIso8601String()}',
       'platform=${Platform.operatingSystem}',
+      'logging_enabled=$_loggingEnabled',
       'verbose_logging=$_verboseEnabled',
       'privacy=payloads_and_secrets_omitted',
       '',
@@ -209,14 +263,17 @@ class AppLog extends ChangeNotifier {
 
   void _appendToDisk(AppLogEntry entry) {
     final logFile = _logFile;
-    if (logFile == null) {
+    if (logFile == null || !_initialized || !_loggingEnabled) {
       return;
     }
+    final generation = _loggingGeneration;
     _writeQueue = _writeQueue
         .then((_) async {
+          if (!_loggingEnabled || generation != _loggingGeneration) return;
           if (await logFile.exists() && await logFile.length() > 1024 * 1024) {
             await logFile.writeAsString('', flush: true);
           }
+          if (!_loggingEnabled || generation != _loggingGeneration) return;
           await logFile.writeAsString(
             '${jsonEncode(entry.toJson())}\n',
             mode: FileMode.append,

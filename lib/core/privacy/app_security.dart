@@ -26,6 +26,7 @@ class AppSecurityController extends ChangeNotifier {
   bool locked = true;
   bool busy = false;
   String? error;
+  bool cleaning = false;
   int inactivitySeconds = 300;
   bool lockOnBackground = true;
   bool lockOnScreenOff = true;
@@ -60,6 +61,7 @@ class AppSecurityController extends ChangeNotifier {
         await _send({'command': 'lock_vault'});
         locked = true;
       } else {
+        await _secrets.recoverUnprotectedSecret();
         _accept(
           await _send({'command': 'resume_vault'}),
           generation: generation,
@@ -121,6 +123,47 @@ class AppSecurityController extends ChangeNotifier {
     }
   }
 
+  Future<void> disable(String passphrase) async {
+    if (busy || !loaded || !enabled || locked) return;
+    busy = true;
+    _notify();
+    final generation = _lockGeneration;
+    var commitAttempted = false;
+    try {
+      final prepared = await _send({
+        'command': 'prepare_disable_passphrase',
+        'passphrase': passphrase,
+      });
+      final secret = prepared.remove('device_secret');
+      if (secret is! String) throw StateError('invalid_security_response');
+      await _secrets.stageUnprotectedSecret(secret);
+      commitAttempted = true;
+      _accept(
+        await _send({
+          'command': 'disable_passphrase',
+          'passphrase': passphrase,
+          'device_secret': secret,
+        }),
+        generation: generation,
+      );
+      await _secrets.recoverUnprotectedSecret();
+      await _protectSnapshots();
+      _armTimer();
+    } on Object {
+      // Inspect committed native state before deciding how the staged key is
+      // recovered. Never delete the only key after an ambiguous commit result.
+      if (commitAttempted) {
+        await initialize();
+      } else {
+        await _secrets.removeLegacySecret();
+      }
+      rethrow;
+    } finally {
+      busy = false;
+      _notify();
+    }
+  }
+
   Future<void> unlock(String passphrase) async {
     if (busy || !loaded) return;
     busy = true;
@@ -133,6 +176,7 @@ class AppSecurityController extends ChangeNotifier {
         await _send({'command': 'unlock_vault', 'passphrase': passphrase}),
         generation: generation,
       );
+      await _protectSnapshots();
       if (locked) await lock();
       _armTimer();
     } on Object {
@@ -160,6 +204,7 @@ class AppSecurityController extends ChangeNotifier {
     _inactivityTimer?.cancel();
     _lastNativeTouch = null;
     locked = true;
+    cleaning = true;
     // A close must never be lost behind an in-progress, weaker lock.
     if (_pendingPurge != 'close_vault') _pendingPurge = command;
     _notify(); // Remove all routes and Flutter caches before waiting for FFI.
@@ -174,14 +219,30 @@ class AppSecurityController extends ChangeNotifier {
         await Future.wait<void>([
           _send({'command': command}).then<void>((_) {}),
           _wipePlatformBuffers(),
+          _protectSnapshots(),
+          _cleanupNotice('started'),
         ]);
+        await _cleanupNotice('completed');
         error = null;
       } on Object {
+        await _cleanupNotice('failed');
         error =
             'Pulizia nativa non completata. Il contenuto resta bloccato; riprova.';
       }
     }
+    cleaning = false;
     _notify();
+  }
+
+  Future<void> _cleanupNotice(String state) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await const MethodChannel(
+        'sylphy/platform',
+      ).invokeMethod<void>('memoryCleanupStatus', state);
+    } on Object {
+      // Notification permission must never prevent revocation or cleanup.
+    }
   }
 
   Future<void> updatePolicy({
@@ -238,6 +299,7 @@ class AppSecurityController extends ChangeNotifier {
       } else if (locked && !wasLocked) {
         await lock();
       }
+      await _protectSnapshots();
       _notify();
     } on Object {
       await close();
@@ -278,7 +340,7 @@ class AppSecurityController extends ChangeNotifier {
     if (Platform.isAndroid) {
       await const MethodChannel(
         'sylphy/platform',
-      ).invokeMethod<void>('setVaultProtected', enabled);
+      ).invokeMethod<void>('setVaultProtected', locked);
     }
   }
 

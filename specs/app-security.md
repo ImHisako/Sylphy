@@ -1,4 +1,4 @@
-# Protezione locale e blocco dell’app (ABI 17)
+# Protezione locale e blocco dell’app (ABI 18)
 
 La protezione con passphrase si attiva da **Impostazioni → Sicurezza locale**.
 Usa il vault Argon2id/XChaCha20-Poly1305 esistente, senza introdurre SQLite o
@@ -29,6 +29,26 @@ risolvono la chiave esclusivamente dalla sessione nativa sbloccata. Anche fornir
 il vecchio segreto a questi comandi quando il vault è bloccato viene rifiutato.
 Non esistono recupero della passphrase o disattivazione automatica della protezione.
 I backup account esportati conservano la propria password di trasferimento.
+
+## Rimozione volontaria della passphrase
+
+Toccando la protezione attiva si può disattivarla confermando la passphrase
+attuale. I dati restano cifrati: viene ripristinata la chiave casuale originale
+nel secure storage del dispositivo, senza riscrivere identità, chat o allegati.
+`prepare_disable_passphrase` verifica la passphrase e restituisce la chiave
+soltanto per questa transizione esplicita, a vault sbloccato. Flutter la salva
+nel campo temporaneo `sylphy_pending_unprotect_secret_v1` e ne verifica la rilettura
+prima di invocare `disable_passphrase` con la medesima chiave e passphrase.
+Il core ricontrolla entrambe e sostituisce atomicamente il documento con `null`.
+Flutter promuove poi la chiave al campo ordinario del secure storage.
+
+Al riavvio un documento ancora protetto mantiene la richiesta di passphrase e
+rimuove la copia temporanea. Un documento `null` fa recuperare la chiave temporanea
+prima di aprire i dati. Una risposta persa dopo il commit richiede una nuova
+lettura del documento dal disco, senza cancellare alla cieca la chiave residua.
+La passphrase e questa risposta speciale non sono inserite nei log. Durante la
+transizione il plugin secure storage richiede una copia temporanea della chiave
+in Dart, soggetta ai limiti di azzeramento delle stringhe immutabili.
 
 ## Blocco automatico
 
@@ -84,7 +104,12 @@ non impedisce il tentativo sugli altri sottosistemi principali.
 Flutter distrugge il sottoalbero del Navigator (incluse finestre, ricerca e bozze),
 rimuove i riferimenti al profilo e alle conversazioni, azzera i buffer mutabili
 degli allegati in cache e svuota la cache immagini. Android usa `FLAG_SECURE`
-in modalità protetta per escludere screenshot e anteprime recenti.
+all'avvio, al blocco e in background. In **Privacy del profilo → Consenti
+screenshot dell’app** l'utente può autorizzare le catture soltanto a sessione
+sbloccata e in primo piano; la preferenza è cifrata e disattivata per default.
+La finestra resta protetta finché il sistema non conferma la preferenza.
+La notifica di avvio pulizia viene richiesta insieme alla revoca nativa,
+senza ritardarla aspettando prima la risposta della piattaforma.
 I buffer Android di un’esportazione in attesa vengono azzerati e il salvataggio
 viene annullato se l’app si blocca prima della scelta della destinazione.
 
@@ -101,13 +126,27 @@ corso, allocator, GPU, tastiera e sistema operativo possono conservare copie.
 `zeroize` protegge le allocazioni possedute dal core, non copie già create altrove.
 La protezione non cancella i dati persistenti né i file esportati dall’utente.
 
-Sono stati esaminati `KeyCachingService` e
-[`WipeMemoryService` di Molly, commit 892d6264](https://github.com/mollyim/mollyim-android/blob/892d6264ba007b5458a8b74cf9183c665f1f17a1/app/src/main/java/org/thoughtcrime/securesms/service/WipeMemoryService.java).
-Sylphy adotta la revoca dell’accesso prima della pulizia, adattata al proprio
-core Rust e al servizio P2P. Il wiper di Molly usa anche un processo dedicato e
-allocazioni di pagine libere. Sylphy sovrascrive le proprie allocazioni sensibili;
-non satura la memoria libera del dispositivo e non dichiara di cancellare tutta
-la RAM del sistema.
+### Passaggio aggiuntivo sulle pagine libere Android
+
+Il riferimento è [`WipeMemoryService` di Molly, commit 892d6264](https://github.com/mollyim/mollyim-android/blob/892d6264ba007b5458a8b74cf9183c665f1f17a1/app/src/main/java/org/thoughtcrime/securesms/service/WipeMemoryService.java).
+Dopo la revoca e l’azzeramento dei buffer del core, Sylphy avvia
+`MemoryWipeService` nel processo separato `:ram_wiper`. Il servizio mantiene
+blocchi diretti da massimo 4 MiB, ne sovrascrive esplicitamente i byte e conserva
+una riserva pari a due volte la soglia di memoria bassa indicata da Android.
+Si ferma per pressione di memoria, errori di allocazione o dopo 20 secondi.
+Una wake lock scade comunque dopo 30 secondi. La distruzione del solo processo
+wiper rilascia tutte le allocazioni; il processo messenger non viene terminato.
+È un adattamento del passaggio sulle pagine libere di Molly, non una garanzia di
+cancellazione di heap ancora allocati, copie GPU o di tutta la RAM del dispositivo.
+
+La notifica mostra prima un caricamento durante la pulizia dei buffer, poi un
+avanzamento basato sui byte trattati rispetto alla memoria libera iniziale e lo
+stato finale con i MiB trattati. Interruzioni e mancato avvio del servizio vengono
+indicati senza dichiarare completata la pulizia approfondita. Se Android vieta
+l’avvio di un foreground service in background, resta eseguita la pulizia dei
+buffer nel processo principale. Il permesso notifiche non condiziona la revoca
+né il tentativo di pulizia; senza tale permesso la notifica può non comparire.
+Anche la schermata di blocco mostra il caricamento mentre il core lavora.
 
 ## Verifica
 

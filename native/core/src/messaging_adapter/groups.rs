@@ -1075,7 +1075,7 @@ fn apply_request(mut group: StoredGroup, request: &Request) -> CoreResult<()> {
                 recipients.push(candidate.clone());
             }
             for code in invitation_codes {
-                let (_, identity) = decode_invitation(code)?;
+                let (_, identity, discovery_code) = decode_invitation(code)?;
                 let mut member = group_member(identity.ok_or(CoreError::VerificationFailed)?)?;
                 if member.id == local_id()?
                     || group
@@ -1085,7 +1085,7 @@ fn apply_request(mut group: StoredGroup, request: &Request) -> CoreResult<()> {
                 {
                     return Err(CoreError::InvalidInput);
                 }
-                member.invitation_code = Some(code.trim().to_owned());
+                member.invitation_code = Some(discovery_code);
                 group.management.departed.remove(&member.id);
                 group.members.push(member.clone());
                 recipients.push(member);

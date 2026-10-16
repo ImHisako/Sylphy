@@ -9,7 +9,7 @@ import 'package:ffi/ffi.dart';
 
 import '../diagnostics/app_log.dart';
 
-const _expectedAbiVersion = 17;
+const _expectedAbiVersion = 20;
 
 /// A local group read may race an account transition on the other worker.
 /// Retry once through that worker's queue, after the transition completes.
@@ -542,12 +542,17 @@ class NativeCoreClient
   }
 
   Future<NativeCoreResponse> ensureIdentityInBackground({
+    int? rotationIntervalSeconds,
+    bool rotateInvitation = false,
     required String storageDirectory,
     required String vaultPassword,
     String? displayName,
     String? avatarBase64,
   }) => _callInBackground({
     'command': 'ensure_identity',
+    if (rotationIntervalSeconds != null)
+      'rotation_interval_seconds': rotationIntervalSeconds,
+    'rotate_invitation': rotateInvitation,
     'storage_directory': storageDirectory,
     'vault_password': vaultPassword,
     if (displayName != null) 'display_name': displayName,
@@ -638,8 +643,7 @@ class NativeCoreClient
       command == 'send_channel_attachment' ||
       command == 'group_action' ||
       command == 'mark_channel_read' ||
-      command == 'mark_conversation_read' ||
-      command == 'ensure_identity';
+      command == 'mark_conversation_read';
 
   void _drainBackgroundCalls() {
     if (_workerBusy) return;

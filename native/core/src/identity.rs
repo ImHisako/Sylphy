@@ -48,6 +48,8 @@ pub(crate) struct IdentityRecord {
     mailbox_descriptor_json: Option<String>,
     #[serde(default)]
     retired_prekeys: Vec<RetiredPrekeys>,
+    #[serde(default)]
+    invitation: crate::invitation::InvitationState,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -93,6 +95,7 @@ impl IdentityRecord {
             dht_descriptor_json: None,
             mailbox_descriptor_json: None,
             retired_prekeys: Vec::new(),
+            invitation: Default::default(),
         }
     }
 
@@ -114,6 +117,7 @@ impl IdentityRecord {
     }
 
     fn validate(&self) -> CoreResult<()> {
+        self.invitation.validate()?;
         if self.version != IDENTITY_RECORD_VERSION
             || self.signing_secret.len() != ED25519_LENGTH
             || self.x25519_secret.len() != X25519_SECRET_LENGTH
@@ -219,6 +223,32 @@ fn cached_record(path: &Path, password: &str) -> CoreResult<Option<IdentityRecor
         .map(|active| active.record.clone()))
 }
 
+/// Background recovery reuses the already-unlocked session and public profile.
+/// Caller holds the command and exclusive account gates; this never opens a vault.
+#[cfg(all(feature = "veilid", target_os = "android"))]
+pub(crate) fn republish_active_identity() -> CoreResult<()> {
+    let active = active_identity_store()
+        .lock()
+        .map_err(|_| CoreError::Internal)?
+        .as_ref()
+        .cloned()
+        .ok_or(CoreError::VaultLocked)?;
+    let directory = active
+        .path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::to_str)
+        .ok_or(CoreError::InvalidInput)?;
+    let profile = crate::peer_identity::current_public_profile();
+    ensure_identity(
+        directory,
+        &active.password,
+        profile.display_name,
+        profile.avatar_base64,
+    )?;
+    Ok(())
+}
+
 pub(crate) fn active_dht_descriptor() -> CoreResult<Option<String>> {
     Ok(active_identity()?.dht_descriptor_json.clone())
 }
@@ -234,9 +264,12 @@ pub(crate) fn import_account_record(
 ) -> CoreResult<()> {
     validate_inputs(storage_directory, vault_password)?;
     crate::account_backup::recover_pending_import(Path::new(storage_directory))?;
-    let record: IdentityRecord =
+    let mut record: IdentityRecord =
         serde_json::from_value(value).map_err(|_| CoreError::VerificationFailed)?;
     record.validate()?;
+    // A linked/restored installation gets its own share record. It must never
+    // reactivate or revoke the source device's invitation after a rotation.
+    record.invitation = Default::default();
     let directory = PathBuf::from(storage_directory).join("identity");
     fs::create_dir_all(&directory).map_err(|_| CoreError::Internal)?;
     persist_record(&directory.join(IDENTITY_FILE_NAME), vault_password, &record)?;
@@ -339,6 +372,27 @@ pub fn ensure_identity(
     display_name: Option<String>,
     avatar_base64: Option<String>,
 ) -> CoreResult<Value> {
+    ensure_identity_with_rotation(
+        storage_directory,
+        vault_password,
+        display_name,
+        avatar_base64,
+        None,
+        false,
+    )
+}
+
+pub fn ensure_identity_with_rotation(
+    storage_directory: &str,
+    vault_password: &str,
+    display_name: Option<String>,
+    avatar_base64: Option<String>,
+    rotation_interval_seconds: Option<u64>,
+    rotate_invitation: bool,
+) -> CoreResult<Value> {
+    if let Some(seconds) = rotation_interval_seconds {
+        crate::invitation::validate_interval(seconds)?;
+    }
     validate_inputs(storage_directory, vault_password)?;
     let directory = PathBuf::from(storage_directory).join("identity");
     fs::create_dir_all(&directory).map_err(|_| CoreError::Internal)?;
@@ -409,7 +463,11 @@ pub fn ensure_identity(
     } else {
         crate::peer_identity::set_public_mailbox(None)?;
     }
-    if let Ok(route_blob) = crate::veilid_adapter::local_route_blob() {
+    let route = crate::veilid_adapter::local_route_blob();
+    if (rotate_invitation || rotation_interval_seconds.is_some_and(|s| s != 0)) && route.is_err() {
+        return Err(CoreError::NetworkStartupFailed);
+    }
+    if let Ok(route_blob) = route {
         let previous = record
             .dht_descriptor_json
             .as_deref()
@@ -441,25 +499,90 @@ pub fn ensure_identity(
             public_profile,
             None,
         )?;
-        if let Ok((short_code, descriptor)) = crate::veilid_adapter::publish_identity(
+        let publication = crate::veilid_adapter::publish_identity(
             record.dht_descriptor_json.as_deref(),
             &published,
-        ) {
-            invitation_code = short_code;
-            if record.dht_descriptor_json.as_deref() != Some(descriptor.as_str()) {
-                record.dht_descriptor_json = Some(descriptor);
-                should_persist = true;
-            }
+        );
+        if (rotate_invitation
+            || record.invitation.descriptor_json.is_some()
+            || rotation_interval_seconds.is_some_and(|s| s != 0))
+            && publication.is_err()
+        {
+            return Err(CoreError::NetworkStartupFailed);
         }
+        if let Ok((short_code, descriptor)) = publication {
+            let discovery_changed =
+                record.dht_descriptor_json.as_deref() != Some(descriptor.as_str());
+            record.dht_descriptor_json = Some(descriptor);
+            let saved_invitation = record.invitation.clone();
+            let signing_key = record.signing_key()?;
+            let revoked =
+                crate::invitation::ShareInvitation::new(&signing_key, short_code.clone(), 1)?;
+            record.invitation.pending_revocations.retain(|descriptor| {
+                crate::veilid_adapter::publish_invitation(Some(descriptor), &revoked).is_err()
+            });
+            let rotate =
+                record
+                    .invitation
+                    .update(now_ms, rotation_interval_seconds, rotate_invitation)?;
+            if rotate
+                && record.invitation.pending_revocations.len()
+                    >= crate::invitation::MAX_PENDING_REVOCATIONS
+            {
+                return Err(CoreError::LimitExceeded);
+            }
+            let share = crate::invitation::ShareInvitation::new(
+                &signing_key,
+                short_code,
+                record.invitation.next_rotation_ms().unwrap_or(0),
+            )?;
+            let previous = record.invitation.descriptor_json.clone();
+            let (code, descriptor) = crate::veilid_adapter::publish_invitation(
+                if rotate { None } else { previous.as_deref() },
+                &share,
+            )?;
+            record.invitation.descriptor_json = Some(descriptor);
+            if rotate {
+                if let Some(previous) = previous {
+                    record.invitation.pending_revocations.push(previous);
+                }
+            }
+            // Persist the new record and pending revocation before replacing the
+            // old DHT value. An interrupted rotation is resumed on next publish.
+            if should_persist || discovery_changed || record.invitation != saved_invitation {
+                persist_record(&path, vault_password, &record)?;
+                activate_record(path.clone(), vault_password, record.clone())?;
+            }
+            record.invitation.pending_revocations.retain(|descriptor| {
+                crate::veilid_adapter::publish_invitation(Some(descriptor), &revoked).is_err()
+            });
+            invitation_code = code;
+            // The durable retry list can safely contain already revoked records.
+            // Avoid a second commit whose failure would hide a successful change.
+            should_persist = false;
+        }
+    }
+    // Do not replace an existing share ID with an inline fallback after a network failure.
+    if record.invitation.descriptor_json.is_some() && !invitation_code.starts_with("sylphy:VLD") {
+        return Err(CoreError::NetworkStartupFailed);
     }
     if should_persist {
         persist_record(&path, vault_password, &record)?;
     }
+    let changed_at_ms = record.invitation.changed_at_ms;
+    let next_rotation_at_ms = record.invitation.next_rotation_ms();
+    let invitation_expires_at_ms = next_rotation_at_ms
+        .map(|next| next.min(bundle.expires_at_ms))
+        .unwrap_or(bundle.expires_at_ms);
+    let revocation_pending = !record.invitation.pending_revocations.is_empty();
     activate_record(path, vault_password, record)?;
     Ok(json!({
         "identity_id": identity_id,
         "invitation_code": invitation_code,
-        "expires_at_ms": bundle.expires_at_ms,
+        "expires_at_ms": invitation_expires_at_ms,
+        "revocation_pending": revocation_pending,
+        "invitation_changed_at_ms": changed_at_ms,
+        "next_rotation_at_ms": next_rotation_at_ms,
     }))
 }
 
@@ -511,6 +634,52 @@ fn grouped_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(feature = "veilid"))]
+    #[test]
+    fn offline_rotation_preserves_identity_and_import_creates_a_device_local_share_id() {
+        let _guard = TEST_IDENTITY_LOCK.lock().unwrap();
+        let root =
+            std::env::temp_dir().join(format!("sylphy-offline-rotation-{}", std::process::id()));
+        let target = root.join("linked");
+        let root_text = root.to_string_lossy();
+        let before = ensure_identity(&root_text, "test-device-secret", None, None).unwrap();
+        let path = root.join("identity").join(IDENTITY_FILE_NAME);
+        let encrypted_before = fs::read(&path).unwrap();
+        assert!(
+            ensure_identity_with_rotation(
+                &root_text,
+                "test-device-secret",
+                None,
+                None,
+                Some(3600),
+                true
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), encrypted_before);
+        let after = ensure_identity(&root_text, "test-device-secret", None, None).unwrap();
+        assert_eq!(before["identity_id"], after["identity_id"]);
+        assert_eq!(before["invitation_code"], after["invitation_code"]);
+        let mut backup = export_account_record().unwrap();
+        backup["invitation"]["descriptor_json"] = json!("source-device-owned-descriptor");
+        backup["invitation"]["pending_revocations"] = json!(["source-device-retired-descriptor"]);
+        import_account_record(&target.to_string_lossy(), "linked-device-secret", backup).unwrap();
+        let linked = active_identity().unwrap();
+        assert!(linked.invitation.descriptor_json.is_none());
+        assert!(linked.invitation.pending_revocations.is_empty());
+        assert_eq!(
+            linked.signing_key().unwrap().verifying_key().to_bytes(),
+            load_record(&path, "test-device-secret")
+                .unwrap()
+                .signing_key()
+                .unwrap()
+                .verifying_key()
+                .to_bytes()
+        );
+        wipe_memory().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn warm_identity_reuses_memory_and_wiping_requires_disk_authentication_again() {

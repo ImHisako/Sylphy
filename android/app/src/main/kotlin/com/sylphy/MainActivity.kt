@@ -13,7 +13,6 @@ import android.os.Build
 import android.os.Bundle
 import android.net.Uri
 import android.provider.Settings
-import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -41,11 +40,24 @@ private class VeilidAndroidContext(base: Context) : ContextWrapper(base) {
 class MainActivity : FlutterActivity() {
     private var apkUpdates: ApkUpdateHandler? = null
     private var securityChannel: MethodChannel? = null
+    private var screenshotsAllowed = false
+    private var vaultLocked = true
+    private var captureForeground = false
+
+    private fun applyCapturePolicy() {
+        if (screenshotsAllowed && !vaultLocked && captureForeground) {
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == Intent.ACTION_SCREEN_OFF) {
+                vaultLocked = true
+                applyCapturePolicy()
                 securityChannel?.invokeMethod("screenOff", null)
-                SecurityLifecycle.submit(SecurityLifecycle.SCREEN_OFF)
+                SecurityLifecycle.submit(context, SecurityLifecycle.SCREEN_OFF)
             }
         }
     }
@@ -53,7 +65,7 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         unregisterReceiver(screenReceiver)
         securityChannel = null
-        if (!isChangingConfigurations) SecurityLifecycle.submit(SecurityLifecycle.CLOSE)
+        if (!isChangingConfigurations) SecurityLifecycle.submit(this, SecurityLifecycle.CLOSE)
         wipePendingSave()
         apkUpdates?.close()
         super.onDestroy()
@@ -67,10 +79,15 @@ class MainActivity : FlutterActivity() {
 
     override fun onResume() {
         super.onResume()
+        captureForeground = true
+        applyCapturePolicy()
         MessagingService.uiResumed = true
     }
 
     override fun onPause() {
+        captureForeground = false
+        vaultLocked = true // Keep task snapshots secure until Flutter rechecks the session.
+        applyCapturePolicy()
         MessagingService.uiResumed = false
         super.onPause()
     }
@@ -79,7 +96,7 @@ class MainActivity : FlutterActivity() {
         // Reached only after Flutter has exhausted its routes. On newer
         // Android versions Back can hide the root task without destroying it.
         securityChannel?.invokeMethod("appClosing", null)
-        SecurityLifecycle.submit(SecurityLifecycle.CLOSE)
+        SecurityLifecycle.submit(this, SecurityLifecycle.CLOSE)
         wipePendingSave()
         return super.popSystemNavigator()
     }
@@ -87,7 +104,7 @@ class MainActivity : FlutterActivity() {
     override fun onStop() {
         super.onStop()
         if (nativeLibraryLoaded) {
-            SecurityLifecycle.submit(if (isFinishing) SecurityLifecycle.CLOSE else SecurityLifecycle.BACKGROUND)
+            SecurityLifecycle.submit(this, if (isFinishing) SecurityLifecycle.CLOSE else SecurityLifecycle.BACKGROUND)
         }
     }
 
@@ -99,6 +116,7 @@ class MainActivity : FlutterActivity() {
         // Hide task snapshots until Flutter has read the saved vault policy.
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         MessageNotificationSettings.createChannel(this)
+        NetworkRecovery.start(this)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -170,7 +188,7 @@ class MainActivity : FlutterActivity() {
                             )
                             result.success(true)
                         } catch (error: Throwable) {
-                            Log.e("Sylphy", "Unable to start background messaging", error)
+                            AppDiagnostics.e("Sylphy", "Unable to start background messaging", error)
                             result.error(
                                 "background_messaging_unavailable",
                                 "Il servizio messaggi in background non è disponibile.",
@@ -180,10 +198,24 @@ class MainActivity : FlutterActivity() {
                     }
                     "saveFile" -> saveFile(call.arguments, result)
                     "setVaultProtected" -> {
-                        if (call.arguments == true) {
-                            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
-                        } else {
-                            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+                        val locked = call.arguments as? Boolean
+                        if (locked == null) { result.error("invalid_arguments", "Expected a boolean", null) }
+                        else { vaultLocked = locked; applyCapturePolicy(); result.success(null) }
+                    }
+                    "setAllowScreenshots" -> {
+                        val allowed = call.arguments as? Boolean
+                        if (allowed == null) { result.error("invalid_arguments", "Expected a boolean", null) }
+                        else { screenshotsAllowed = allowed; applyCapturePolicy(); result.success(null) }
+                    }
+                    "setDiagnosticLogging" -> {
+                        AppDiagnostics.enabled = call.arguments == true
+                        result.success(null)
+                    }
+                    "memoryCleanupStatus" -> {
+                        when (call.arguments) {
+                            "started" -> MemoryCleanupNotifications.show(this, "Pulizia della memoria in corso…", true)
+                            "completed" -> MemoryWipeService.start(this)
+                            "failed" -> MemoryCleanupNotifications.show(this, "Pulizia non completata", false)
                         }
                         result.success(null)
                     }
@@ -335,19 +367,19 @@ class MainActivity : FlutterActivity() {
             initializeVeilid(context)
             veilidBootstrapReady = true
             veilidBootstrapCode = "ready"
-            Log.i("Sylphy", "Native Veilid platform bootstrap ready")
+            AppDiagnostics.i("Sylphy", "Native Veilid platform bootstrap ready")
         } catch (error: ClassNotFoundException) {
             veilidBootstrapReady = false
             veilidBootstrapCode = "android_dependency_missing"
-            Log.e("Sylphy", "Veilid protected-store dependency missing", error)
+            AppDiagnostics.e("Sylphy", "Veilid protected-store dependency missing", error)
         } catch (error: UnsatisfiedLinkError) {
             veilidBootstrapReady = false
             veilidBootstrapCode = "native_library_missing"
-            Log.e("Sylphy", "Sylphy native library unavailable", error)
+            AppDiagnostics.e("Sylphy", "Sylphy native library unavailable", error)
         } catch (error: Throwable) {
             veilidBootstrapReady = false
             veilidBootstrapCode = "jni_initialization_failed"
-            Log.e("Sylphy", "Native Veilid initialization failed", error)
+            AppDiagnostics.e("Sylphy", "Native Veilid initialization failed", error)
         }
     }
 

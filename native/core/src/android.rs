@@ -26,23 +26,33 @@ pub extern "system" fn Java_com_sylphy_SecurityLifecycle_applyEvent(
     _: EnvUnowned<'_>,
     _: JObject<'_>,
     event: jint,
-) -> jboolean {
+) -> jint {
     std::panic::catch_unwind(|| {
         let Ok(_guard) = crate::ffi::COMMAND_LOCK.lock() else {
-            return false;
+            return -1;
         };
         let should_lock = match event {
-            0 => return crate::app_security::close_vault().is_ok(),
+            0 => {
+                return if crate::app_security::close_vault().is_ok() {
+                    1
+                } else {
+                    -1
+                };
+            }
             1 => crate::app_security::locks_on_background(),
             2 => crate::app_security::locks_on_screen_off(),
-            _ => return false,
+            _ => return -1,
         };
         if should_lock {
-            return crate::app_security::lock_vault().is_ok();
+            return if crate::app_security::lock_vault().is_ok() {
+                1
+            } else {
+                -1
+            };
         }
-        true
+        0
     })
-    .unwrap_or(false)
+    .unwrap_or(-1)
 }
 
 pub fn is_context_ready() -> bool {
@@ -58,10 +68,22 @@ pub extern "system" fn Java_com_sylphy_MessagingService_syncInbound(
         return -1;
     }
     let Ok(_command_guard) = crate::ffi::COMMAND_LOCK.try_lock() else {
-        return 0;
+        return -2; // Busy, retry promptly instead of waiting a full background interval.
     };
     if crate::app_security::require_unlocked().is_err() {
-        return 0;
+        return -3; // Respect the user's background/screen-off locking policy.
+    }
+    if crate::veilid_adapter::network_available() {
+        let _ = crate::veilid_adapter::recover_existing_connection();
+        if crate::veilid_adapter::node_status().is_ok_and(|status| {
+            status.route_needs_publish
+                && status.attachment_state != "detached"
+                && status.attachment_state != "attaching"
+        }) {
+            if let Ok(_account_guard) = crate::ffi::ACCOUNT_STATE_LOCK.try_write() {
+                let _ = crate::identity::republish_active_identity();
+            }
+        }
     }
     crate::messaging_adapter::sync_inbound_messages()
         .ok()
@@ -91,4 +113,32 @@ pub extern "system" fn Java_com_sylphy_MainActivity_initializeVeilid<'caller>(
 ) {
     veilid_core::veilid_core_setup_android(environment, context);
     ANDROID_CONTEXT_READY.store(true, Ordering::Release);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_sylphy_NetworkRecovery_networkChanged(
+    _: EnvUnowned<'_>,
+    _: JObject<'_>,
+    available: jboolean,
+) -> jint {
+    std::panic::catch_unwind(|| {
+        if !available {
+            return if crate::veilid_adapter::platform_network_changed(false).is_ok() {
+                0
+            } else {
+                -1
+            };
+        }
+        let Ok(_guard) = crate::ffi::COMMAND_LOCK.try_lock() else {
+            return 2;
+        };
+        if crate::veilid_adapter::platform_network_changed(available).is_err() {
+            return -1;
+        }
+        if available && crate::app_security::require_unlocked().is_ok() {
+            let _ = crate::messaging_adapter::network_recovered();
+        }
+        0
+    })
+    .unwrap_or(-1)
 }

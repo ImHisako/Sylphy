@@ -12,6 +12,8 @@ import '../../core/veilid/veilid_service.dart';
 import 'account_transfer_page.dart';
 import 'android_notification_settings.dart';
 import 'app_security_widgets.dart';
+import 'identity_rotation_settings.dart';
+import '../../core/identity/identity_service.dart';
 import '../updates/update_host.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -22,10 +24,12 @@ class SettingsPage extends StatefulWidget {
     required this.profile,
     required this.onAccountImported,
     this.nativeCore,
+    this.identityService,
   });
 
   final VeilidService veilidService;
   final NativeCoreApi? nativeCore;
+  final IdentityService? identityService;
   final PrivacySettingsController privacySettings;
   final UserProfile profile;
   final ValueChanged<UserProfile> onAccountImported;
@@ -189,9 +193,40 @@ class _SettingsPageState extends State<SettingsPage> {
         _SettingsSection(
           id: 'privacy',
           title: 'Privacy del profilo',
-          detail: 'Visibilità di nome e foto',
+          detail:
+              'ID Sylphy, nome e foto, messaggi e spunte, contatti e richieste',
           icon: Icons.privacy_tip_outlined,
           children: [
+            if (widget.identityService != null) ...[
+              IdentityRotationSettings(
+                identityService: widget.identityService!,
+                privacySettings: widget.privacySettings,
+              ),
+              const SizedBox(height: 16),
+            ],
+            if (_isAndroidPlatform || supportsStreamProof) ...[
+              _SettingsCard(
+                child: SwitchListTile(
+                  key: const ValueKey('allow-screenshots'),
+                  secondary: const Icon(Icons.screenshot_outlined),
+                  title: const Text('Consenti screenshot dell’app'),
+                  subtitle: Text(
+                    _isAndroidPlatform
+                        ? 'Consente screenshot e registrazioni mentre l’app è sbloccata. Le anteprime in background restano protette.'
+                        : 'Disattiva lo Stream proof per consentire screenshot e condivisioni dello schermo.',
+                  ),
+                  value: _isAndroidPlatform
+                      ? privacy.allowScreenshots
+                      : !privacy.streamProof,
+                  onChanged: (value) => widget.privacySettings.update(
+                    _isAndroidPlatform
+                        ? privacy.copyWith(allowScreenshots: value)
+                        : privacy.copyWith(streamProof: !value),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
             _SectionTitle('PRIVACY DEL PROFILO'),
             SizedBox(height: 8),
             _SettingsCard(
@@ -226,14 +261,6 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ),
             SizedBox(height: 16),
-          ],
-        ),
-        _SettingsSection(
-          id: 'messages',
-          title: 'Messaggi e spunte',
-          detail: 'Conferme di lettura',
-          icon: Icons.chat_bubble_outline_rounded,
-          children: [
             _SectionTitle('MESSAGGI E SPUNTE'),
             SizedBox(height: 8),
             _SettingsCard(
@@ -258,14 +285,8 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ),
             SizedBox(height: 16),
-          ],
-        ),
-        _SettingsSection(
-          id: 'contacts',
-          title: 'Contatti e richieste',
-          detail: 'Gestisci le richieste da sconosciuti',
-          icon: Icons.person_search_outlined,
-          children: [
+            _SectionTitle('CONTATTI E RICHIESTE'),
+            SizedBox(height: 8),
             _SettingsCard(
               child: SwitchListTile(
                 secondary: Icon(Icons.person_search_outlined),
@@ -284,7 +305,7 @@ class _SettingsPageState extends State<SettingsPage> {
         _SettingsSection(
           id: 'appearance',
           title: 'Aspetto',
-          detail: 'Tema e preferenze della tastiera',
+          detail: 'Tema, tastiera e accessibilità: riduci animazioni',
           icon: Icons.palette_outlined,
           children: [
             _SectionTitle(
@@ -353,14 +374,9 @@ class _SettingsPageState extends State<SettingsPage> {
                 ],
               ),
             ),
-          ],
-        ),
-        _SettingsSection(
-          id: 'accessibility',
-          title: 'Accessibilità',
-          detail: 'Animazioni e comfort di utilizzo',
-          icon: Icons.accessibility_new_rounded,
-          children: [
+            SizedBox(height: 16),
+            _SectionTitle('ACCESSIBILITÀ'),
+            SizedBox(height: 8),
             _SettingsCard(
               child: SwitchListTile(
                 secondary: Icon(Icons.motion_photos_off_outlined),
@@ -409,30 +425,6 @@ class _SettingsPageState extends State<SettingsPage> {
             ],
           ),
         _SettingsSection(
-          id: 'network',
-          title: 'Rete e connessione',
-          detail: 'Stato Veilid e riconnessione',
-          icon: Icons.hub_outlined,
-          children: [
-            _SettingsCard(
-              child: ListTile(
-                leading: Icon(
-                  Icons.hub_rounded,
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-                title: Text(snapshot.title),
-                subtitle: Text(snapshot.detail),
-                trailing: IconButton(
-                  tooltip: 'Riprova connessione',
-                  onPressed: widget.veilidService.retry,
-                  icon: Icon(Icons.refresh_rounded),
-                ),
-              ),
-            ),
-            SizedBox(height: 16),
-          ],
-        ),
-        _SettingsSection(
           id: 'updates',
           title: 'Aggiornamenti',
           detail: 'Versione e aggiornamenti dell’app',
@@ -458,14 +450,29 @@ class _SettingsPageState extends State<SettingsPage> {
               child: Column(
                 children: [
                   SwitchListTile(
+                    key: const ValueKey('basic-logging-switch'),
+                    secondary: const Icon(Icons.receipt_long_outlined),
+                    title: const Text('Logging di base'),
+                    subtitle: const Text(
+                      'Registra eventi ed errori diagnostici dell’app. Disattivalo per sospendere anche il logging dettagliato.',
+                    ),
+                    value: AppLog.instance.loggingEnabled,
+                    onChanged: AppLog.instance.setLoggingEnabled,
+                  ),
+                  const Divider(height: 1),
+                  SwitchListTile(
                     key: ValueKey('developer-logging-switch'),
                     secondary: Icon(Icons.bug_report_outlined),
                     title: Text('Logging dettagliato'),
                     subtitle: Text(
                       'Registra lifecycle, navigazione, azioni UI e chiamate al core. Testi dei messaggi, password e chiavi sono sempre esclusi.',
                     ),
-                    value: AppLog.instance.verboseEnabled,
-                    onChanged: AppLog.instance.setVerboseEnabled,
+                    value:
+                        AppLog.instance.loggingEnabled &&
+                        AppLog.instance.verboseEnabled,
+                    onChanged: AppLog.instance.loggingEnabled
+                        ? AppLog.instance.setVerboseEnabled
+                        : null,
                   ),
                   Divider(height: 1),
                   ListTile(
@@ -561,6 +568,25 @@ class _SettingsPageState extends State<SettingsPage> {
                       key: const ValueKey('settings-index'),
                       padding: const EdgeInsets.all(16),
                       children: [
+                        const _SectionTitle('RETE E CONNESSIONE'),
+                        const SizedBox(height: 8),
+                        _SettingsCard(
+                          child: ListTile(
+                            key: const ValueKey('settings-network-status'),
+                            leading: Icon(
+                              Icons.hub_rounded,
+                              color: Theme.of(context).colorScheme.primary,
+                            ),
+                            title: Text(snapshot.title),
+                            subtitle: Text(snapshot.detail),
+                            trailing: IconButton(
+                              tooltip: 'Riprova connessione',
+                              onPressed: widget.veilidService.retry,
+                              icon: const Icon(Icons.refresh_rounded),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 24),
                         TextField(
                           key: const ValueKey('settings-search'),
                           controller: _search,

@@ -6,7 +6,31 @@ Il recupero transazionale del profilo durante l’importazione è documentato in
 [settings-and-account-transfer.md](settings-and-account-transfer.md). Non cambia
 il formato del backup né il numero ABI.
 
-Il confine Flutter/Rust è una singola ABI C JSON, attualmente alla versione 17. Le richieste sono UTF-8; le risposte di stato non riportano password, chiavi, plaintext o diagnostica crittografica. I comandi messaging possono restituire soltanto read model già autenticati e decrittati dal core. Ogni stringa restituita viene liberata esclusivamente tramite `sylphy_core_free_string`.
+Il confine Flutter/Rust è una singola ABI C JSON, attualmente alla versione 20. Le richieste sono UTF-8; le risposte di stato non riportano password, chiavi, plaintext o diagnostica crittografica. I comandi messaging possono restituire soltanto read model già autenticati e decrittati dal core. Ogni stringa restituita viene liberata esclusivamente tramite `sylphy_core_free_string`.
+
+ABI 20 aggiunge il segnale JNI Android di cambio rete, gli esiti busy/locked
+separati per il servizio di ricezione e il recupero della rotta dalla sessione
+nativa già sbloccata. Non introduce sblocco automatico né esporta credenziali.
+Le richieste JSON di messaggistica restano compatibili. La procedura di verifica
+e i limiti delle misure fisiche sono in
+[network-background-validation.md](../docs/network-background-validation.md).
+
+ABI 19 estende `ensure_identity` con `rotation_interval_seconds` (0 oppure
+3600–31536000) e `rotate_invitation`; la risposta aggiunge
+`invitation_changed_at_ms`, `next_rotation_at_ms` e `revocation_pending`.
+Le chiavi dell'account restano stabili. I nuovi record di invito firmati versione
+1 puntano al record di discovery persistente: i contatti e i membri dei gruppi
+memorizzano il puntatore stabile dopo aver verificato firma, scadenza e identità.
+La risoluzione ammette un solo livello di indirezione. Un vecchio client continua
+a comunicare con i contatti già importati, ma deve essere aggiornato per importare
+il nuovo formato di ID. Dettagli e limiti in
+[settings-and-account-transfer.md](settings-and-account-transfer.md#rotazione-dellid-sylphy).
+
+ABI 18 aggiunge `prepare_disable_passphrase` e `disable_passphrase`, accessibili
+solo a vault sbloccato e con verifica della passphrase attuale. La prima risposta
+restituisce eccezionalmente il segreto di apertura per il solo salvataggio
+verificato nel secure storage; non viene registrata nei log. Il bridge Android
+restituisce inoltre esiti distinti per pulizia eseguita, non richiesta o fallita.
 
 ABI 17 aggiunge `read_conversations`, `read_messages`, `read_search`,
 `read_attachment` e `wait_for_activity`. Le letture locali calde possono
@@ -28,7 +52,7 @@ Il contratto e la migrazione sono descritti in [app-security.md](app-security.md
 
 ## Verifica del bundle Android
 
-`native/build-android.ps1` registra ABI 17 e hash SHA-256 in `sylphy-core.properties`.
+`native/build-android.ps1` registra ABI 20 e hash SHA-256 in `sylphy-core.properties`.
 
 ABI 14 aggiunge `request_attachment` (`conversation_id`, `message_id`, `cancel`)
 per avviare o annullare un download esplicito senza attendere la rete. I read

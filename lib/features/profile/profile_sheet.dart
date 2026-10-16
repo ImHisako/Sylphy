@@ -139,7 +139,7 @@ class _ProfileSheetContent extends StatelessWidget {
                   ),
                   child: _IdentityContent(
                     snapshot: identity,
-                    onRetry: identityService.initialize,
+                    onRetry: identityService.retry,
                     onCopy: (invitation) =>
                         _copyInvitation(context, invitation),
                   ),
@@ -208,7 +208,8 @@ class _IdentityContent extends StatelessWidget {
 
     final id = snapshot.identityId!;
     final invitation = snapshot.invitationCode!;
-    final hasShortInvitation = snapshot.hasShortInvitation;
+    final expired = snapshot.expiresAt?.isAfter(DateTime.now()) == false;
+    final hasShortInvitation = snapshot.hasShortInvitation && !expired;
     final expiration = snapshot.expiresAt;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -221,7 +222,7 @@ class _IdentityContent extends StatelessWidget {
             ),
             SizedBox(width: 10),
             Text(
-              'IL TUO ID SYLPHY',
+              'IMPRONTA DELL’ACCOUNT',
               style: TextStyle(
                 color: AppPalette.color(0xFFCFF36A),
                 fontSize: 11,
@@ -241,6 +242,19 @@ class _IdentityContent extends StatelessWidget {
             height: 1.45,
           ),
         ),
+        if (snapshot.hasShortInvitation) ...[
+          const SizedBox(height: 16),
+          const Text(
+            'ID SYLPHY',
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 6),
+          SelectableText(
+            invitation,
+            key: const ValueKey('profile-share-id'),
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+          ),
+        ],
         SizedBox(height: 14),
         Text(
           hasShortInvitation
@@ -251,7 +265,7 @@ class _IdentityContent extends StatelessWidget {
         if (expiration != null) ...[
           SizedBox(height: 8),
           Text(
-            'Invito valido fino al ${expiration.day}/${expiration.month}/${expiration.year}',
+            'Invito valido fino al ${expiration.day}/${expiration.month}/${expiration.year} alle ${expiration.hour.toString().padLeft(2, '0')}:${expiration.minute.toString().padLeft(2, '0')}',
             style: TextStyle(color: AppPalette.color(0xFF858F9D), fontSize: 12),
           ),
         ],

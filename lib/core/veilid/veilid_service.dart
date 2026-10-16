@@ -122,7 +122,9 @@ class VeilidService extends ChangeNotifier {
     required NativeCoreApi? nativeCore,
     Future<Directory> Function()? applicationSupportDirectory,
     Future<AndroidBootstrapResult> Function()? ensureAndroidBootstrap,
+    Timer Function(Duration, void Function())? eventTimerFactory,
   }) : _nativeCore = nativeCore,
+       _eventTimerFactory = eventTimerFactory ?? Timer.new,
        _applicationSupportDirectory =
            applicationSupportDirectory ?? getApplicationSupportDirectory,
        _ensureAndroidBootstrap =
@@ -133,6 +135,7 @@ class VeilidService extends ChangeNotifier {
            : const VeilidSnapshot(phase: VeilidPhase.connecting);
 
   final NativeCoreApi? _nativeCore;
+  final Timer Function(Duration, void Function()) _eventTimerFactory;
   final Future<Directory> Function() _applicationSupportDirectory;
   final Future<AndroidBootstrapResult> Function() _ensureAndroidBootstrap;
   VeilidSnapshot _snapshot;
@@ -142,10 +145,44 @@ class VeilidService extends ChangeNotifier {
   bool _disposed = false;
   bool _platformReady = false;
   bool _foreground = true;
+  bool _enabled = false;
+  int _generation = 0;
+  StreamSubscription<void>? _activity;
+  Timer? _eventRefresh;
+  DateTime? _lastEventRefresh;
+
+  void _listenForNetworkActivity() {
+    final core = _nativeCore;
+    if (_activity != null || core is! NativeActivityEventsApi) return;
+    _activity = (core as NativeActivityEventsApi).activityEvents.listen((_) {
+      if (!_foreground || !_enabled || _disposed || _eventRefresh != null) {
+        return;
+      }
+      // The stream includes message events; rate-limit status queries while
+      // keeping actual route/attachment changes ahead of the periodic timer.
+      final elapsed = _lastEventRefresh == null
+          ? const Duration(seconds: 2)
+          : DateTime.now().difference(_lastEventRefresh!);
+      final delay = elapsed >= const Duration(seconds: 2)
+          ? const Duration(milliseconds: 250)
+          : const Duration(seconds: 2) - elapsed;
+      _eventRefresh = _eventTimerFactory(delay, () {
+        _eventRefresh = null;
+        if (!_enabled || _disposed || !_foreground) return;
+        _lastEventRefresh = DateTime.now();
+        unawaited(refresh());
+      });
+    });
+  }
 
   void setForeground(bool foreground) {
     if (_foreground == foreground || _disposed) return;
     _foreground = foreground;
+    if (!foreground) {
+      _eventRefresh?.cancel();
+      _eventRefresh = null;
+    }
+    if (foreground && _enabled) unawaited(refresh());
     if (_refreshTimer != null) {
       _refreshTimer!.cancel();
       _refreshTimer = null;
@@ -161,12 +198,14 @@ class VeilidService extends ChangeNotifier {
     if (core == null || _disposed) {
       return Future<void>.value();
     }
-    return _startInProgress ??= _start(core).whenComplete(() {
+    _enabled = true;
+    _listenForNetworkActivity();
+    return _startInProgress ??= _start(core, _generation).whenComplete(() {
       _startInProgress = null;
     });
   }
 
-  Future<void> _start(NativeCoreApi core) async {
+  Future<void> _start(NativeCoreApi core, int generation) async {
     AppLog.instance.record(
       category: 'veilid',
       action: 'start_requested',
@@ -203,13 +242,16 @@ class VeilidService extends ChangeNotifier {
         networkStorage: storage,
         accountStorage: accountStorage,
       );
+      if (!_enabled || _disposed || generation != _generation) return;
       final response = core is NativeCoreClient
           ? await core.startVeilidInBackground(
               storage.path,
               messagingStorageDirectory: accountStorage.path,
             )
           : core.startVeilid(storage.path);
-      _setSnapshot(VeilidSnapshot.fromResponse(response));
+      if (_enabled && generation == _generation) {
+        _setSnapshot(VeilidSnapshot.fromResponse(response));
+      }
     } on Object catch (error) {
       AppLog.instance.recordError(
         category: 'veilid',
@@ -282,7 +324,8 @@ class VeilidService extends ChangeNotifier {
     if (core == null || _disposed) {
       return;
     }
-    if (core is NativeCoreClient && core.backgroundCallInProgress) {
+    if (!_platformReady && _enabled) {
+      await start();
       return;
     }
     try {
@@ -290,6 +333,11 @@ class VeilidService extends ChangeNotifier {
           ? await core.veilidStatusInBackground()
           : core.veilidStatus();
       _setSnapshot(VeilidSnapshot.fromResponse(response));
+      if (_enabled &&
+          _snapshot.phase == VeilidPhase.offline &&
+          _startInProgress == null) {
+        await start();
+      }
     } on NativeCoreException catch (error) {
       AppLog.instance.recordError(
         category: 'veilid',
@@ -308,6 +356,11 @@ class VeilidService extends ChangeNotifier {
   Future<void> retry() => start();
 
   Future<void> stop() async {
+    _enabled = false;
+    _generation++;
+    _eventRefresh?.cancel();
+    _eventRefresh = null;
+    await _startInProgress;
     _refreshTimer?.cancel();
     _refreshTimer = null;
     final core = _nativeCore;
@@ -384,6 +437,10 @@ class VeilidService extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _enabled = false;
+    _generation++;
+    _eventRefresh?.cancel();
+    unawaited(_activity?.cancel());
     _refreshTimer?.cancel();
     super.dispose();
   }

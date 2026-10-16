@@ -32,7 +32,8 @@ void main() {
       expect(session.state.value, AccountQrTransferState.transferred);
       await expectLater(
         (() async => (await client.getUrl(endpoint)).close())(),
-        throwsA(isA<SocketException>()),
+        // A reused keep-alive socket may close before its next HTTP header.
+        throwsA(anyOf(isA<SocketException>(), isA<HttpException>())),
       );
     } finally {
       client.close(force: true);

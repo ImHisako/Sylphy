@@ -51,8 +51,22 @@ class AppSecurityHost extends StatelessWidget {
         }
         if (controller.locked) {
           if (!controller.enabled) {
-            return const Material(
-              child: Center(child: Text('Pulizia della memoria…')),
+            return Material(
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (controller.cleaning) const CircularProgressIndicator(),
+                    const SizedBox(height: 12),
+                    Text(
+                      controller.error ??
+                          (controller.cleaning
+                              ? 'Pulizia della memoria in corso…'
+                              : 'Memoria locale ripulita'),
+                    ),
+                  ],
+                ),
+              ),
             );
           }
           return Navigator(
@@ -131,6 +145,11 @@ class _UnlockPageState extends State<_UnlockPage> {
                   const Text(
                     'Inserisci la passphrase per aprire i dati cifrati.',
                   ),
+                  if (widget.controller.cleaning) ...[
+                    const CircularProgressIndicator(),
+                    const SizedBox(height: 12),
+                    const Text('Pulizia della memoria in corso…'),
+                  ],
                   const SizedBox(height: 24),
                   TextField(
                     key: const ValueKey('unlock-passphrase'),
@@ -139,7 +158,8 @@ class _UnlockPageState extends State<_UnlockPage> {
                     autocorrect: false,
                     enableSuggestions: false,
                     enableIMEPersonalizedLearning: false,
-                    enabled: !widget.controller.busy,
+                    enabled:
+                        !widget.controller.busy && !widget.controller.cleaning,
                     onSubmitted: (_) => _unlock(),
                     decoration: const InputDecoration(labelText: 'Passphrase'),
                   ),
@@ -155,7 +175,10 @@ class _UnlockPageState extends State<_UnlockPage> {
                   const SizedBox(height: 20),
                   FilledButton(
                     key: const ValueKey('unlock-vault'),
-                    onPressed: widget.controller.busy ? null : _unlock,
+                    onPressed:
+                        widget.controller.busy || widget.controller.cleaning
+                        ? null
+                        : _unlock,
                     child: Text(
                       widget.controller.busy ? 'Apertura…' : 'Sblocca',
                     ),
@@ -274,6 +297,74 @@ class AppSecuritySettings extends StatelessWidget {
     }
   }
 
+  Future<void> _disable(
+    BuildContext context,
+    AppSecurityController controller,
+  ) async {
+    final input = TextEditingController();
+    final passphrase = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Disattivare la passphrase?'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'I dati resteranno cifrati con la chiave del dispositivo, ma Sylphy si aprirà senza passphrase. Inserisci la passphrase attuale per confermare.',
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                key: const ValueKey('remove-passphrase-input'),
+                controller: input,
+                obscureText: true,
+                autocorrect: false,
+                enableSuggestions: false,
+                enableIMEPersonalizedLearning: false,
+                decoration: const InputDecoration(
+                  labelText: 'Passphrase attuale',
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Annulla'),
+          ),
+          FilledButton(
+            key: const ValueKey('confirm-remove-passphrase'),
+            onPressed: () {
+              if (input.text.isEmpty) return;
+              final value = input.text;
+              input.clear();
+              Navigator.pop(dialogContext, value);
+            },
+            child: const Text('Disattiva passphrase'),
+          ),
+        ],
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    input.clear();
+    input.dispose();
+    if (passphrase == null || !context.mounted) return;
+    try {
+      await controller.disable(passphrase);
+    } on Object {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Passphrase errata o modifica non completata. Controlla lo stato della protezione e riprova.',
+            ),
+          ),
+        );
+      }
+    }
+  }
+
   Future<void> _policy(BuildContext context, Future<void> operation) async {
     try {
       await operation;
@@ -301,7 +392,7 @@ class AppSecuritySettings extends StatelessWidget {
             title: const Text('Cifratura dei dati con passphrase'),
             subtitle: Text(
               controller.enabled
-                  ? 'Attiva · identità, chat, allegati e preferenze protetti.'
+                  ? 'Attiva · tocca per disattivare la passphrase.'
                   : 'Aggiungi una passphrase alla cifratura locale esistente.',
             ),
             trailing: controller.busy
@@ -315,9 +406,11 @@ class AppSecuritySettings extends StatelessWidget {
                         ? Icons.check_circle_outline
                         : Icons.chevron_right,
                   ),
-            onTap: controller.enabled || controller.busy
+            onTap: controller.busy
                 ? null
-                : () => _enable(context, controller),
+                : () => controller.enabled
+                      ? _disable(context, controller)
+                      : _enable(context, controller),
           ),
           if (controller.enabled) ...[
             const Divider(height: 1),
