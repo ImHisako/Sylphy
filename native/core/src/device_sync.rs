@@ -50,6 +50,12 @@ pub(crate) struct ResultItem {
 type Active = (u64, Receiver<Vec<ResultItem>>);
 static ACTIVE: Mutex<Option<Active>> = Mutex::new(None);
 
+pub(crate) fn wipe_memory() {
+    if let Ok(mut active) = ACTIVE.lock() {
+        *active = None;
+    }
+}
+
 pub(crate) fn poll(
     generation: u64,
     prepare: impl FnOnce() -> CoreResult<(Vec<Pending>, Context)>,
@@ -162,6 +168,7 @@ pub(crate) fn poll(
                 })
                 .collect();
             let _ = sender.send(results);
+            crate::activity_events::notify();
         })
         .ok()?;
     *active = Some((generation, receiver));

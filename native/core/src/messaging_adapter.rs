@@ -350,56 +350,57 @@ fn contact_store() -> &'static Mutex<ContactStore> {
     CONTACT_STORE.get_or_init(|| Mutex::new(ContactStore::default()))
 }
 
+fn wipe_message_memory(message: &mut StoredMessage) {
+    message.body.zeroize();
+    message.author_name.zeroize();
+    message.attachment_name.zeroize();
+    message.attachment_base64.zeroize();
+    if let Some(pointer) = &mut message.attachment_pointer {
+        pointer.key_base64.zeroize();
+        pointer.nonce_base64.zeroize();
+        pointer.file_name.zeroize();
+    }
+}
+fn wipe_contact_memory(contact: &mut StoredContact) {
+    contact.display_name.zeroize();
+    contact.invitation_code.zeroize();
+    if let Some(published) = &mut contact.published_identity {
+        published.wipe_memory();
+    }
+}
+fn wipe_group_memory(group: &mut StoredGroup) {
+    group.name.zeroize();
+    group.description.zeroize();
+    for member in &mut group.members {
+        member.display_name.zeroize();
+        member.invitation_code.zeroize();
+        member.identity.wipe_memory();
+    }
+    group.management.wipe_memory();
+}
+
 pub(crate) fn wipe_memory() -> CoreResult<()> {
-    fn wipe_message(message: &mut StoredMessage) {
-        message.body.zeroize();
-        message.author_name.zeroize();
-        message.attachment_name.zeroize();
-        message.attachment_base64.zeroize();
-        if let Some(pointer) = &mut message.attachment_pointer {
-            pointer.key_base64.zeroize();
-            pointer.nonce_base64.zeroize();
-            pointer.file_name.zeroize();
-        }
-    }
-    fn wipe_contact(contact: &mut StoredContact) {
-        contact.display_name.zeroize();
-        contact.invitation_code.zeroize();
-        if let Some(published) = &mut contact.published_identity {
-            published.profile.display_name.zeroize();
-            published.profile.avatar_base64.zeroize();
-        }
-    }
-    fn wipe_group(group: &mut StoredGroup) {
-        group.name.zeroize();
-        group.description.zeroize();
-        for member in &mut group.members {
-            member.display_name.zeroize();
-            member.identity.profile.display_name.zeroize();
-            member.identity.profile.avatar_base64.zeroize();
-        }
-    }
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     for message in &mut store.messages {
-        wipe_message(message);
+        wipe_message_memory(message);
     }
     for contact in &mut store.contacts {
-        wipe_contact(contact);
+        wipe_contact_memory(contact);
     }
     for group in &mut store.groups {
-        wipe_group(group);
+        wipe_group_memory(group);
     }
     for pending in &mut store.device_sync_outbox {
         match &mut pending.event {
-            DeviceSyncEvent::UpsertContact { contact } => wipe_contact(contact),
+            DeviceSyncEvent::UpsertContact { contact } => wipe_contact_memory(contact),
             DeviceSyncEvent::UpsertMessage { contact, message } => {
-                wipe_contact(contact);
-                wipe_message(message);
+                wipe_contact_memory(contact);
+                wipe_message_memory(message);
             }
-            DeviceSyncEvent::UpsertGroup { group } => wipe_group(group),
+            DeviceSyncEvent::UpsertGroup { group } => wipe_group_memory(group),
             DeviceSyncEvent::UpsertGroupMessage { group, message } => {
-                wipe_group(group);
-                wipe_message(message);
+                wipe_group_memory(group);
+                wipe_message_memory(message);
             }
         }
     }
@@ -408,13 +409,28 @@ pub(crate) fn wipe_memory() -> CoreResult<()> {
         generation,
         ..ContactStore::default()
     };
-    search::wipe_memory()?;
+    drop(store);
+    let search = search::wipe_memory();
     attachments::reset();
-    *OUTBOX_TRANSPORT.lock().map_err(|_| CoreError::Internal)? = None;
-    if let Some(refresh) = PEER_REFRESH.get() {
-        *refresh.lock().map_err(|_| CoreError::Internal)? = PeerRefresh::default();
-    }
-    crate::peer_identity::wipe_memory()?;
+    let outbox = OUTBOX_TRANSPORT
+        .lock()
+        .map(|mut transport| *transport = None)
+        .map_err(|_| CoreError::Internal);
+    let refresh = PEER_REFRESH
+        .get()
+        .map(|refresh| {
+            refresh
+                .lock()
+                .map(|mut refresh| *refresh = PeerRefresh::default())
+                .map_err(|_| CoreError::Internal)
+        })
+        .transpose();
+    let peers = crate::peer_identity::wipe_memory();
+    crate::device_sync::wipe_memory();
+    search?;
+    outbox?;
+    refresh?;
+    peers?;
     Ok(())
 }
 
@@ -693,9 +709,15 @@ fn validate_stored_message(message: &StoredMessage) -> CoreResult<()> {
 }
 
 pub fn list_conversations() -> CoreResult<Value> {
-    attachments::poll()?;
+    read_conversations(true)
+}
+
+pub(crate) fn read_conversations(allow_load: bool) -> CoreResult<Value> {
+    if allow_load {
+        attachments::poll()?;
+    }
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
-    ensure_messages_loaded(&mut store)?;
+    prepare_local_read(&mut store, allow_load)?;
     let mut summaries: HashMap<&str, (Option<&StoredMessage>, usize)> = HashMap::new();
     for message in &store.messages {
         let summary = summaries
@@ -791,7 +813,44 @@ pub fn list_messages(
     before_id: Option<&str>,
     limit: Option<usize>,
 ) -> CoreResult<Value> {
-    attachments::poll()?;
+    message_page(conversation_id, before_ms, before_id, limit, true, true)
+}
+
+pub(crate) fn read_messages(
+    conversation_id: &str,
+    before_ms: Option<u64>,
+    before_id: Option<&str>,
+    limit: Option<usize>,
+    allow_load: bool,
+) -> CoreResult<Value> {
+    message_page(
+        conversation_id,
+        before_ms,
+        before_id,
+        limit,
+        allow_load,
+        false,
+    )
+}
+
+fn prepare_local_read(store: &mut ContactStore, allow_load: bool) -> CoreResult<()> {
+    if !allow_load && !store.messages_loaded {
+        return Err(CoreError::FeatureUnavailable);
+    }
+    ensure_messages_loaded(store)
+}
+
+fn message_page(
+    conversation_id: &str,
+    before_ms: Option<u64>,
+    before_id: Option<&str>,
+    limit: Option<usize>,
+    allow_load: bool,
+    include_data: bool,
+) -> CoreResult<Value> {
+    if allow_load {
+        attachments::poll()?;
+    }
     validate_conversation_id(conversation_id)?;
     if before_id.is_some() && before_ms.is_none() {
         return Err(CoreError::InvalidInput);
@@ -806,7 +865,7 @@ pub fn list_messages(
         return Err(CoreError::LimitExceeded);
     }
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
-    ensure_messages_loaded(&mut store)?;
+    prepare_local_read(&mut store, allow_load)?;
     let group = store
         .groups
         .iter()
@@ -832,13 +891,53 @@ pub fn list_messages(
     let next_before_id = messages.first().map(|message| message.id.as_str());
     Ok(json!({
         "conversation_id": conversation_id,
-        "messages": messages.into_iter().map(|message| message_json(message, &store)).collect::<Vec<_>>(),
+        "messages": messages.into_iter().map(|message| message_json_with_data(message, &store, include_data)).collect::<Vec<_>>(),
         "next_before_ms": next_before_ms,
         "next_before_id": next_before_id,
         "has_more": has_more,
         "revision": store.revision,
         "group_revision": group.map(|group| group.management.revision),
     }))
+}
+
+pub(crate) fn read_attachment(conversation_id: &str, message_id: &str) -> CoreResult<Value> {
+    validate_conversation_id(conversation_id)?;
+    if message_id.is_empty() || message_id.len() > MAX_MESSAGE_ID_BYTES {
+        return Err(CoreError::InvalidInput);
+    }
+    let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    if !store.messages_loaded {
+        return Err(CoreError::FeatureUnavailable);
+    }
+    let message = store
+        .messages
+        .iter()
+        .find(|message| message.id == message_id && message.conversation_id == conversation_id)
+        .ok_or(CoreError::InvalidInput)?;
+    if let Some(group) = store
+        .groups
+        .iter()
+        .find(|group| group.id == conversation_id)
+        && (group.management.closed
+            || group.management.left
+            || groups::message_deleted(group, message))
+    {
+        return Err(CoreError::InvalidInput);
+    }
+    let encoded = message
+        .attachment_base64
+        .as_ref()
+        .ok_or(CoreError::FeatureUnavailable)?;
+    Ok(json!({"bytes_base64": encoded}))
+}
+
+pub(crate) fn read_search(
+    conversation_id: &str,
+    query: &str,
+    offset: usize,
+    allow_load: bool,
+) -> CoreResult<Value> {
+    search::read_search(conversation_id, query, offset, allow_load, false)
 }
 
 // The remote wall clock is display metadata, not a shared clock. Use local
@@ -2735,6 +2834,7 @@ fn poll_outbox_transport(
                             },
                         );
                         let _ = sender.send(vec![(item, delivered)]);
+                        crate::activity_events::notify();
                     });
                 }
             });
@@ -3570,6 +3670,14 @@ fn message_preview(message: &StoredMessage, store: &ContactStore) -> String {
 }
 
 fn message_json(message: &StoredMessage, store: &ContactStore) -> Value {
+    message_json_with_data(message, store, true)
+}
+
+fn message_json_with_data(
+    message: &StoredMessage,
+    store: &ContactStore,
+    include_data: bool,
+) -> Value {
     let (text, reply_to, channel_id) = groups::rich_metadata(&message.body).unwrap_or((
         "Messaggio non disponibile".to_owned(),
         None,
@@ -3620,8 +3728,12 @@ fn message_json(message: &StoredMessage, store: &ContactStore) -> Value {
         "is_outgoing": message.is_outgoing,
         "delivery_state": message.delivery_state,
         "attachment_name": message.attachment_name,
-        "attachment_base64": message.attachment_base64,
-        "attachment_size": message.attachment_pointer.as_ref().map(|pointer| pointer.size),
+        "attachment_base64": if include_data { message.attachment_base64.as_ref() } else { None },
+        "attachment_size": message.attachment_pointer.as_ref().map(|pointer| pointer.size)
+            .or_else(|| message.attachment_base64.as_ref().map(|encoded| {
+                let padding = encoded.as_bytes().iter().rev().take_while(|byte| **byte == b'=').count();
+                encoded.len() / 4 * 3 - padding
+            })),
         "attachment_state": if message.attachment_base64.is_some() { "ready" }
             else if message.attachment_pointer.is_some() { attachments::status(store.generation, &message.id) }
             else { "unavailable" },
@@ -3903,6 +4015,46 @@ fn grouped_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_pages_omit_large_payloads_and_attachment_reads_are_scoped() {
+        let _identity = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+        let mut message = history_message(1);
+        message.attachment_name = Some("large.bin".into());
+        message.attachment_base64 = Some(STANDARD.encode(vec![42; MAX_ATTACHMENT_BYTES]));
+        let chat = message.conversation_id.clone();
+        let id = message.id.clone();
+        let saved = {
+            let mut store = contact_store().lock().unwrap();
+            std::mem::replace(
+                &mut *store,
+                ContactStore {
+                    messages_loaded: true,
+                    messages: vec![message],
+                    ..ContactStore::default()
+                },
+            )
+        };
+        let page = read_messages(&chat, None, None, None, false).unwrap();
+        assert!(serde_json::to_vec(&page).unwrap().len() < 2048);
+        assert!(page["messages"][0]["attachment_base64"].is_null());
+        assert_eq!(page["messages"][0]["attachment_state"], "ready");
+        assert_eq!(page["messages"][0]["attachment_size"], MAX_ATTACHMENT_BYTES);
+        assert_eq!(
+            STANDARD
+                .decode(
+                    read_attachment(&chat, &id).unwrap()["bytes_base64"]
+                        .as_str()
+                        .unwrap()
+                )
+                .unwrap()
+                .len(),
+            MAX_ATTACHMENT_BYTES
+        );
+        assert!(read_attachment("other-chat", &id).is_err());
+        assert!(read_attachment(&chat, "missing").is_err());
+        *contact_store().lock().unwrap() = saved;
+    }
 
     #[test]
     fn large_attachments_authenticate_before_becoming_messages() {

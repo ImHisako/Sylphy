@@ -1,5 +1,8 @@
 # Contratto del client Flutter
 
+La navigazione delle impostazioni e il ripristino al primo avvio sono descritti
+in [settings-and-account-transfer.md](settings-and-account-transfer.md).
+
 ## Preferenze e chat (settembre 2026)
 
 - Il titolo della chat privata apre il profilo del contatto. Su desktop ampio
@@ -45,7 +48,7 @@ L'implementazione di produzione di `SecureMessagingBridge` deve essere un adapte
 
 ## Stato attuale
 
-`NativeCoreClient` carica opzionalmente l'ABI C v14 del core Rust su Windows, Linux e Android. Un isolate persistente possiede la libreria nativa e serve una coda che dà priorità a messaggi e allegati rispetto al refresh periodico, evitando la creazione di un isolate e il caricamento della DLL per ogni comando. `VeilidService` avvia il nodo nello storage applicativo persistente, ritenta startup e attachment falliti e distingue feature assente, bootstrap Android, protected/local store, configurazione e rete senza esporre dettagli interni.
+`NativeCoreClient` carica opzionalmente l'ABI C v17 del core Rust su Windows, Linux e Android. Un isolate persistente serve la coda delle transazioni, un secondo le letture locali e un terzo attende risvegli senza contenuti dal core. Messaggi e allegati hanno priorità rispetto al refresh periodico. Le pagine trasferiscono i metadati degli allegati; i byte vengono richiesti solo da anteprime visibili e azioni esplicite, con buffer azzerati al termine dell’uso e al blocco. `VeilidService` avvia il nodo nello storage applicativo persistente, ritenta startup e attachment falliti e distingue feature assente, bootstrap Android, protected/local store, configurazione e rete senza esporre dettagli interni.
 
 `main.dart` non seleziona alcun bridge dimostrativo. Senza core usa `UnavailableMessagingBridge`, che restituisce un inbox vuoto e rifiuta import e invio; con il core usa `SylphyMessagingBridge`, che accetta soltanto read model nativi validi. Il refresh scambia prima una revisione numerica e rilegge conversazioni o messaggi soltanto quando il core segnala una mutazione, eliminando il polling della cronologia completa ogni 700 ms. L'invio appare subito nella conversazione come elemento ottimistico; un errore lo rimuove e ripristina il testo nel composer. I fake restano confinati ai test widget.
 

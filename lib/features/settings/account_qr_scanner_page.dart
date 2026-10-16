@@ -44,7 +44,7 @@ class _AccountQrScannerPageState extends State<AccountQrScannerPage> {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: const Text('Scansiona il QR del computer'),
+        title: const Text('Scansiona il QR dell’altro dispositivo'),
       ),
       body: Stack(
         fit: StackFit.expand,
@@ -80,7 +80,7 @@ class _AccountQrScannerPageState extends State<AccountQrScannerPage> {
                 ),
                 child: Text(
                   _error ??
-                      'Inquadra il codice mostrato da Sylphy sul computer. La fotocamera è usata solo in questa schermata.',
+                      'Inquadra il codice mostrato da Sylphy sull’altro dispositivo. La fotocamera è usata solo in questa schermata.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     color: _error == null

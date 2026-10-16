@@ -1,6 +1,7 @@
 #include "my_application.h"
 
 #include <flutter_linux/flutter_linux.h>
+#include <dlfcn.h>
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
 #endif
@@ -124,7 +125,16 @@ static void my_application_startup(GApplication* application) {
 static void my_application_shutdown(GApplication* application) {
   //MyApplication* self = MY_APPLICATION(object);
 
-  // Perform any actions required at application shutdown.
+  // Only use a core that was already opened by Dart. Do not initialize one
+  // during shutdown, when its Flutter engine may already be gone.
+  if (void* core = dlopen("libsylphy_core.so", RTLD_NOW | RTLD_NOLOAD)) {
+    using CloseVault = bool (*)();
+    if (auto close_vault = reinterpret_cast<CloseVault>(
+            dlsym(core, "sylphy_core_close_vault"))) {
+      close_vault();
+    }
+    dlclose(core);
+  }
 
   G_APPLICATION_CLASS(my_application_parent_class)->shutdown(application);
 }

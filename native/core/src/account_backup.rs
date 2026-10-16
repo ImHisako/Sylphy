@@ -194,6 +194,21 @@ pub fn import(
     let staging_text = staging.to_str().ok_or(CoreError::InvalidInput)?;
     let prepared = (|| {
         identity::import_account_record(staging_text, vault_password, backup.identity.clone())?;
+        // Install the profile recovery record in the same identity transaction.
+        // Flutter may lock or stop after committing the account but before it
+        // persists its profile. Only ciphertext reaches the staging directory.
+        let profile = Zeroizing::new(
+            serde_json::to_vec(&json!({
+                "version": 2,
+                "display_name": backup.display_name,
+                "photo_base64": backup.avatar_base64,
+            }))
+            .map_err(|_| CoreError::Internal)?,
+        );
+        crate::atomic_file::replace(
+            &staging.join("identity").join("imported-profile.vault"),
+            &vault::seal(vault_password, &profile)?,
+        )?;
         messaging_adapter::configure_storage(staging_text)?;
         messaging_adapter::import_account_backup(backup.messaging.clone())
     })();
@@ -326,6 +341,73 @@ fn current_time_ms() -> CoreResult<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encrypted_account_moves_between_devices_and_bad_password_preserves_destination() {
+        let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+        let root =
+            std::env::temp_dir().join(format!("sylphy-account-roundtrip-{}", std::process::id()));
+        let source = root.join("source");
+        let target = root.join("target");
+        let source_text = source.to_string_lossy();
+        let target_text = target.to_string_lossy();
+        let original =
+            identity::ensure_identity(&source_text, "source-device-secret", None, None).unwrap();
+        messaging_adapter::configure_storage(&source_text).unwrap();
+        let source_device = ratchet_adapter::public_pre_key_bundle().unwrap();
+        let document = export("transfer password 123", "Transferred profile", None).unwrap();
+        let encoded = document["backup_base64"].as_str().unwrap();
+        let previous =
+            identity::ensure_identity(&target_text, "target-device-secret", None, None).unwrap();
+        messaging_adapter::configure_storage(&target_text).unwrap();
+        assert!(matches!(
+            import(
+                "incorrect password",
+                encoded,
+                &target_text,
+                "target-device-secret"
+            ),
+            Err(CoreError::AuthenticationFailed)
+        ));
+        assert_eq!(
+            identity::ensure_identity(&target_text, "target-device-secret", None, None).unwrap()["identity_id"],
+            previous["identity_id"]
+        );
+        let restored = import(
+            "transfer password 123",
+            encoded,
+            &target_text,
+            "target-device-secret",
+        )
+        .unwrap();
+        assert_eq!(restored["display_name"], "Transferred profile");
+        let recovery = fs::read(target.join("identity/imported-profile.vault")).unwrap();
+        assert!(
+            !recovery
+                .windows(b"Transferred profile".len())
+                .any(|part| part == b"Transferred profile")
+        );
+        let profile: Value =
+            serde_json::from_slice(&vault::open("target-device-secret", &recovery).unwrap())
+                .unwrap();
+        assert_eq!(profile["display_name"], "Transferred profile");
+        assert_eq!(profile["version"], 2);
+        let reopened =
+            identity::ensure_identity(&target_text, "target-device-secret", None, None).unwrap();
+        assert_eq!(reopened["identity_id"], original["identity_id"]);
+        if let Some(source_device) = source_device {
+            let target_device = ratchet_adapter::public_pre_key_bundle().unwrap().unwrap();
+            assert_ne!(source_device.identity_key, target_device.identity_key);
+        }
+        assert_eq!(
+            messaging_adapter::export_account_backup().unwrap()["contacts"],
+            json!([])
+        );
+        assert!(!target.join(IMPORT_JOURNAL).exists());
+        identity::wipe_memory().unwrap();
+        messaging_adapter::wipe_memory().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn recovery_handles_every_install_boundary_and_repeated_startup() {

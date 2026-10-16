@@ -9,7 +9,7 @@ import 'package:ffi/ffi.dart';
 
 import '../diagnostics/app_log.dart';
 
-const _expectedAbiVersion = 15;
+const _expectedAbiVersion = 17;
 
 /// A local group read may race an account transition on the other worker.
 /// Retry once through that worker's queue, after the transition completes.
@@ -121,8 +121,39 @@ abstract interface class NativeCoreMessagePageApi {
   });
 }
 
+abstract interface class NativeActivityEventsApi {
+  Stream<void> get activityEvents;
+}
+
+abstract interface class NativeAttachmentDataApi {
+  Future<NativeCoreResponse> readAttachmentInBackground(
+    String conversationId,
+    String messageId,
+  );
+}
+
+abstract interface class NativeAccountTransferApi {
+  Future<NativeCoreResponse> exportAccountInBackground({
+    required String transferPassword,
+    required String displayName,
+    String? avatarBase64,
+  });
+  Future<NativeCoreResponse> importAccountInBackground({
+    required String transferPassword,
+    required String backupBase64,
+    required String storageDirectory,
+    required String vaultPassword,
+  });
+}
+
 class NativeCoreClient
-    implements NativeCoreApi, NativeCoreGroupApi, NativeCoreMessagePageApi {
+    implements
+        NativeCoreApi,
+        NativeCoreGroupApi,
+        NativeCoreMessagePageApi,
+        NativeActivityEventsApi,
+        NativeAttachmentDataApi,
+        NativeAccountTransferApi {
   NativeCoreClient._(this._call, this._freeString, this.abiVersion);
 
   final _DartCall _call;
@@ -135,6 +166,73 @@ class NativeCoreClient
   Future<_NativeWorker>? _worker;
   Future<_NativeWorker>? _readOnlyWorker;
   bool _workerBusy = false;
+  _NativeWorker? _activityWorker;
+  bool _activityWatching = false;
+  int _activityGeneration = 0;
+  late final StreamController<void> _activityController =
+      StreamController<void>.broadcast(
+        onListen: () {
+          if (!_activityWatching) {
+            _activityWatching = true;
+            unawaited(_watchActivity(_activityGeneration));
+          }
+        },
+      );
+
+  @override
+  Stream<void> get activityEvents => _activityController.stream;
+
+  Future<void> _watchActivity(int generation) async {
+    var sequence = 0;
+    while (generation == _activityGeneration) {
+      ReceivePort? response;
+      try {
+        final worker = _activityWorker ??= await _spawnWorker();
+        if (generation != _activityGeneration) {
+          worker.isolate.kill(priority: Isolate.immediate);
+          return;
+        }
+        response = ReceivePort();
+        worker.port.send((
+          response.sendPort,
+          <String, Object>{
+            'command': 'wait_for_activity',
+            'after': sequence,
+            'timeout_ms': 30000,
+          },
+        ));
+        final result = await response.first.timeout(
+          const Duration(seconds: 35),
+        );
+        final value = result is Map
+            ? NativeCoreResponse.fromJson(result.cast<String, dynamic>())
+            : null;
+        final next = value?.data['sequence'];
+        if (value?.ok != true || next is! int) {
+          throw const NativeCoreException('invalid_activity_event');
+        }
+        if (generation == _activityGeneration && next != sequence) {
+          sequence = next;
+          _activityController.add(null);
+        }
+      } on Object {
+        _activityWorker?.isolate.kill(priority: Isolate.immediate);
+        _activityWorker = null;
+        if (generation == _activityGeneration) {
+          await Future<void>.delayed(const Duration(seconds: 1));
+        }
+      } finally {
+        response?.close();
+      }
+    }
+  }
+
+  void disposeActivityEvents() {
+    _activityGeneration++;
+    _activityWorker?.isolate.kill(priority: Isolate.immediate);
+    _activityWorker = null;
+    unawaited(_activityController.close());
+  }
 
   bool get backgroundCallInProgress => _pendingBackgroundCalls > 0;
 
@@ -222,7 +320,7 @@ class NativeCoreClient
   }
 
   Future<NativeCoreResponse> listConversationsInBackground() =>
-      _callInBackground(const {'command': 'list_conversations'});
+      _callInBackground(const {'command': 'read_conversations'});
 
   @override
   NativeCoreResponse listMessages(String conversationId) {
@@ -256,7 +354,7 @@ class NativeCoreClient
     int? beforeMs,
     String? beforeId,
   }) => _callInBackground({
-    'command': 'list_messages',
+    'command': 'read_messages',
     'conversation_id': conversationId,
     if (beforeMs != null) 'before_ms': beforeMs,
     if (beforeId != null) 'before_id': beforeId,
@@ -311,7 +409,20 @@ class NativeCoreClient
 
   Future<NativeCoreResponse> groupCommandInBackground(
     Map<String, dynamic> request,
-  ) => _callInBackground(Map<String, Object>.from(request));
+  ) => _callInBackground({
+    ...Map<String, Object>.from(request),
+    if (request['command'] == 'search_messages') 'command': 'read_search',
+  });
+
+  @override
+  Future<NativeCoreResponse> readAttachmentInBackground(
+    String conversationId,
+    String messageId,
+  ) => _callInBackground({
+    'command': 'read_attachment',
+    'conversation_id': conversationId,
+    'message_id': messageId,
+  });
 
   Future<NativeCoreResponse> securityCommandInBackground(
     Map<String, Object> request,
@@ -443,6 +554,7 @@ class NativeCoreClient
     if (avatarBase64 != null) 'avatar_base64': avatarBase64,
   });
 
+  @override
   Future<NativeCoreResponse> exportAccountInBackground({
     required String transferPassword,
     required String displayName,
@@ -454,6 +566,7 @@ class NativeCoreClient
     if (avatarBase64 != null) 'avatar_base64': avatarBase64,
   });
 
+  @override
   Future<NativeCoreResponse> importAccountInBackground({
     required String transferPassword,
     required String backupBase64,
@@ -489,7 +602,13 @@ class NativeCoreClient
     Map<String, Object> request, {
     bool priority = false,
   }) {
-    if (request['command'] == 'group_details') {
+    if (const {
+      'group_details',
+      'read_messages',
+      'read_conversations',
+      'read_search',
+      'read_attachment',
+    }.contains(request['command'])) {
       return _readGroupDetails(request);
     }
     return _enqueueBackgroundCall(request, priority: priority);
@@ -581,7 +700,10 @@ class NativeCoreClient
     try {
       return await readGroupDetailsWithAccountRetry(
         read: () => _workerCall(request, readOnly: true),
-        queuedRead: () => _enqueueBackgroundCall(request, priority: true),
+        queuedRead: () => _enqueueBackgroundCall({
+          ...request,
+          if (request['command'] != 'group_details') 'allow_load': true,
+        }, priority: true),
       );
     } finally {
       _pendingBackgroundCalls--;

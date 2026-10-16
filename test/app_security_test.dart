@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:async';
 import 'dart:typed_data';
+import 'dart:ui' show AppExitResponse;
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -19,6 +20,126 @@ void main() {
     });
   });
   tearDown(() => PlatformDeviceSecretStore.passphraseProtected = false);
+
+  test('closing wipes and suspends an account without a passphrase', () async {
+    final backend = _SecurityBackend(enabled: false);
+    final controller = backend.controller();
+    addTearDown(controller.dispose);
+    await controller.initialize();
+    await controller.close();
+    expect(controller.locked, isTrue);
+    expect(backend.suspended, isTrue);
+    expect(backend.commands, contains('close_vault'));
+    expect(
+      await const FlutterSecureStorage().read(
+        key: 'sylphy_identity_vault_secret_v1',
+      ),
+      'a' * 43,
+    );
+    await controller.resumed();
+    expect(controller.locked, isFalse);
+    expect(backend.suspended, isFalse);
+  });
+
+  test(
+    'a foreground return during startup restores a wiped legacy account',
+    () async {
+      final backend = _SecurityBackend(enabled: false);
+      final release = Completer<void>();
+      final controller = AppSecurityController(
+        supportDirectory: () async => Directory.systemTemp,
+        command: (request) async {
+          if (request['command'] == 'configure_security') {
+            await release.future;
+          }
+          return backend.call(request);
+        },
+      );
+      addTearDown(controller.dispose);
+      final starting = controller.initialize();
+      await Future<void>.delayed(Duration.zero);
+      await controller.close();
+      await controller.resumed();
+      release.complete();
+      await starting;
+      expect(controller.loaded, isTrue);
+      expect(controller.locked, isFalse);
+      expect(backend.suspended, isFalse);
+    },
+  );
+
+  test('closing is not lost behind a pending lock', () async {
+    final backend = _SecurityBackend();
+    final release = Completer<void>();
+    var delayLock = false;
+    final controller = AppSecurityController(
+      supportDirectory: () async => Directory.systemTemp,
+      command: (request) async {
+        if (delayLock && request['command'] == 'lock_vault') {
+          await release.future;
+        }
+        return backend.call(request);
+      },
+    );
+    addTearDown(controller.dispose);
+    await controller.initialize();
+    await controller.unlock('twelve random words');
+    delayLock = true;
+    final locking = controller.lock();
+    final closing = controller.close();
+    release.complete();
+    await Future.wait([locking, closing]);
+    expect(backend.suspended, isTrue);
+    expect(backend.commands.last, 'close_vault');
+    await controller.resumed();
+    expect(controller.locked, isTrue);
+    await controller.unlock('twelve random words');
+    expect(controller.locked, isFalse);
+  });
+
+  test(
+    'a delayed foreground resume cannot reopen a closed legacy account',
+    () async {
+      final backend = _SecurityBackend(enabled: false);
+      final release = Completer<void>();
+      var delayResume = false;
+      final controller = AppSecurityController(
+        supportDirectory: () async => Directory.systemTemp,
+        command: (request) async {
+          if (delayResume && request['command'] == 'resume_vault') {
+            await release.future;
+          }
+          return backend.call(request);
+        },
+      );
+      addTearDown(controller.dispose);
+      await controller.initialize();
+      delayResume = true;
+      final resuming = controller.resumed();
+      await Future<void>.delayed(Duration.zero);
+      await controller.close();
+      release.complete();
+      await resuming;
+      expect(controller.locked, isTrue);
+      expect(backend.suspended, isTrue);
+    },
+  );
+
+  test('screen off has an independent lock condition', () async {
+    final backend = _SecurityBackend();
+    final controller = backend.controller();
+    addTearDown(controller.dispose);
+    await controller.initialize();
+    await controller.unlock('twelve random words');
+    await controller.updatePolicy(onBackground: false, onScreenOff: true);
+    controller.screenOff();
+    expect(controller.locked, isTrue);
+    await controller.resumed();
+    await controller.unlock('twelve random words');
+    await controller.updatePolicy(onScreenOff: false);
+    controller.screenOff();
+    expect(controller.locked, isFalse);
+  });
 
   test(
     'migration removes automatic-unlock key only after a successful commit',
@@ -117,6 +238,41 @@ void main() {
   });
 
   testWidgets(
+    'exit waits for wiping and disposes unprotected UI before native completion',
+    (tester) async {
+      final backend = _SecurityBackend(enabled: false);
+      final release = Completer<void>();
+      final profiles = _CountingProfiles();
+      final controller = AppSecurityController(
+        supportDirectory: () async => Directory.systemTemp,
+        command: (request) async {
+          if (request['command'] == 'close_vault') await release.future;
+          return backend.call(request);
+        },
+      );
+      await tester.pumpWidget(
+        SylphyApp(appSecurity: controller, profileStore: profiles),
+      );
+      await tester.pumpAndSettle();
+      expect(profiles.loads, 1);
+      final exiting = tester.binding.handleRequestAppExit();
+      await tester.pumpAndSettle();
+      expect(controller.locked, isTrue);
+      expect(backend.suspended, isFalse);
+      expect(find.text('Nessuna conversazione sicura'), findsNothing);
+      release.complete();
+      expect(await exiting, AppExitResponse.exit);
+      expect(backend.suspended, isTrue);
+      await controller.resumed();
+      await tester.pumpAndSettle();
+      expect(controller.locked, isFalse);
+      expect(profiles.loads, 2);
+      await tester.pumpWidget(const SizedBox.shrink());
+      controller.dispose();
+    },
+  );
+
+  testWidgets(
     'passphrase settings activate protection and expose lock controls',
     (tester) async {
       final backend = _SecurityBackend(enabled: false);
@@ -168,6 +324,7 @@ void main() {
       await controller.updatePolicy(seconds: 30, onBackground: false);
       controller.backgrounded();
       expect(controller.locked, isFalse);
+      await controller.resumed();
       await tester.pump(const Duration(seconds: 20));
       controller.userActivity();
       await tester.pump(const Duration(seconds: 20));
@@ -278,19 +435,27 @@ class _SecurityBackend {
   _SecurityBackend({this.enabled = true});
   bool enabled;
   bool locked = true;
+  bool suspended = false;
+  final List<Object?> commands = [];
   bool rejectEnable = false;
   int seconds = 300;
   bool background = true;
+  bool screenOff = true;
   Map<String, dynamic> get status => {
     'enabled': enabled,
-    'locked': enabled && locked,
-    'policy': {'inactivity_seconds': seconds, 'lock_on_background': background},
+    'locked': suspended || (enabled && locked),
+    'policy': {
+      'inactivity_seconds': seconds,
+      'lock_on_background': background,
+      'lock_on_screen_off': screenOff,
+    },
   };
   AppSecurityController controller() => AppSecurityController(
     command: call,
     supportDirectory: () async => Directory.systemTemp,
   );
   Future<NativeCoreResponse> call(Map<String, Object> request) async {
+    commands.add(request['command']);
     switch (request['command']) {
       case 'enable_passphrase':
         if (rejectEnable) {
@@ -312,11 +477,18 @@ class _SecurityBackend {
           );
         }
         locked = false;
+        suspended = false;
       case 'lock_vault':
         locked = true;
+      case 'close_vault':
+        locked = true;
+        suspended = true;
+      case 'resume_vault':
+        if (!enabled) suspended = false;
       case 'set_lock_policy':
         seconds = request['inactivity_seconds'] as int;
         background = request['lock_on_background'] as bool;
+        screenOff = request['lock_on_screen_off'] as bool;
     }
     return NativeCoreResponse(ok: true, code: 'ok', data: status);
   }

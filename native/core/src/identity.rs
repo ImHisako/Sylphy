@@ -164,11 +164,18 @@ impl IdentityRecord {
     }
 }
 
-static ACTIVE_IDENTITY: OnceLock<Mutex<Option<IdentityRecord>>> = OnceLock::new();
+#[derive(Clone)]
+struct UnlockedIdentity {
+    path: PathBuf,
+    password: Zeroizing<String>,
+    record: IdentityRecord,
+}
+
+static ACTIVE_IDENTITY: OnceLock<Mutex<Option<UnlockedIdentity>>> = OnceLock::new();
 #[cfg(test)]
 pub(crate) static TEST_IDENTITY_LOCK: Mutex<()> = Mutex::new(());
 
-fn active_identity_store() -> &'static Mutex<Option<IdentityRecord>> {
+fn active_identity_store() -> &'static Mutex<Option<UnlockedIdentity>> {
     ACTIVE_IDENTITY.get_or_init(|| Mutex::new(None))
 }
 
@@ -183,8 +190,33 @@ pub(crate) fn active_identity() -> CoreResult<IdentityRecord> {
     active_identity_store()
         .lock()
         .map_err(|_| CoreError::Internal)?
-        .clone()
+        .as_ref()
+        .map(|active| active.record.clone())
         .ok_or(CoreError::FeatureUnavailable)
+}
+
+fn activate_record(path: PathBuf, password: &str, record: IdentityRecord) -> CoreResult<()> {
+    *active_identity_store()
+        .lock()
+        .map_err(|_| CoreError::Internal)? = Some(UnlockedIdentity {
+        path,
+        password: Zeroizing::new(password.to_owned()),
+        record,
+    });
+    Ok(())
+}
+
+fn cached_record(path: &Path, password: &str) -> CoreResult<Option<IdentityRecord>> {
+    use subtle::ConstantTimeEq;
+    let active = active_identity_store()
+        .lock()
+        .map_err(|_| CoreError::Internal)?;
+    Ok(active
+        .as_ref()
+        .filter(|active| {
+            active.path == path && bool::from(active.password.as_bytes().ct_eq(password.as_bytes()))
+        })
+        .map(|active| active.record.clone()))
 }
 
 pub(crate) fn active_dht_descriptor() -> CoreResult<Option<String>> {
@@ -208,9 +240,7 @@ pub(crate) fn import_account_record(
     let directory = PathBuf::from(storage_directory).join("identity");
     fs::create_dir_all(&directory).map_err(|_| CoreError::Internal)?;
     persist_record(&directory.join(IDENTITY_FILE_NAME), vault_password, &record)?;
-    *active_identity_store()
-        .lock()
-        .map_err(|_| CoreError::Internal)? = Some(record);
+    activate_record(directory.join(IDENTITY_FILE_NAME), vault_password, record)?;
     ratchet_adapter::configure_storage(storage_directory)
 }
 
@@ -230,9 +260,7 @@ pub(crate) fn activate_from_storage(
         .join(IDENTITY_FILE_NAME);
     let record = load_record(&path, vault_password)?;
     record.validate()?;
-    *active_identity_store()
-        .lock()
-        .map_err(|_| CoreError::Internal)? = Some(record);
+    activate_record(path, vault_password, record)?;
     ratchet_adapter::configure_storage(storage_directory)
 }
 
@@ -320,10 +348,17 @@ pub fn ensure_identity(
         .checked_add(INVITATION_LIFETIME_MS)
         .ok_or(CoreError::Internal)?;
 
-    let mut record = if path.exists() {
-        load_record(&path, vault_password)?
+    let exists = path.exists();
+    let cached = if exists {
+        cached_record(&path, vault_password)?
     } else {
-        IdentityRecord::generate(next_expiration)
+        None
+    };
+    let reused = cached.is_some();
+    let mut record = match cached {
+        Some(record) => record,
+        None if exists => load_record(&path, vault_password)?,
+        None => IdentityRecord::generate(next_expiration),
     };
     let mut should_persist = !path.exists() || record.expires_at_ms <= now_ms;
     if record.message_storage_secret.len() != 32 {
@@ -347,10 +382,10 @@ pub fn ensure_identity(
         persist_record(&path, vault_password, &record)?;
         should_persist = false;
     }
-    *active_identity_store()
-        .lock()
-        .map_err(|_| CoreError::Internal)? = Some(record.clone());
-    ratchet_adapter::configure_storage(storage_directory)?;
+    activate_record(path.clone(), vault_password, record.clone())?;
+    if !reused {
+        ratchet_adapter::configure_storage(storage_directory)?;
+    }
     let mut signal_pre_key = ratchet_adapter::public_pre_key_bundle()?;
     let mut bundle = record.public_bundle(signal_pre_key.clone())?;
     bundle.validate()?;
@@ -420,9 +455,7 @@ pub fn ensure_identity(
     if should_persist {
         persist_record(&path, vault_password, &record)?;
     }
-    *active_identity_store()
-        .lock()
-        .map_err(|_| CoreError::Internal)? = Some(record);
+    activate_record(path, vault_password, record)?;
     Ok(json!({
         "identity_id": identity_id,
         "invitation_code": invitation_code,
@@ -478,6 +511,35 @@ fn grouped_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warm_identity_reuses_memory_and_wiping_requires_disk_authentication_again() {
+        let _guard = TEST_IDENTITY_LOCK.lock().unwrap();
+        let root =
+            std::env::temp_dir().join(format!("sylphy-warm-identity-{}", std::process::id()));
+        let root_text = root.to_string_lossy();
+        let path = root.join("identity").join(IDENTITY_FILE_NAME);
+        let first = ensure_identity(&root_text, "warm-test-secret", None, None).unwrap();
+        let encrypted = fs::read(&path).unwrap();
+        fs::write(&path, b"temporarily unreadable on disk").unwrap();
+        let warm = ensure_identity(
+            &root_text,
+            "warm-test-secret",
+            Some("Updated profile".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(warm["identity_id"], first["identity_id"]);
+        assert!(ensure_identity(&root_text, "wrong secret", None, None).is_err());
+        wipe_memory().unwrap();
+        assert!(ensure_identity(&root_text, "warm-test-secret", None, None).is_err());
+        fs::write(&path, encrypted).unwrap();
+        assert!(ensure_identity(&root_text, "wrong secret", None, None).is_err());
+        let reopened = ensure_identity(&root_text, "warm-test-secret", None, None).unwrap();
+        assert_eq!(reopened["identity_id"], first["identity_id"]);
+        wipe_memory().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn identity_is_stable_and_the_private_record_is_encrypted() {

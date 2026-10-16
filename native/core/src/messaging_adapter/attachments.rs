@@ -97,6 +97,7 @@ impl Transfers {
                         bytes.zeroize();
                     }
                 }
+                crate::activity_events::notify();
             });
         self.active = Some(Active { job, receiver });
     }

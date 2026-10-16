@@ -14,9 +14,30 @@ import androidx.core.app.NotificationCompat
 
 class MessagingService : Service() {
     private external fun syncInbound(): Int
+    private external fun waitForInboxEvent(after: Long): Long
+    private external fun wakeEventWaiters()
     private lateinit var workerThread: HandlerThread
     private lateinit var worker: Handler
+    private lateinit var eventThread: HandlerThread
+    private lateinit var eventWorker: Handler
+    private var eventSequence = 0L
     @Volatile private var stopped = false
+    private val watchEvents = object : Runnable {
+        override fun run() {
+            if (stopped) return
+            try {
+                val next = waitForInboxEvent(eventSequence)
+                if (next != eventSequence) {
+                    eventSequence = next
+                    if (!stopped) updatePolling()
+                }
+            } catch (_: Throwable) {
+                // The periodic poll remains available if the watcher fails.
+                return
+            }
+            if (!stopped) eventWorker.post(this)
+        }
+    }
     private val poll = object : Runnable {
         override fun run() {
             try {
@@ -71,6 +92,9 @@ class MessagingService : Service() {
             System.loadLibrary("sylphy_core")
             workerThread = HandlerThread("sylphy-inbox").apply { start() }
             worker = Handler(workerThread.looper)
+            eventThread = HandlerThread("sylphy-inbox-events").apply { start() }
+            eventWorker = Handler(eventThread.looper)
+            eventWorker.post(watchEvents)
             activeService = this
             updatePolling()
         } catch (error: Throwable) {
@@ -84,8 +108,17 @@ class MessagingService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        SecurityLifecycle.submit(SecurityLifecycle.CLOSE)
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         stopped = true
+        try { wakeEventWaiters() } catch (_: Throwable) { }
+        if (::eventWorker.isInitialized) eventWorker.removeCallbacksAndMessages(null)
+        if (::eventThread.isInitialized) eventThread.quitSafely()
+        if (!uiResumed) SecurityLifecycle.submit(SecurityLifecycle.CLOSE)
         if (activeService === this) activeService = null
         if (::worker.isInitialized) worker.removeCallbacksAndMessages(null)
         if (::workerThread.isInitialized) workerThread.quitSafely()

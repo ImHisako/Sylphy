@@ -50,6 +50,11 @@ class AppSecurityHost extends StatelessWidget {
           );
         }
         if (controller.locked) {
+          if (!controller.enabled) {
+            return const Material(
+              child: Center(child: Text('Pulizia della memoria…')),
+            );
+          }
           return Navigator(
             key: const ValueKey('locked-navigator'),
             onGenerateRoute: (_) => MaterialPageRoute<void>(
@@ -340,9 +345,9 @@ class AppSecuritySettings extends StatelessWidget {
             ),
             SwitchListTile(
               key: const ValueKey('automatic-lock-background'),
-              title: const Text('Blocca quando esci dall’app'),
+              title: const Text('Blocca in background'),
               subtitle: const Text(
-                'Include il passaggio in background e lo schermo spento.',
+                'Blocca quando passi a un’altra app o riduci la finestra.',
               ),
               value: controller.lockOnBackground,
               onChanged: (value) => _policy(
@@ -350,6 +355,19 @@ class AppSecuritySettings extends StatelessWidget {
                 controller.updatePolicy(onBackground: value),
               ),
             ),
+            if (Theme.of(context).platform == TargetPlatform.android)
+              SwitchListTile(
+                key: const ValueKey('automatic-lock-screen-off'),
+                title: const Text('Blocca allo spegnimento dello schermo'),
+                subtitle: const Text(
+                  'Attivo anche con il blocco in background disattivato.',
+                ),
+                value: controller.lockOnScreenOff,
+                onChanged: (value) => _policy(
+                  context,
+                  controller.updatePolicy(onScreenOff: value),
+                ),
+              ),
             ListTile(
               key: const ValueKey('wipe-and-lock'),
               leading: const Icon(Icons.cleaning_services_outlined),
@@ -360,6 +378,13 @@ class AppSecuritySettings extends StatelessWidget {
               onTap: controller.lock,
             ),
           ],
+          const ListTile(
+            leading: Icon(Icons.memory_outlined),
+            title: Text('Pulizia RAM alla chiusura sempre attiva'),
+            subtitle: Text(
+              'Alla chiusura Sylphy rimuove chiavi, sessioni e cache dalla memoria, anche senza passphrase. La pulizia è best effort.',
+            ),
+          ),
         ],
       ),
     );

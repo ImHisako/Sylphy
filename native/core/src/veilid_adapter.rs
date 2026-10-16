@@ -1002,12 +1002,70 @@ pub(crate) fn retry_inbound_payload(_payload: InboundPayload) {}
 pub(crate) fn set_offline_targets(
     targets: Vec<crate::offline_mailbox::MailboxKeys>,
 ) -> CoreResult<()> {
-    let state = lock_runtime()?;
-    let node = state.node.as_ref().ok_or(CoreError::NetworkStartupFailed)?;
+    let mut state = lock_runtime()?;
+    let VeilidRuntime { runtime, node } = &mut *state;
+    let node = node.as_mut().ok_or(CoreError::NetworkStartupFailed)?;
     *node
         .offline_targets
         .lock()
         .map_err(|_| CoreError::Internal)? = targets;
+    if node.offline_task.is_none() {
+        node.offline_task = Some(runtime.spawn(poll_offline_mailboxes(
+            node.api.clone(),
+            Arc::clone(&node.inbound_envelopes),
+            Arc::clone(&node.offline_targets),
+            Arc::clone(&node.offline_seen),
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "veilid")]
+pub(crate) fn wipe_account_memory() -> CoreResult<()> {
+    use zeroize::Zeroize;
+    // Wiping must not create a runtime or require a running network.
+    let Some(Ok(state)) = VEILID_RUNTIME.get() else {
+        return Ok(());
+    };
+    let mut state = state.lock().map_err(|_| CoreError::Internal)?;
+    let VeilidRuntime { runtime, node } = &mut *state;
+    let Some(node) = node.as_mut() else {
+        return Ok(());
+    };
+    // Await cancellation so task-owned mailbox capabilities are dropped before
+    // returning. Account polling is restarted explicitly after unlocking.
+    for task in [node.mailbox_task.take(), node.offline_task.take()]
+        .into_iter()
+        .flatten()
+    {
+        task.abort();
+        let _ = runtime.block_on(task);
+    }
+    node.offline_targets
+        .lock()
+        .map_err(|_| CoreError::Internal)?
+        .clear();
+    let mut inbox = node
+        .inbound_envelopes
+        .lock()
+        .map_err(|_| CoreError::Internal)?;
+    for item in inbox.iter_mut() {
+        item.payload.zeroize();
+    }
+    inbox.clear();
+    node.seen_mailbox_slots
+        .lock()
+        .map_err(|_| CoreError::Internal)?
+        .clear();
+    node.offline_seen
+        .lock()
+        .map_err(|_| CoreError::Internal)?
+        .clear();
+    Ok(())
+}
+
+#[cfg(not(feature = "veilid"))]
+pub(crate) fn wipe_account_memory() -> CoreResult<()> {
     Ok(())
 }
 
@@ -1296,6 +1354,7 @@ async fn poll_offline_mailbox_once(
                 offline_digest: Some(digest),
                 offline_receipt: Some(receipt),
             });
+            crate::activity_events::notify();
         }
         Ok(())
     })
@@ -1496,6 +1555,7 @@ fn enqueue_inbound_envelope(
             offline_digest: None,
             offline_receipt: None,
         });
+        crate::activity_events::notify();
         return true;
     }
     false

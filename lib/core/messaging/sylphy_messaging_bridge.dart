@@ -12,6 +12,8 @@ class SylphyMessagingBridge
     implements
         SecureMessagingBridge,
         AttachmentRetrievalBridge,
+        AttachmentContentBridge,
+        InboxWakeupNotifications,
         GroupMessagingBridge,
         GroupManagementBridge,
         GroupChannelBridge,
@@ -24,6 +26,44 @@ class SylphyMessagingBridge
 
   final NativeCoreApi _core;
   final Map<String, int> _groupRevisions = {};
+  final List<WeakReference<Uint8List>> _attachmentBuffers = [];
+
+  @override
+  Stream<void> get inboxWakeups => _core is NativeActivityEventsApi
+      ? (_core as NativeActivityEventsApi).activityEvents
+      : const Stream<void>.empty();
+
+  @override
+  Future<Uint8List> readAttachment(
+    String conversationId,
+    String messageId,
+  ) async {
+    final core = _core;
+    if (core is! NativeAttachmentDataApi) {
+      throw const SecureMessagingException('feature_unavailable');
+    }
+    final generation = _cacheGeneration;
+    final response = await (core as NativeAttachmentDataApi)
+        .readAttachmentInBackground(conversationId, messageId);
+    _requireSuccess(response);
+    if (generation != _cacheGeneration) {
+      throw const SecureMessagingException('vault_locked');
+    }
+    final encoded = response.data['bytes_base64'];
+    if (encoded is! String ||
+        encoded.isEmpty ||
+        encoded.length > ((maxAttachmentBytes + 2) ~/ 3) * 4) {
+      throw const SecureMessagingException('invalid_native_response');
+    }
+    final bytes = base64Decode(encoded);
+    if (bytes.isEmpty || bytes.length > maxAttachmentBytes) {
+      bytes.fillRange(0, bytes.length, 0);
+      throw const SecureMessagingException('invalid_native_response');
+    }
+    _attachmentBuffers.removeWhere((reference) => reference.target == null);
+    _attachmentBuffers.add(WeakReference(bytes));
+    return bytes;
+  }
 
   @override
   Future<void> requestAttachment(
@@ -198,6 +238,11 @@ class SylphyMessagingBridge
 
   void clearCachesAfterAccountImport() {
     _cacheGeneration++;
+    for (final reference in _attachmentBuffers) {
+      final bytes = reference.target;
+      bytes?.fillRange(0, bytes.length, 0);
+    }
+    _attachmentBuffers.clear();
     for (final message in _messageCache.values) {
       final bytes = message.attachmentBytes;
       bytes?.fillRange(0, bytes.length, 0);

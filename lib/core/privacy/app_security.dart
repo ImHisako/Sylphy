@@ -28,15 +28,20 @@ class AppSecurityController extends ChangeNotifier {
   String? error;
   int inactivitySeconds = 300;
   bool lockOnBackground = true;
+  bool lockOnScreenOff = true;
   Timer? _inactivityTimer;
   Future<void>? _locking;
-  DateTime? _lastNativeTouch;
+  String? _pendingPurge;
+  bool _foreground = true;
+  final Stopwatch _touchClock = Stopwatch()..start();
+  Duration? _lastNativeTouch;
   bool _disposed = false;
   int _lockGeneration = 0;
 
   Future<void> initialize() async {
     final generation = _lockGeneration;
     try {
+      await _flushPlatformSecurity();
       final directory = await _supportDirectory();
       _accept(
         await _send({
@@ -54,11 +59,28 @@ class AppSecurityController extends ChangeNotifier {
         // A new application instance must require its passphrase nonetheless.
         await _send({'command': 'lock_vault'});
         locked = true;
+      } else {
+        _accept(
+          await _send({'command': 'resume_vault'}),
+          generation: generation,
+        );
+        if (locked) await _purge('close_vault');
+      }
+      if (Platform.isAndroid) {
+        const MethodChannel('sylphy/security').setMethodCallHandler((
+          call,
+        ) async {
+          if (call.method == 'screenOff') screenOff();
+          if (call.method == 'appClosing') await close();
+        });
       }
       await _protectSnapshots();
       loaded = true;
       error = null;
       _armTimer();
+      // Android can hide and restore its root task before configuration has
+      // finished. Honor that explicit resume after fencing the stale result.
+      if (!enabled && locked && _foreground && !_disposed) await resumed();
     } on Object {
       locked = true;
       error =
@@ -124,31 +146,56 @@ class AppSecurityController extends ChangeNotifier {
 
   Future<void> lock() {
     if (!enabled) return Future.value();
-    _lockGeneration++;
-    _inactivityTimer?.cancel();
-    locked = true;
-    _notify(); // Remove all routes and Flutter caches before waiting for FFI.
-    return _locking ??=
-        Future.wait<void>([
-              _send({'command': 'lock_vault'}).then<void>((_) {}),
-              _wipePlatformBuffers(),
-            ])
-            .then<void>((_) {})
-            .catchError((Object _) {
-              error =
-                  'Pulizia nativa non completata. Il contenuto resta bloccato; riprova.';
-              _notify();
-            })
-            .whenComplete(() => _locking = null);
+    return _purge('lock_vault');
   }
 
-  Future<void> updatePolicy({int? seconds, bool? onBackground}) async {
+  /// Closing always purges RAM, including accounts without a passphrase.
+  Future<void> close() {
+    _foreground = false;
+    return _purge('close_vault');
+  }
+
+  Future<void> _purge(String command) {
+    _lockGeneration++;
+    _inactivityTimer?.cancel();
+    _lastNativeTouch = null;
+    locked = true;
+    // A close must never be lost behind an in-progress, weaker lock.
+    if (_pendingPurge != 'close_vault') _pendingPurge = command;
+    _notify(); // Remove all routes and Flutter caches before waiting for FFI.
+    return _locking ??= _drainPurges().whenComplete(() => _locking = null);
+  }
+
+  Future<void> _drainPurges() async {
+    while (_pendingPurge != null) {
+      final command = _pendingPurge!;
+      _pendingPurge = null;
+      try {
+        await Future.wait<void>([
+          _send({'command': command}).then<void>((_) {}),
+          _wipePlatformBuffers(),
+        ]);
+        error = null;
+      } on Object {
+        error =
+            'Pulizia nativa non completata. Il contenuto resta bloccato; riprova.';
+      }
+    }
+    _notify();
+  }
+
+  Future<void> updatePolicy({
+    int? seconds,
+    bool? onBackground,
+    bool? onScreenOff,
+  }) async {
     final generation = _lockGeneration;
     _accept(
       await _send({
         'command': 'set_lock_policy',
         'inactivity_seconds': seconds ?? inactivitySeconds,
         'lock_on_background': onBackground ?? lockOnBackground,
+        'lock_on_screen_off': onScreenOff ?? lockOnScreenOff,
       }),
       generation: generation,
     );
@@ -157,12 +204,12 @@ class AppSecurityController extends ChangeNotifier {
   }
 
   void userActivity() {
-    if (!loaded || !enabled || locked || busy) return;
+    if (!loaded || !enabled || locked || busy || !_foreground) return;
     _armTimer();
     // Do not let network polling renew this deadline. Only user input counts.
-    final now = DateTime.now();
+    final now = _touchClock.elapsed;
     if (_lastNativeTouch != null &&
-        now.difference(_lastNativeTouch!) < const Duration(seconds: 1)) {
+        now - _lastNativeTouch! < const Duration(seconds: 1)) {
       return;
     }
     _lastNativeTouch = now;
@@ -175,27 +222,49 @@ class AppSecurityController extends ChangeNotifier {
   }
 
   Future<void> resumed() async {
-    if (!loaded || !enabled) return;
+    _foreground = true;
+    if (!loaded) return;
     try {
+      await _locking;
+      await _flushPlatformSecurity();
       final wasLocked = locked;
       final generation = _lockGeneration;
       _accept(
-        await _send({'command': 'security_status'}),
+        await _send({'command': enabled ? 'security_status' : 'resume_vault'}),
         generation: generation,
       );
-      if (locked && !wasLocked) {
+      if (generation != _lockGeneration && !enabled) {
+        await close();
+      } else if (locked && !wasLocked) {
         await lock();
       }
       _notify();
     } on Object {
-      await lock();
+      await close();
     }
   }
 
   void backgrounded() {
+    _foreground = false;
     if (lockOnBackground) {
       _lockGeneration++;
       if (enabled) unawaited(lock());
+    }
+  }
+
+  void screenOff() {
+    _foreground = false;
+    if (lockOnScreenOff) {
+      _lockGeneration++;
+      if (enabled) unawaited(lock());
+    }
+  }
+
+  Future<void> _flushPlatformSecurity() async {
+    if (Platform.isAndroid) {
+      await const MethodChannel(
+        'sylphy/platform',
+      ).invokeMethod<void>('flushSecurityEvents');
     }
   }
 
@@ -228,12 +297,12 @@ class AppSecurityController extends ChangeNotifier {
       throw const NativeCoreException('invalid_security_response');
     }
     enabled = data['enabled'] as bool;
-    locked =
-        (enabled && generation != _lockGeneration) || data['locked'] as bool;
+    locked = generation != _lockGeneration || data['locked'] as bool;
     PlatformDeviceSecretStore.passphraseProtected = enabled;
     final policy = data['policy'] as Map;
     inactivitySeconds = policy['inactivity_seconds'] as int;
     lockOnBackground = policy['lock_on_background'] as bool;
+    lockOnScreenOff = policy['lock_on_screen_off'] as bool? ?? true;
   }
 
   void _armTimer() {
@@ -255,6 +324,9 @@ class AppSecurityController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _inactivityTimer?.cancel();
+    if (Platform.isAndroid) {
+      const MethodChannel('sylphy/security').setMethodCallHandler(null);
+    }
     super.dispose();
   }
 }

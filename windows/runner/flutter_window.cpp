@@ -89,6 +89,15 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  // Dart exit callbacks cannot run after the engine is torn down. Use the
+  // already-loaded core as a final, synchronous cleanup barrier.
+  if (const auto core = GetModuleHandleW(L"sylphy_core.dll")) {
+    using CloseVault = bool (*)();
+    if (const auto close_vault = reinterpret_cast<CloseVault>(
+            GetProcAddress(core, "sylphy_core_close_vault"))) {
+      close_vault();
+    }
+  }
   if (screen_capture_channel_) {
     screen_capture_channel_->SetMethodCallHandler(nullptr);
     screen_capture_channel_.reset();

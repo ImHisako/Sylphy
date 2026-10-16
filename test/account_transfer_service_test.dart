@@ -2,12 +2,217 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:file_selector/file_selector.dart';
-
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sylphy/core/identity/account_transfer_service.dart';
+import 'package:sylphy/core/identity/identity_service.dart';
+import 'package:sylphy/core/native/native_core.dart';
+import 'package:sylphy/core/profile/user_profile.dart';
+import 'package:share_plus/share_plus.dart';
 
 void main() {
+  test('local QR serves the encrypted document once and then closes', () async {
+    final bytes = _document('YQ');
+    final session = await AccountQrTransferSession.start(
+      bytes,
+      addressProvider: () async => ['192.168.1.20'],
+    );
+    final advertised = parseAccountQrPayload(session.qrPayload);
+    final endpoint = advertised.replace(host: '127.0.0.1');
+    final client = HttpClient();
+    try {
+      expect(session.state.value, AccountQrTransferState.waiting);
+      final response = await (await client.getUrl(endpoint)).close();
+      expect(response.statusCode, HttpStatus.ok);
+      final received = await response.fold<List<int>>(
+        [],
+        (result, chunk) => result..addAll(chunk),
+      );
+      expect(received, bytes);
+      await Future<void>.delayed(Duration.zero);
+      expect(session.state.value, AccountQrTransferState.transferred);
+      await expectLater(
+        (() async => (await client.getUrl(endpoint)).close())(),
+        throwsA(isA<SocketException>()),
+      );
+    } finally {
+      client.close(force: true);
+      await session.dispose();
+    }
+  });
+  test(
+    'imports renamed files and normalizes padded transport base64',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'sylphy-transfer-',
+      );
+      final core = _TransferCore();
+      final profiles = _Profiles();
+      final bytes = _document(' YQ==\n');
+      final service = AccountTransferService(
+        nativeCore: core,
+        deviceSecretStore: _Secret(),
+        profileStore: profiles,
+        applicationSupportDirectory: () async => directory,
+        pickFile: () async => XFile.fromData(bytes, name: 'renamed.bin'),
+      );
+      try {
+        final picked = await service.pickBackupDocument();
+        expect(
+          await service.importFromDocument(
+            bytes: picked!,
+            transferPassword: 'transfer password',
+          ),
+          isA<UserProfile>(),
+        );
+        expect(core.receivedBackup, 'YQ');
+        expect(core.receivedSecret, 'destination-secret');
+        expect(profiles.saved?.displayName, 'Restored');
+      } finally {
+        await Directory('${directory.path}/native').delete();
+        await directory.delete();
+      }
+    },
+  );
+
+  test('sharing preserves the actual filename for in-memory backups', () async {
+    ShareParams? captured;
+    final service = AccountTransferService(
+      nativeCore: _TransferCore(),
+      profileStore: _Profiles(),
+      share: (params) async {
+        captured = params;
+        return const ShareResult('test', ShareResultStatus.success);
+      },
+    );
+    await service.shareBackup(
+      profile: const UserProfile(displayName: 'Source'),
+      transferPassword: 'transfer password',
+    );
+    expect(captured!.fileNameOverrides, ['Sylphy-account.sylphy-account']);
+    expect(
+      parseBackupDocument(await captured!.files!.single.readAsBytes()),
+      'YQ',
+    );
+  });
+
+  test(
+    'invalid documents never invoke import; native errors keep their code',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'sylphy-transfer-',
+      );
+      final core = _TransferCore()..errorCode = 'authentication_failed';
+      final profiles = _Profiles();
+      final service = AccountTransferService(
+        nativeCore: core,
+        profileStore: profiles,
+        deviceSecretStore: _Secret(),
+        applicationSupportDirectory: () async => directory,
+      );
+      try {
+        await expectLater(
+          service.importFromDocument(
+            bytes: utf8.encode('{}'),
+            transferPassword: 'password 123',
+          ),
+          throwsA(isA<AccountTransferException>()),
+        );
+        expect(core.imports, 0);
+        await expectLater(
+          service.importFromDocument(
+            bytes: _document('YQ'),
+            transferPassword: 'password 123',
+          ),
+          throwsA(
+            isA<AccountTransferException>().having(
+              (error) => error.code,
+              'code',
+              'authentication_failed',
+            ),
+          ),
+        );
+        expect(profiles.saved, isNull);
+      } finally {
+        await Directory('${directory.path}/native').delete();
+        await directory.delete();
+      }
+    },
+  );
+
+  test(
+    'a committed account survives both profile and cleanup errors',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'sylphy-transfer-',
+      );
+      final profiles = _Profiles()..fail = true;
+      final service = AccountTransferService(
+        nativeCore: _TransferCore(),
+        profileStore: profiles,
+        deviceSecretStore: _Secret(),
+        applicationSupportDirectory: () async => directory,
+      );
+      try {
+        await expectLater(
+          service.importFromDocument(
+            bytes: _document('YQ'),
+            transferPassword: 'password 123',
+          ),
+          throwsA(
+            isA<AccountTransferException>()
+                .having(
+                  (error) => error.code,
+                  'code',
+                  'profile_persistence_failed',
+                )
+                .having(
+                  (error) => error.importedProfile?.displayName,
+                  'committed profile',
+                  'Restored',
+                ),
+          ),
+        );
+        expect(profiles.recoveryAttempted, true);
+      } finally {
+        await Directory('${directory.path}/native').delete();
+        await directory.delete();
+      }
+    },
+  );
+
+  test(
+    'transport envelopes reject unsupported formats and malformed base64',
+    () {
+      for (final bytes in [
+        utf8.encode('not json'),
+        _document('!!!!'),
+        _document(''),
+      ]) {
+        expect(
+          () => parseBackupDocument(bytes),
+          throwsA(isA<AccountTransferException>()),
+        );
+      }
+      expect(
+        () => parseBackupDocument(
+          utf8.encode(
+            jsonEncode({
+              'format': 'sylphy-account-backup',
+              'version': 9,
+              'backup_base64': 'YQ',
+            }),
+          ),
+        ),
+        throwsA(
+          isA<AccountTransferException>().having(
+            (error) => error.code,
+            'code',
+            'unsupported_version',
+          ),
+        ),
+      );
+    },
+  );
   final exceedsLimit = throwsA(
     isA<AccountTransferException>().having(
       (error) => error.code,
@@ -149,6 +354,81 @@ void main() {
       'AccountTransferException(qr_download_failed)',
     );
   });
+}
+
+Uint8List _document(String encoded) => Uint8List.fromList(
+  utf8.encode(
+    jsonEncode({
+      'format': 'sylphy-account-backup',
+      'version': 1,
+      'backup_base64': encoded,
+    }),
+  ),
+);
+
+class _Secret implements DeviceSecretStore {
+  @override
+  Future<String> getOrCreate() async => 'destination-secret';
+}
+
+class _Profiles implements UserProfileStore, UserProfileImportRecovery {
+  UserProfile? saved;
+  bool fail = false;
+  bool recoveryAttempted = false;
+  @override
+  Future<UserProfile?> load() async => saved;
+  @override
+  Future<UserProfile> save({
+    required String displayName,
+    Uint8List? photoBytes,
+  }) async {
+    if (fail) throw StateError('profile storage unavailable');
+    return saved = UserProfile(
+      displayName: displayName,
+      photoBytes: photoBytes,
+    );
+  }
+
+  @override
+  Future<void> invalidatePersistedProfile() async {
+    recoveryAttempted = true;
+    throw StateError('cleanup unavailable');
+  }
+}
+
+class _TransferCore implements NativeAccountTransferApi {
+  String? receivedBackup;
+  String? receivedSecret;
+  String? errorCode;
+  int imports = 0;
+  @override
+  Future<NativeCoreResponse> exportAccountInBackground({
+    required String transferPassword,
+    required String displayName,
+    String? avatarBase64,
+  }) async => const NativeCoreResponse(
+    ok: true,
+    code: 'ok',
+    data: {'backup_base64': 'YQ'},
+  );
+  @override
+  Future<NativeCoreResponse> importAccountInBackground({
+    required String transferPassword,
+    required String backupBase64,
+    required String storageDirectory,
+    required String vaultPassword,
+  }) async {
+    imports++;
+    receivedBackup = backupBase64;
+    receivedSecret = vaultPassword;
+    return errorCode != null
+        ? NativeCoreResponse(ok: false, code: errorCode!, data: const {})
+        : const NativeCoreResponse(
+            ok: true,
+            code: 'ok',
+            data: {'display_name': 'Restored'},
+          );
+  }
 }
 
 class _BackupFile extends XFile {

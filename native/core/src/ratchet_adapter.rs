@@ -17,7 +17,7 @@ pub fn capability_status() -> RatchetCapabilityStatus {
     RatchetCapabilityStatus {
         compiled: cfg!(feature = "signal-ratchet"),
         provider: if cfg!(feature = "signal-ratchet") {
-            "signalapp/libsignal@v0.105.0"
+            "signalapp/libsignal@v0.105.1"
         } else {
             "not-compiled"
         },

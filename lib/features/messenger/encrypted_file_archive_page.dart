@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
 import '../../core/messaging/models.dart';
 import '../../core/messaging/secure_messaging_bridge.dart';
 import '../../core/platform/attachment_downloads.dart';
+import '../settings/app_security_widgets.dart';
 
 class EncryptedFileArchivePage extends StatefulWidget {
   const EncryptedFileArchivePage({
@@ -128,13 +130,21 @@ class _EncryptedFileArchivePageState extends State<EncryptedFileArchivePage> {
   }
 
   Future<void> _save(_ArchivedAttachment attachment) async {
-    final bytes = attachment.message.attachmentBytes;
     final name = attachment.message.attachmentName;
-    if (bytes == null || name == null) return;
+    if (!attachment.message.attachmentAvailable || name == null) return;
+    final security = AppSecurityScope.maybeOf(context);
+    Uint8List? bytes;
     try {
+      bytes = await readMessageAttachment(
+        widget.bridge,
+        attachment.conversationId,
+        attachment.message,
+      );
+      if (!mounted) return;
       final destination = await const AttachmentDownloads().save(
         fileName: name,
         bytes: bytes,
+        isCurrent: () => mounted && security?.locked != true,
       );
       if (!mounted || destination == null) return;
       ScaffoldMessenger.of(
@@ -145,6 +155,8 @@ class _EncryptedFileArchivePageState extends State<EncryptedFileArchivePage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Non è stato possibile salvare il file.')),
       );
+    } finally {
+      bytes?.fillRange(0, bytes.length, 0);
     }
   }
 
@@ -183,7 +195,7 @@ class _EncryptedFileArchivePageState extends State<EncryptedFileArchivePage> {
                     itemBuilder: (context, index) {
                       final attachment = _attachments[index];
                       final message = attachment.message;
-                      final available = message.attachmentBytes != null;
+                      final available = message.attachmentAvailable;
                       return Card(
                         child: ListTile(
                           key: ValueKey(
@@ -200,7 +212,7 @@ class _EncryptedFileArchivePageState extends State<EncryptedFileArchivePage> {
                           ),
                           subtitle: Text(
                             '${attachment.conversationName} · ${_dateLabel(message.sentAt)}'
-                            '${available ? ' · ${_sizeLabel(message.attachmentBytes!.length)}' : ' · non disponibile offline'}',
+                            '${available ? ' · ${_sizeLabel(message.attachmentSize ?? message.attachmentBytes?.length ?? 0)}' : ' · non disponibile offline'}',
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
                           ),

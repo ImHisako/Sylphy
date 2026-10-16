@@ -46,6 +46,8 @@ class ChatMessage {
   final DeliveryState deliveryState;
   final String? attachmentName;
   final Uint8List? attachmentBytes;
+  bool get attachmentAvailable =>
+      attachmentBytes != null || attachmentState == 'ready';
   final String attachmentState;
   final int? attachmentSize;
   bool get attachmentDownloading =>

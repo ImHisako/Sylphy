@@ -18,6 +18,29 @@ import 'package:sylphy/features/messenger/message_text.dart';
 
 void main() {
   testWidgets(
+    'native wakeups refresh a visible chat before the periodic timer',
+    (tester) async {
+      final bridge = _WakeupTestBridge();
+      await tester.pumpWidget(
+        SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Contatto di test'));
+      await tester.pumpAndSettle();
+      final before = bridge.refreshCount;
+      bridge.injectIncoming('Arrivato tramite evento nativo');
+      bridge.events.add(null);
+      bridge.events.add(null);
+      await tester.pump(const Duration(milliseconds: 41));
+      await tester.pumpAndSettle();
+      expect(find.text('Arrivato tramite evento nativo'), findsWidgets);
+      expect(bridge.refreshCount, before + 1);
+      await tester.pumpWidget(const SizedBox());
+      await bridge.events.close();
+      bridge.inboxChanges.dispose();
+    },
+  );
+  testWidgets(
     'attachments require a click and can be cancelled while text keeps arriving',
     (tester) async {
       final bridge = _RetrievalTestBridge();
@@ -900,10 +923,14 @@ void main() {
 
     expect(find.text('Impostazioni'), findsOneWidget);
     await tester.scrollUntilVisible(
-      find.text('DEVELOPER OPTIONS'),
+      find.byKey(const ValueKey('settings-section-diagnostics')),
       400,
       scrollable: find.byType(Scrollable).first,
     );
+    await tester.tap(
+      find.byKey(const ValueKey('settings-section-diagnostics')),
+    );
+    await tester.pumpAndSettle();
     expect(find.text('DEVELOPER OPTIONS'), findsOneWidget);
     await tester.scrollUntilVisible(
       find.byKey(const ValueKey('developer-log-viewer')),
@@ -1328,6 +1355,13 @@ class _TestRevisionNotifier extends ValueNotifier<int> {
   _TestRevisionNotifier() : super(0);
 
   bool get hasSubscribers => hasListeners;
+}
+
+class _WakeupTestBridge extends _NotifyingTestMessagingBridge
+    implements InboxWakeupNotifications {
+  final events = StreamController<void>.broadcast(sync: true);
+  @override
+  Stream<void> get inboxWakeups => events.stream;
 }
 
 class _NotifyingTestMessagingBridge extends _TestMessagingBridge

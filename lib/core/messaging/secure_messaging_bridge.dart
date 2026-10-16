@@ -51,6 +51,31 @@ abstract interface class AttachmentRetrievalBridge {
   });
 }
 
+abstract interface class AttachmentContentBridge {
+  /// Returns a caller-owned mutable buffer; clear it after use.
+  Future<Uint8List> readAttachment(String conversationId, String messageId);
+}
+
+Future<Uint8List> readMessageAttachment(
+  SecureMessagingBridge bridge,
+  String conversationId,
+  ChatMessage message,
+) async {
+  final bytes = message.attachmentBytes;
+  if (bytes != null) return Uint8List.fromList(bytes);
+  if (bridge is AttachmentContentBridge && message.attachmentAvailable) {
+    return (bridge as AttachmentContentBridge).readAttachment(
+      conversationId,
+      message.id,
+    );
+  }
+  throw const SecureMessagingException('feature_unavailable');
+}
+
+abstract interface class InboxWakeupNotifications {
+  Stream<void> get inboxWakeups;
+}
+
 /// Shares completed inbox changes with open chats without another network poll.
 abstract interface class InboxRevisionNotifications {
   ValueListenable<int> get inboxChanges;

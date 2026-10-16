@@ -16,8 +16,10 @@ server holding accounts, contacts and conversations.
 ## Features
 
 - Optional passphrase protection of existing encrypted local data, automatic
-  locking on inactivity/background and a best-effort native RAM wiper on every
-  lock. Configure these under Settings → Local security; see
+  locking on inactivity/background/screen off and a best-effort native RAM wiper
+  on every lock and app close, including accounts without a passphrase.
+  Closing also suspends background decryption until the app is reopened.
+  Configure these under Settings → Local security; see
   [local security](specs/app-security.md) for migration and memory limits.
 
 - Signed Sylphy identities shared through an ID or a `sylphy:` invitation.
@@ -115,7 +117,7 @@ flowchart TB
         UI --> DS --> BG
     end
 
-    BG -->|"JSON FFI · ABI 14"| FFI["C/Rust boundary"]
+    BG -->|"JSON FFI · ABI 17"| FFI["C/Rust boundary"]
 
     subgraph Core["Native Rust core"]
         FFI --> ID["Identity and vault"]
@@ -309,8 +311,8 @@ linked-device synchronization, chat pagination, and Android signing setup.
 ## Dependencies and licenses
 
 The core uses `veilid-core 0.5.7` and official
-[`signalapp/libsignal v0.105.0`](https://github.com/signalapp/libsignal/releases/tag/v0.105.0),
-pinned to commit `4beb029d8a941f81e7d9c6d8af1ed25a677569a8`. The native
+[`signalapp/libsignal v0.105.1`](https://github.com/signalapp/libsignal/releases/tag/v0.105.1),
+pinned to commit `1738ead8a12ffe539f6309958123dadb16dc3b95`. The native
 `Cargo.lock` records the resolved dependencies for reproducible builds.
 
 Libsignal is licensed under AGPL-3.0-only. Review the obligations documented in

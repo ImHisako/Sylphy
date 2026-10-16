@@ -20,12 +20,18 @@ use zeroize::Zeroizing;
 pub struct LockPolicy {
     pub inactivity_seconds: u64,
     pub lock_on_background: bool,
+    #[serde(default = "default_screen_lock")]
+    pub lock_on_screen_off: bool,
+}
+pub(crate) fn default_screen_lock() -> bool {
+    true
 }
 impl Default for LockPolicy {
     fn default() -> Self {
         Self {
             inactivity_seconds: 300,
             lock_on_background: true,
+            lock_on_screen_off: true,
         }
     }
 }
@@ -51,6 +57,9 @@ struct Session {
     last_activity: Option<Instant>,
     // A failed configuration must never enable the legacy password path.
     configuration_failed: bool,
+    // Closing the UI must also revoke the legacy (no passphrase) path. A
+    // foreground service must not reload the identity immediately after wiping.
+    suspended: bool,
 }
 static SESSION: OnceLock<Mutex<Session>> = OnceLock::new();
 fn session() -> &'static Mutex<Session> {
@@ -114,6 +123,7 @@ pub fn status() -> CoreResult<Value> {
 }
 fn locked(state: &Session) -> bool {
     state.configuration_failed
+        || state.suspended
         || state.protected.as_ref().is_some_and(|value| {
             state.secret.is_none()
                 || (value.policy.inactivity_seconds > 0
@@ -136,6 +146,36 @@ pub fn locks_on_background() -> bool {
                 .is_some_and(|value| value.policy.lock_on_background)
         })
         .unwrap_or(true)
+}
+
+pub fn locks_on_screen_off() -> bool {
+    session()
+        .lock()
+        .map(|state| {
+            state
+                .protected
+                .as_ref()
+                .is_some_and(|value| value.policy.lock_on_screen_off)
+        })
+        .unwrap_or(true)
+}
+
+pub fn close_vault() -> CoreResult<Value> {
+    session().lock().map_err(|_| CoreError::Internal)?.suspended = true;
+    lock_vault()
+}
+
+pub fn resume_vault() -> CoreResult<Value> {
+    let mut state = session().lock().map_err(|_| CoreError::Internal)?;
+    if state.configuration_failed {
+        return Err(CoreError::VaultLocked);
+    }
+    // A protected session can only be reopened with its passphrase.
+    if state.protected.is_none() {
+        state.suspended = false;
+    }
+    drop(state);
+    status()
 }
 
 pub fn enable(passphrase: &str, device_secret: &str) -> CoreResult<Value> {
@@ -190,6 +230,7 @@ pub fn unlock(passphrase: &str) -> CoreResult<Value> {
         return Err(CoreError::VerificationFailed);
     }
     state.secret = Some(secret);
+    state.suspended = false;
     state.last_activity = Some(Instant::now());
     drop(state);
     status()
@@ -225,13 +266,21 @@ pub fn lock_vault() -> CoreResult<Value> {
         state.secret = None; // Zeroizing clears the allocation before freeing it.
         state.last_activity = None;
     }
+    // Revoke access before waiting for outstanding local group reads. Every
+    // cleanup path, including expiry discovered by a normal command, uses the
+    // same barrier instead of relying on its caller to take the write lock.
+    let _account = crate::ffi::ACCOUNT_STATE_LOCK
+        .write()
+        .map_err(|_| CoreError::Internal)?;
     // Called under the FFI command lock, after any earlier storage transaction.
     let messaging = messaging_adapter::wipe_memory();
     let ratchet = ratchet_adapter::wipe_memory();
     let identity = identity::wipe_memory();
+    let transport = crate::veilid_adapter::wipe_account_memory();
     messaging?;
     ratchet?;
     identity?;
+    transport?;
     status()
 }
 pub fn require_unlocked() -> CoreResult<()> {
@@ -293,6 +342,58 @@ fn start_watchdog() -> CoreResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closing_without_passphrase_revokes_legacy_access_until_foreground_resume() {
+        let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+        *session().lock().unwrap() = Session::default();
+        assert!(vault_password("legacy-secret").is_ok());
+        let reading = crate::ffi::ACCOUNT_STATE_LOCK.read().unwrap();
+        let (sender, closed) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sender.send(crate::ffi::sylphy_core_close_vault()).unwrap();
+        });
+        let started = Instant::now();
+        while !is_locked() && started.elapsed() < Duration::from_secs(2) {
+            std::thread::yield_now();
+        }
+        // Access is revoked immediately, but the reader's memory is not
+        // destroyed until that outstanding read has left the account barrier.
+        assert!(is_locked());
+        assert!(matches!(
+            closed.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        drop(reading);
+        assert!(closed.recv_timeout(Duration::from_secs(5)).unwrap());
+        worker.join().unwrap();
+        assert!(is_locked());
+        assert!(vault_password("legacy-secret").is_err());
+        assert!(require_unlocked().is_err());
+        assert!(crate::ffi::sylphy_core_close_vault());
+        assert_eq!(resume_vault().unwrap()["locked"], false);
+        assert_eq!(&**vault_password("legacy-secret").unwrap(), "legacy-secret");
+        *session().lock().unwrap() = Session::default();
+    }
+
+    #[test]
+    fn old_policies_enable_the_independent_screen_lock_by_default() {
+        let policy: LockPolicy = serde_json::from_value(json!({
+            "inactivity_seconds": 60, "lock_on_background": false
+        }))
+        .unwrap();
+        assert!(policy.lock_on_screen_off);
+        assert!(!policy.lock_on_background);
+        assert!(policy.validate().is_ok());
+        assert!(
+            LockPolicy {
+                inactivity_seconds: u64::MAX,
+                ..policy
+            }
+            .validate()
+            .is_err()
+        );
+    }
     #[test]
     fn passphrase_preserves_existing_keys_and_blocks_legacy_bypass() {
         let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
@@ -340,6 +441,7 @@ mod tests {
         update_policy(LockPolicy {
             inactivity_seconds: 30,
             lock_on_background: false,
+            lock_on_screen_off: true,
         })
         .unwrap();
         session().lock().unwrap().last_activity = Some(Instant::now() - Duration::from_secs(31));
@@ -349,6 +451,12 @@ mod tests {
         assert_eq!(configure(&root).unwrap()["locked"], true);
         unlock("a long test passphrase").unwrap();
         assert_eq!(status().unwrap()["policy"]["inactivity_seconds"], 30);
+        assert!(!locks_on_background());
+        assert!(locks_on_screen_off());
+        close_vault().unwrap();
+        assert_eq!(resume_vault().unwrap()["locked"], true);
+        assert!(vault_password(&secret).is_err());
+        unlock("a long test passphrase").unwrap();
         fs::write(directory.join("app-security-v1.json"), b"corrupt").unwrap();
         *session().lock().unwrap() = Session::default();
         assert!(configure(&root).is_err());

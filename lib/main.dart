@@ -1,6 +1,7 @@
 import 'core/privacy/app_palette.dart';
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
@@ -14,6 +15,8 @@ import 'core/profile/user_profile.dart';
 import 'core/privacy/privacy_settings.dart';
 import 'core/privacy/app_security.dart';
 import 'features/settings/app_security_widgets.dart';
+import 'features/settings/account_transfer_page.dart';
+import 'features/settings/account_transfer_recovery.dart';
 import 'core/platform/message_notifications.dart';
 import 'core/platform/stream_proof_host.dart';
 import 'core/veilid/veilid_service.dart';
@@ -92,6 +95,8 @@ class SylphyApp extends StatefulWidget {
 
 class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   final _navigatorKey = GlobalKey<NavigatorState>();
+  final _accountTransferRecovery = AccountTransferRecovery();
+  bool _transferRecoveryScheduled = false;
   late final SecureMessagingBridge _bridge;
   late final VeilidService _veilidService;
   late final bool _ownsVeilidService;
@@ -118,6 +123,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _accountTransferRecovery.addListener(_resumePendingAccountTransfer);
     AppLog.instance.record(
       category: 'app',
       action: 'application_started',
@@ -219,6 +225,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     final generation = _localGeneration;
     await _loadProfile();
     if (!_localDataAccessible || generation != _localGeneration) return;
+    _resumePendingAccountTransfer();
     await _privacySettings.load();
     if (!_localDataAccessible || generation != _localGeneration) return;
     _identityService.resumeAfterUnlock();
@@ -442,12 +449,15 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   void _cancelProfileEdit() => setState(() => _isEditingProfile = false);
 
   void _accountImported(UserProfile profile) {
+    if (!mounted || !_localDataAccessible) return;
+    _localGeneration++;
     if (_bridge is SylphyMessagingBridge) {
       _bridge.clearCachesAfterAccountImport();
     }
     _identityService.invalidateAfterAccountImport();
     setState(() {
       _profile = profile;
+      _profileLoaded = true;
       _isEditingProfile = false;
       _nativeServicesGeneration++;
     });
@@ -458,9 +468,64 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     );
   }
 
+  void _resumePendingAccountTransfer() {
+    if (!mounted ||
+        !_localDataAccessible ||
+        !_accountTransferRecovery.hasDocument ||
+        _transferRecoveryScheduled) {
+      return;
+    }
+    _transferRecoveryScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _transferRecoveryScheduled = false;
+      if (!mounted || !_localDataAccessible) {
+        return;
+      }
+      if (_navigatorKey.currentState == null) {
+        _resumePendingAccountTransfer();
+        return;
+      }
+      final document = _accountTransferRecovery.take();
+      if (document != null) _useExistingAccount(initialDocument: document);
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  void _useExistingAccount({Uint8List? initialDocument}) {
+    final navigator = _navigatorKey.currentState;
+    if (navigator == null || !_localDataAccessible) return;
+    unawaited(
+      navigator.push<void>(
+        MaterialPageRoute(
+          settings: const RouteSettings(name: '/account-transfer'),
+          builder: (_) => AccountTransferPage(
+            mode: AccountTransferMode.receive,
+            veilidService: _veilidService,
+            nativeCore: widget.nativeCore,
+            profileStore: _profileStore,
+            initialDocument: initialDocument,
+            replaceExisting: _profile != null,
+            onAccountImported: _accountImported,
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   void dispose() {
+    _accountTransferRecovery.removeListener(_resumePendingAccountTransfer);
+    _accountTransferRecovery.dispose();
     _appSecurity?.removeListener(_onSecurityChanged);
+    _localGeneration++;
+    if (_bridge is SylphyMessagingBridge) {
+      _bridge.clearCachesAfterAccountImport();
+    }
+    _profile?.photoBytes?.fillRange(0, _profile!.photoBytes!.length, 0);
+    _profile = null;
+    final core = widget.nativeCore;
+    if (core is NativeCoreClient) core.disposeActivityEvents();
+    unawaited(_appSecurity?.close());
     if (widget.appSecurity == null) _appSecurity?.dispose();
     widget.updates?.dispose();
     WidgetsBinding.instance.removeObserver(this);
@@ -478,6 +543,13 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   }
 
   @override
+  Future<AppExitResponse> didRequestAppExit() async {
+    _accountTransferRecovery.clear();
+    await _appSecurity?.close();
+    return AppExitResponse.exit;
+  }
+
+  @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     AppLog.instance.record(
       category: 'lifecycle',
@@ -486,6 +558,10 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       verbose: true,
     );
     final foreground = state == AppLifecycleState.resumed;
+    if (state == AppLifecycleState.detached) {
+      _accountTransferRecovery.clear();
+      unawaited(_appSecurity?.close());
+    }
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
       _appSecurity?.backgrounded();
@@ -572,9 +648,12 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
                   ),
           ),
         );
-        return _appSecurity == null
-            ? contents
-            : AppSecurityHost(controller: _appSecurity, child: contents);
+        return AccountTransferRecoveryScope(
+          recovery: _accountTransferRecovery,
+          child: _appSecurity == null
+              ? contents
+              : AppSecurityHost(controller: _appSecurity, child: contents),
+        );
       },
       theme: ThemeData(
         useMaterial3: true,
@@ -638,6 +717,9 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
               onCompleted: _completeOnboarding,
               initialProfile: _isEditingProfile ? _profile : null,
               onCancelled: _isEditingProfile ? _cancelProfileEdit : null,
+              onUseExistingAccount: _isEditingProfile
+                  ? null
+                  : _useExistingAccount,
             )
           : AnimatedBuilder(
               animation: Listenable.merge([_veilidService, _identityService]),

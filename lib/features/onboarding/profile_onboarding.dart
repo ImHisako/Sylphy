@@ -17,6 +17,7 @@ class ProfileOnboarding extends StatefulWidget {
     this.photoPicker,
     this.initialProfile,
     this.onCancelled,
+    this.onUseExistingAccount,
   });
 
   final UserProfileStore profileStore;
@@ -24,6 +25,7 @@ class ProfileOnboarding extends StatefulWidget {
   final ProfilePhotoPicker? photoPicker;
   final UserProfile? initialProfile;
   final VoidCallback? onCancelled;
+  final VoidCallback? onUseExistingAccount;
 
   @override
   State<ProfileOnboarding> createState() => _ProfileOnboardingState();
@@ -221,6 +223,17 @@ class _ProfileOnboardingState extends State<ProfileOnboarding> {
                         _isEditing ? 'Salva modifiche' : 'Entra in Sylphy',
                       ),
                     ),
+                    if (!_isEditing && widget.onUseExistingAccount != null) ...[
+                      const SizedBox(height: 12),
+                      OutlinedButton.icon(
+                        key: const ValueKey('onboarding-use-existing-account'),
+                        onPressed: _isSaving
+                            ? null
+                            : widget.onUseExistingAccount,
+                        icon: const Icon(Icons.restore_rounded),
+                        label: const Text('Usa un account esistente'),
+                      ),
+                    ],
                     if (_isEditing) ...[
                       SizedBox(height: 8),
                       TextButton(

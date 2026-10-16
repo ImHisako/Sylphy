@@ -214,11 +214,99 @@ struct Departure {
 }
 
 impl Management {
+    pub(super) fn wipe_memory(&mut self) {
+        for channel in &mut self.channels {
+            channel.name.zeroize();
+        }
+        if let Some(invite) = &mut self.invite {
+            invite.code.zeroize();
+            invite.token.zeroize();
+        }
+        if let Some((_, code)) = &mut self.shared_invite {
+            code.zeroize();
+        }
+        if let Some(coordinator) = &mut self.coordinator {
+            coordinator.wipe_memory();
+        }
+        if let Some(effect) = &mut self.pending_effect {
+            effect.notice.zeroize();
+        }
+        for request in &mut self.requests {
+            match &mut request.action {
+                Action::Info { name, description } => {
+                    name.zeroize();
+                    description.zeroize();
+                }
+                Action::CreateChannel { name } | Action::RenameChannel { name, .. } => {
+                    name.zeroize()
+                }
+                Action::AddMembers { invitation_codes } => invitation_codes.zeroize(),
+                _ => {}
+            }
+            if let Some(member) = &mut request.candidate {
+                member.display_name.zeroize();
+                member.invitation_code.zeroize();
+                member.identity.wipe_memory();
+            }
+        }
+    }
+
     pub(super) fn new(coordinator: PublishedIdentity) -> Self {
         Self {
             coordinator: Some(coordinator),
             ..Self::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn wipe_clears_channel_names_invite_secrets_and_pending_changes() {
+        let mut management = Management::default();
+        management.channels.push(GroupChannel {
+            id: "channel".into(),
+            name: "Private channel".into(),
+        });
+        management.invite = Some(Invite {
+            code: "private invitation".into(),
+            token: "secret token".into(),
+            expires_at_ms: 0,
+        });
+        management.shared_invite = Some((1, "shared invitation".into()));
+        management.pending_effect = Some(Effect {
+            notice: "Private moderation notice".into(),
+            event_id: "event".into(),
+            outgoing: true,
+        });
+        management.requests.push(Request {
+            id: "request".into(),
+            actor: "member".into(),
+            action: Action::Info {
+                name: "New private name".into(),
+                description: "Private description".into(),
+            },
+            candidate: None,
+        });
+        management.wipe_memory();
+        assert!(management.channels[0].name.is_empty());
+        let invite = management.invite.as_ref().unwrap();
+        assert!(invite.code.is_empty() && invite.token.is_empty());
+        assert!(management.shared_invite.as_ref().unwrap().1.is_empty());
+        assert!(
+            management
+                .pending_effect
+                .as_ref()
+                .unwrap()
+                .notice
+                .is_empty()
+        );
+        let Action::Info { name, description } = &management.requests[0].action else {
+            panic!("expected info action");
+        };
+        assert!(name.is_empty() && description.is_empty());
     }
 }
 

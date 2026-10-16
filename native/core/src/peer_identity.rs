@@ -166,6 +166,20 @@ pub struct PublishedIdentity {
 }
 
 impl PublishedIdentity {
+    pub(crate) fn wipe_memory(&mut self) {
+        use zeroize::Zeroize;
+        self.profile.display_name.zeroize();
+        self.profile.avatar_base64.zeroize();
+        self.route_blob.zeroize();
+        for device in &mut self.devices {
+            device.route_blob.zeroize();
+        }
+        if let Some(mailbox) = &mut self.mailbox {
+            mailbox.record_key.zeroize();
+            mailbox.writer_keypair_json.zeroize();
+        }
+    }
+
     pub fn new(
         signing_key: &SigningKey,
         bundle: PublicBundle,

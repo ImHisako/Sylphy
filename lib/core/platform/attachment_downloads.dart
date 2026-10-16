@@ -12,7 +12,9 @@ class AttachmentDownloads {
   Future<String?> save({
     required String fileName,
     required Uint8List bytes,
+    bool Function()? isCurrent,
   }) async {
+    if (isCurrent?.call() == false) return null;
     if (Platform.isAndroid) {
       return _channel.invokeMethod<String>('saveFile', {
         'fileName': fileName,
@@ -20,7 +22,8 @@ class AttachmentDownloads {
       });
     }
     final destination = await getSaveLocation(suggestedName: fileName);
-    if (destination == null) return null;
+    // Locking replaces the route while the native picker may still be open.
+    if (destination == null || isCurrent?.call() == false) return null;
     await File(destination.path).writeAsBytes(bytes, flush: true);
     return destination.path;
   }

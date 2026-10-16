@@ -119,6 +119,22 @@ class FileUserProfileStore
   @override
   Future<UserProfile?> load() async {
     final directory = await _profileDirectory();
+    final importedProfile = _importedProfileFile(directory);
+    if (await importedProfile.exists()) {
+      // This encrypted record was committed atomically with the native account.
+      // Prefer it over a stale profile from the previous account after a crash.
+      try {
+        final profile = await _readProtectedProfile(importedProfile);
+        if (profile == null) return null;
+        return await save(
+          displayName: profile.displayName,
+          photoBytes: profile.photoBytes,
+        );
+      } on Object {
+        // Keep the recovery file for the next unlock/startup.
+        return null;
+      }
+    }
     final profileFile = await recoverFile(
       File('${directory.path}${Platform.pathSeparator}$_profileFileName'),
     );
@@ -134,8 +150,17 @@ class FileUserProfileStore
       return migrated;
     }
 
+    return _readProtectedProfile(profileFile);
+  }
+
+  File _importedProfileFile(Directory profileDirectory) => File(
+    '${profileDirectory.parent.path}${Platform.pathSeparator}native${Platform.pathSeparator}identity${Platform.pathSeparator}imported-profile.vault',
+  );
+
+  Future<UserProfile?> _readProtectedProfile(File file) async {
+    Uint8List? plaintext;
     try {
-      final plaintext = await _cipher.open(await profileFile.readAsBytes());
+      plaintext = await _cipher.open(await file.readAsBytes());
       final decoded = jsonDecode(utf8.decode(plaintext));
       if (decoded is! Map<String, dynamic> ||
           decoded['version'] != _schemaVersion ||
@@ -155,6 +180,8 @@ class FileUserProfileStore
       return UserProfile(displayName: displayName, photoBytes: photoBytes);
     } on Object {
       return null;
+    } finally {
+      plaintext?.fillRange(0, plaintext.length, 0);
     }
   }
 
@@ -182,8 +209,20 @@ class FileUserProfileStore
         }),
       ),
     );
-    await writeFileRecoverably(profileFile, await _cipher.protect(plaintext));
+    try {
+      await writeFileRecoverably(profileFile, await _cipher.protect(plaintext));
+    } finally {
+      plaintext.fillRange(0, plaintext.length, 0);
+    }
     await _deleteLegacy(directory);
+    // This record is already encrypted. If deletion fails, keep it intact so
+    // startup can still read it rather than leaving an overwritten tombstone.
+    try {
+      final imported = _importedProfileFile(directory);
+      if (await imported.exists()) await imported.delete();
+    } on Object {
+      // The newly saved encrypted profile remains valid.
+    }
     return UserProfile(displayName: validatedName, photoBytes: photoBytes);
   }
 

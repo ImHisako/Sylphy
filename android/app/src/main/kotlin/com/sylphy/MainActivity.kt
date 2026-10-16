@@ -2,6 +2,8 @@ package com.sylphy
 
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
 import android.Manifest
 import android.app.Activity
 import android.app.PendingIntent
@@ -38,14 +40,25 @@ private class VeilidAndroidContext(base: Context) : ContextWrapper(base) {
 
 class MainActivity : FlutterActivity() {
     private var apkUpdates: ApkUpdateHandler? = null
+    private var securityChannel: MethodChannel? = null
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == Intent.ACTION_SCREEN_OFF) {
+                securityChannel?.invokeMethod("screenOff", null)
+                SecurityLifecycle.submit(SecurityLifecycle.SCREEN_OFF)
+            }
+        }
+    }
 
     override fun onDestroy() {
+        unregisterReceiver(screenReceiver)
+        securityChannel = null
+        if (!isChangingConfigurations) SecurityLifecycle.submit(SecurityLifecycle.CLOSE)
         wipePendingSave()
         apkUpdates?.close()
         super.onDestroy()
     }
     private external fun initializeVeilid(context: Context)
-    private external fun lockVaultOnBackground(): Boolean
     private var nativeLibraryLoaded = false
     private var veilidBootstrapReady = false
     private var veilidBootstrapCode = "not_started"
@@ -62,16 +75,19 @@ class MainActivity : FlutterActivity() {
         super.onPause()
     }
 
+    override fun popSystemNavigator(): Boolean {
+        // Reached only after Flutter has exhausted its routes. On newer
+        // Android versions Back can hide the root task without destroying it.
+        securityChannel?.invokeMethod("appClosing", null)
+        SecurityLifecycle.submit(SecurityLifecycle.CLOSE)
+        wipePendingSave()
+        return super.popSystemNavigator()
+    }
+
     override fun onStop() {
         super.onStop()
         if (nativeLibraryLoaded) {
-            Thread({
-                if (!MessagingService.uiResumed) {
-                    try {
-                        if (lockVaultOnBackground()) runOnUiThread { wipePendingSave() }
-                    } catch (_: Throwable) { /* Flutter also locks via FFI. */ }
-                }
-            }, "sylphy-vault-lock").start()
+            SecurityLifecycle.submit(if (isFinishing) SecurityLifecycle.CLOSE else SecurityLifecycle.BACKGROUND)
         }
     }
 
@@ -79,6 +95,7 @@ class MainActivity : FlutterActivity() {
         ensureVeilidInitialized()
         // Veilid needs Android's Context/JVM before Flutter can invoke FFI.
         super.onCreate(savedInstanceState)
+        ContextCompat.registerReceiver(this, screenReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF), ContextCompat.RECEIVER_NOT_EXPORTED)
         // Hide task snapshots until Flutter has read the saved vault policy.
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         MessageNotificationSettings.createChannel(this)
@@ -86,12 +103,14 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        securityChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "sylphy/security")
         apkUpdates = ApkUpdateHandler(this)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "sylphy/updates")
             .setMethodCallHandler(apkUpdates)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, PLATFORM_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "flushSecurityEvents" -> SecurityLifecycle.flush { runOnUiThread { result.success(null) } }
                     "ensureVeilidInitialized" -> {
                         ensureVeilidInitialized()
                         result.success(

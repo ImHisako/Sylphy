@@ -18,7 +18,7 @@ use crate::{
 pub(crate) static COMMAND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 // Local group details may bypass network transactions, but must never observe
 // the intermediate identity/storage state of an account activation or import.
-static ACCOUNT_STATE_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+pub(crate) static ACCOUNT_STATE_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -35,10 +35,14 @@ enum CoreRequest {
         passphrase: String,
     },
     LockVault,
+    CloseVault,
+    ResumeVault,
     SecurityTouch,
     SetLockPolicy {
         inactivity_seconds: u64,
         lock_on_background: bool,
+        #[serde(default = "app_security::default_screen_lock")]
+        lock_on_screen_off: bool,
     },
     Status,
     StartVeilid {
@@ -49,6 +53,37 @@ enum CoreRequest {
     VeilidStatus,
     StopVeilid,
     ListConversations,
+    ReadConversations {
+        #[serde(default)]
+        allow_load: bool,
+    },
+    ReadMessages {
+        conversation_id: String,
+        #[serde(default)]
+        before_ms: Option<u64>,
+        #[serde(default)]
+        before_id: Option<String>,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        allow_load: bool,
+    },
+    ReadSearch {
+        conversation_id: String,
+        query: String,
+        #[serde(default)]
+        offset: usize,
+        #[serde(default)]
+        allow_load: bool,
+    },
+    ReadAttachment {
+        conversation_id: String,
+        message_id: String,
+    },
+    WaitForActivity {
+        after: u64,
+        timeout_ms: u64,
+    },
     SyncInbound,
     ListMessages {
         conversation_id: String,
@@ -193,6 +228,17 @@ pub unsafe extern "C" fn sylphy_core_abi_version() -> u32 {
     CORE_ABI_VERSION
 }
 
+// Native runner fallback: runs before the engine is destroyed, even when Dart
+// cannot deliver its exit callback. No Flutter channel required.
+#[unsafe(no_mangle)]
+pub extern "C" fn sylphy_core_close_vault() -> bool {
+    std::panic::catch_unwind(|| {
+        let _command = COMMAND_LOCK.lock().map_err(|_| CoreError::Internal)?;
+        app_security::close_vault().map(|_| ())
+    })
+    .is_ok_and(|result| result.is_ok())
+}
+
 #[unsafe(no_mangle)]
 /// # Safety
 ///
@@ -237,7 +283,32 @@ pub unsafe extern "C" fn sylphy_core_free_string(value: *mut c_char) {
 
 fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
     let request: CoreRequest = serde_json::from_str(body).map_err(|_| CoreError::InvalidInput)?;
-    if matches!(request, CoreRequest::GroupDetails { .. }) {
+    if let CoreRequest::WaitForActivity { after, timeout_ms } = request {
+        if timeout_ms > 30_000 {
+            return Err(CoreError::InvalidInput);
+        }
+        return Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: json!({
+                "sequence": crate::activity_events::wait(after, timeout_ms)
+            }),
+        });
+    }
+    if matches!(
+        request,
+        CoreRequest::GroupDetails { .. }
+            | CoreRequest::ReadConversations { allow_load: false }
+            | CoreRequest::ReadMessages {
+                allow_load: false,
+                ..
+            }
+            | CoreRequest::ReadSearch {
+                allow_load: false,
+                ..
+            }
+            | CoreRequest::ReadAttachment { .. }
+    ) {
         let _account_guard = ACCOUNT_STATE_LOCK
             .try_read()
             .map_err(|_| CoreError::FeatureUnavailable)?;
@@ -247,12 +318,28 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
         return dispatch_request(request);
     }
     let _command_guard = COMMAND_LOCK.lock().map_err(|_| CoreError::Internal)?;
+    if !matches!(
+        request,
+        CoreRequest::ConfigureSecurity { .. }
+            | CoreRequest::SecurityStatus
+            | CoreRequest::UnlockVault { .. }
+            | CoreRequest::LockVault
+            | CoreRequest::CloseVault
+            | CoreRequest::ResumeVault
+            | CoreRequest::Status
+            | CoreRequest::VeilidStatus
+            | CoreRequest::StopVeilid
+    ) {
+        app_security::require_unlocked()?;
+    }
+    // Expiry cleanup above acquires its own account barrier. Take transition
+    // ownership only after that check to avoid recursively locking the RwLock.
     let _account_guard = if matches!(
         request,
         CoreRequest::EnsureIdentity { .. }
             | CoreRequest::ImportAccount { .. }
             | CoreRequest::StartVeilid { .. }
-            | CoreRequest::LockVault
+            | CoreRequest::ResumeVault
             | CoreRequest::ConfigureSecurity { .. }
     ) {
         Some(
@@ -263,23 +350,52 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
     } else {
         None
     };
-    if !matches!(
-        request,
-        CoreRequest::ConfigureSecurity { .. }
-            | CoreRequest::SecurityStatus
-            | CoreRequest::UnlockVault { .. }
-            | CoreRequest::LockVault
-            | CoreRequest::Status
-            | CoreRequest::VeilidStatus
-            | CoreRequest::StopVeilid
-    ) {
-        app_security::require_unlocked()?;
-    }
     dispatch_request(request)
 }
 
 fn dispatch_request(request: CoreRequest) -> Result<CoreResponse, CoreError> {
     match request {
+        CoreRequest::ReadConversations { allow_load } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::read_conversations(allow_load)?,
+        }),
+        CoreRequest::ReadMessages {
+            conversation_id,
+            before_ms,
+            before_id,
+            limit,
+            allow_load,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::read_messages(
+                &conversation_id,
+                before_ms,
+                before_id.as_deref(),
+                limit,
+                allow_load,
+            )?,
+        }),
+        CoreRequest::ReadSearch {
+            conversation_id,
+            query,
+            offset,
+            allow_load,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::read_search(&conversation_id, &query, offset, allow_load)?,
+        }),
+        CoreRequest::ReadAttachment {
+            conversation_id,
+            message_id,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::read_attachment(&conversation_id, &message_id)?,
+        }),
+        CoreRequest::WaitForActivity { .. } => Err(CoreError::InvalidInput),
         CoreRequest::ConfigureSecurity { storage_directory } => Ok(CoreResponse {
             ok: true,
             code: "ok",
@@ -320,6 +436,16 @@ fn dispatch_request(request: CoreRequest) -> Result<CoreResponse, CoreError> {
             code: "ok",
             data: app_security::lock_vault()?,
         }),
+        CoreRequest::CloseVault => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: app_security::close_vault()?,
+        }),
+        CoreRequest::ResumeVault => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: app_security::resume_vault()?,
+        }),
         CoreRequest::SecurityTouch => Ok(CoreResponse {
             ok: true,
             code: "ok",
@@ -328,12 +454,14 @@ fn dispatch_request(request: CoreRequest) -> Result<CoreResponse, CoreError> {
         CoreRequest::SetLockPolicy {
             inactivity_seconds,
             lock_on_background,
+            lock_on_screen_off,
         } => Ok(CoreResponse {
             ok: true,
             code: "ok",
             data: app_security::update_policy(app_security::LockPolicy {
                 inactivity_seconds,
                 lock_on_background,
+                lock_on_screen_off,
             })?,
         }),
         CoreRequest::RequestAttachment {
@@ -755,6 +883,40 @@ mod tests {
             super::dispatch(r#"{"command":"group_details","conversation_id":"absent"}"#),
             Err(crate::error::CoreError::FeatureUnavailable)
         ));
+    }
+
+    #[test]
+    fn local_pages_search_and_events_bypass_network_commands_but_obey_account_barrier() {
+        let _identity = crate::identity::TEST_IDENTITY_LOCK.lock().unwrap();
+        let requests = [
+            r#"{"command":"read_conversations"}"#,
+            r#"{"command":"read_messages","conversation_id":"absent"}"#,
+            r#"{"command":"read_search","conversation_id":"absent","query":"word"}"#,
+            r#"{"command":"read_attachment","conversation_id":"absent","message_id":"missing"}"#,
+        ];
+        let command_guard = super::COMMAND_LOCK.lock().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for request in requests {
+                let _ = super::dispatch(request);
+            }
+            assert!(
+                super::dispatch(r#"{"command":"wait_for_activity","after":0,"timeout_ms":0}"#)
+                    .is_ok()
+            );
+            send.send(()).unwrap();
+        });
+        let finished = receive.recv_timeout(std::time::Duration::from_secs(2));
+        drop(command_guard);
+        reader.join().unwrap();
+        finished.unwrap();
+        let _account = super::ACCOUNT_STATE_LOCK.write().unwrap();
+        for request in requests {
+            assert!(matches!(
+                super::dispatch(request),
+                Err(crate::error::CoreError::FeatureUnavailable)
+            ));
+        }
     }
 
     #[test]

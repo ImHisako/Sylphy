@@ -163,14 +163,18 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
+        await tester.ensureVisible(
+          find.byKey(const ValueKey('settings-section-appearance')),
+        );
+        await tester.tap(
+          find.byKey(const ValueKey('settings-section-appearance')),
+        );
+        await tester.pumpAndSettle();
         expect(
-          find.byKey(ValueKey('incognito-keyboard')),
+          find.byKey(const ValueKey('incognito-keyboard')),
           platform == TargetPlatform.android ? findsOneWidget : findsNothing,
         );
-        expect(
-          find.byKey(ValueKey('stream-proof')),
-          platform == TargetPlatform.windows ? findsOneWidget : findsNothing,
-        );
+        expect(find.byKey(ValueKey('stream-proof')), findsNothing);
         final label = tester.getRect(find.text('Tema di Sylphy'));
         final card = tester.getRect(
           find
@@ -182,6 +186,23 @@ void main() {
         );
         expect(label.top, greaterThan(card.top));
         expect(label.bottom, lessThan(card.bottom));
+        await tester.tap(find.byType(BackButton));
+        await tester.pumpAndSettle();
+        if (platform == TargetPlatform.windows) {
+          await tester.ensureVisible(
+            find.byKey(const ValueKey('settings-section-screen')),
+          );
+          await tester.tap(
+            find.byKey(const ValueKey('settings-section-screen')),
+          );
+          await tester.pumpAndSettle();
+          expect(find.byKey(const ValueKey('stream-proof')), findsOneWidget);
+        } else {
+          expect(
+            find.byKey(const ValueKey('settings-section-screen')),
+            findsNothing,
+          );
+        }
         expect(tester.takeException(), isNull);
       },
       variant: TargetPlatformVariant.only(platform),

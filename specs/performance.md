@@ -1,5 +1,72 @@
 # Prestazioni della messaggistica
 
+## Avvio e ripubblicazione dell’identità (ABI 17)
+
+La sessione nativa conserva l’identità già autenticata, il percorso del suo vault
+e una credenziale in `Zeroizing`. `ensure_identity` riusa il record soltanto se
+percorso e credenziale coincidono (confronto costante per i byte della credenziale).
+Una credenziale differente deve ancora superare Argon2id e l’autenticazione del
+file. Non vengono ridotti i parametri della KDF. Una ripubblicazione della stessa
+identità non riconfigura la ratchet, evitando di scaricare e rileggere sessioni
+già aperte. Rotazione, scadenze e persistenza delle modifiche restano attive.
+
+Il wiper distrugge anche questa cache e la sua credenziale: la prima apertura
+dopo blocco/chiusura richiede nuovamente il vault su disco. Il test con un file
+temporaneamente illeggibile verifica il riuso durante la sessione, il rifiuto di
+una credenziale errata e il ritorno all’autenticazione su disco dopo il wiper.
+
+## Letture locali durante la sincronizzazione
+
+`read_conversations`, `read_messages`, `read_search` e `read_attachment` usano
+l’isolate delle letture locali e non entrano nella coda dei comandi di rete.
+Il core prende il gate condiviso dell’account e controlla il blocco prima di
+leggere. I cambi account e il wiper mantengono il gate esclusivo. I dati freddi
+restituiscono `feature_unavailable`: il client riprova una volta nella coda
+seriale con `allow_load: true`, che può caricare il log cifrato e applicare i
+risultati dei download. Le letture calde non avviano né persistono trasferimenti.
+
+La ricerca mantiene l’indice volatile esistente. Il test FFI tiene occupato il
+mutex dei comandi e verifica che le letture locali terminino comunque, e che
+vengano rifiutate quando è in corso un cambio account.
+
+## Allegati caricati su richiesta
+
+Le nuove pagine e i risultati di ricerca includono nome, dimensione e stato
+dell’allegato, senza il suo Base64. `read_attachment` recupera un solo allegato
+già presente nell’archivio, vincolandolo a conversazione, messaggio e stato del
+gruppo. Non avvia download di rete. I comandi storici rimangono disponibili per
+compatibilità del core; il client ABI 17 usa i nuovi percorsi.
+
+Solo le anteprime montate nell’elenco, la finestra immagine aperta o l’azione
+Salva richiedono i byte. L’archivio dei file può paginare i metadati senza caricare
+tutti i contenuti. Ogni lettore possiede un buffer mutabile che azzera alla fine
+dell’uso. Il bridge conserva riferimenti deboli per azzerare anche i buffer ancora
+visibili al blocco, senza trattenerli in una cache forte. Le risposte di una
+generazione chiusa vengono rifiutate.
+La distruzione della radice dell’app azzera i buffer anche senza una precedente
+notifica di blocco. Il salvataggio desktop ricontrolla la validità della sessione
+dopo il selettore file, annullando la scrittura se nel frattempo l’app si blocca
+o la schermata viene chiusa.
+
+Il test con un allegato da 2 MiB verifica che la pagina serializzata resti sotto
+2 KiB e che il contenuto completo sia recuperabile soltanto tramite la lettura
+separata. È un controllo sulla quantità di dati, non una misura dei tempi su telefono.
+
+## Aggiornamenti guidati dagli eventi
+
+Il core incrementa un contatore senza contenuti quando accoda un envelope o
+completa un download, un invio o una replica. `wait_for_activity` attende una
+variazione con `Condvar`, fino a 30 secondi, senza occupare i gate dei comandi o
+dell’account. Un contatore evita di perdere eventi arrivati fra due attese.
+
+Un isolate dedicato inoltra i risvegli a Flutter. L’interfaccia accorpa quelli
+ravvicinati in 40 ms e richiede una sincronizzazione immediata; un evento durante
+una sincronizzazione ne programma una successiva. Android usa un thread di
+attesa distinto dal worker che persiste i messaggi. I timer precedenti restano
+come recupero, e il polling DHT delle mailbox continua a essere necessario.
+Il watcher viene fermato alla distruzione dell’app/servizio e non può sbloccare
+un account. Il test widget verifica l’arrivo in chat prima del timer di tre secondi.
+
 ## Selezione delle pagine
 
 Il core seleziona riferimenti ai messaggi della conversazione e applica una

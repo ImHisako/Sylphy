@@ -19,10 +19,12 @@ import '../../core/platform/attachment_downloads.dart';
 import '../../core/veilid/veilid_service.dart';
 import '../profile/profile_sheet.dart';
 import '../settings/settings_page.dart';
+import '../settings/app_security_widgets.dart';
 import 'encrypted_file_archive_page.dart';
 import 'group_management_page.dart';
 import 'message_text.dart';
 import 'safe_attachment_image.dart';
+import 'lazy_attachment_image.dart';
 
 class MessengerHome extends StatefulWidget {
   const MessengerHome({
@@ -68,6 +70,21 @@ class _MessengerHomeState extends State<MessengerHome>
   bool _isLoadingConversations = false;
   bool _forceRefreshAfterCurrent = false;
   int _lastInboxRevision = 0;
+  StreamSubscription<void>? _inboxWakeups;
+  Timer? _inboxWakeupTimer;
+
+  void _listenForInboxWakeups() {
+    unawaited(_inboxWakeups?.cancel());
+    final bridge = widget.bridge;
+    _inboxWakeups = bridge is InboxWakeupNotifications
+        ? (bridge as InboxWakeupNotifications).inboxWakeups.listen((_) {
+            _inboxWakeupTimer ??= Timer(const Duration(milliseconds: 40), () {
+              _inboxWakeupTimer = null;
+              if (mounted) unawaited(_refreshInbox(force: true));
+            });
+          })
+        : null;
+  }
 
   bool get _androidBackground =>
       defaultTargetPlatform == TargetPlatform.android &&
@@ -107,6 +124,7 @@ class _MessengerHomeState extends State<MessengerHome>
       _lastInboxRevision = (bridge as InboxRefreshingBridge).inboxRevision;
     }
     _configureInboxTimer();
+    _listenForInboxWakeups();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) unawaited(_initialRefresh());
     });
@@ -120,6 +138,7 @@ class _MessengerHomeState extends State<MessengerHome>
   @override
   void didUpdateWidget(covariant MessengerHome oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.bridge != widget.bridge) _listenForInboxWakeups();
     if (oldWidget.identityService != widget.identityService) {
       oldWidget.identityService.removeListener(_onIdentityChanged);
       widget.identityService.addListener(_onIdentityChanged);
@@ -326,6 +345,8 @@ class _MessengerHomeState extends State<MessengerHome>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    unawaited(_inboxWakeups?.cancel());
+    _inboxWakeupTimer?.cancel();
     _conversationUpdates.dispose();
     widget.identityService.removeListener(_onIdentityChanged);
     _inboxTimer?.cancel();
@@ -2651,6 +2672,11 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
                             onSecondaryTap: () => _messageActions(message),
                             child: _MessageBubble(
                               message: message,
+                              onLoadAttachment: () => readMessageAttachment(
+                                widget.bridge,
+                                widget.conversation.id,
+                                message,
+                              ),
                               onRetrieveAttachment:
                                   widget.bridge is AttachmentRetrievalBridge
                                   ? (cancel) => _retrieveAttachment(
@@ -3644,6 +3670,7 @@ class _MessageBubble extends StatelessWidget {
     this.isPinned = false,
     this.actionPending = false,
     this.onRetrieveAttachment,
+    this.onLoadAttachment,
   });
 
   final ChatMessage message;
@@ -3654,6 +3681,7 @@ class _MessageBubble extends StatelessWidget {
   final VoidCallback? onRestoreDraft;
   final ValueChanged<String>? onMention;
   final ValueChanged<bool>? onRetrieveAttachment;
+  final Future<Uint8List> Function()? onLoadAttachment;
 
   bool get _isImageAttachment {
     final name = message.attachmentName?.toLowerCase();
@@ -3667,13 +3695,19 @@ class _MessageBubble extends StatelessWidget {
   }
 
   Future<void> _downloadAttachment(BuildContext context) async {
-    final bytes = message.attachmentBytes;
     final name = message.attachmentName;
-    if (bytes == null || name == null) return;
+    if (!message.attachmentAvailable || name == null) return;
+    final security = AppSecurityScope.maybeOf(context);
+    Uint8List? bytes;
     try {
+      bytes = onLoadAttachment != null
+          ? await onLoadAttachment!()
+          : Uint8List.fromList(message.attachmentBytes!);
+      if (!context.mounted) return;
       final location = await AttachmentDownloads().save(
         fileName: name,
         bytes: bytes,
+        isCurrent: () => context.mounted && security?.locked != true,
       );
       if (!context.mounted || location == null) return;
       ScaffoldMessenger.of(
@@ -3684,12 +3718,14 @@ class _MessageBubble extends StatelessWidget {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Non è stato possibile salvare il file.')),
       );
+    } finally {
+      bytes?.fillRange(0, bytes.length, 0);
     }
   }
 
   void _showImage(BuildContext context) {
     final bytes = message.attachmentBytes;
-    if (bytes == null) return;
+    if (!message.attachmentAvailable) return;
     showDialog<void>(
       context: context,
       builder: (context) => Dialog(
@@ -3702,7 +3738,12 @@ class _MessageBubble extends StatelessWidget {
               child: InteractiveViewer(
                 minScale: 0.5,
                 maxScale: 5,
-                child: SafeAttachmentImage(bytes: bytes, expanded: true),
+                child: LazyAttachmentImage(
+                  id: message.id,
+                  bytes: bytes,
+                  loadBytes: onLoadAttachment,
+                  expanded: true,
+                ),
               ),
             ),
             Positioned(
@@ -3776,14 +3817,15 @@ class _MessageBubble extends StatelessWidget {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    if (_isImageAttachment &&
-                        message.attachmentBytes != null) ...[
+                    if (_isImageAttachment && message.attachmentAvailable) ...[
                       GestureDetector(
                         onTap: () => _showImage(context),
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(9),
-                          child: SafeAttachmentImage(
-                            bytes: message.attachmentBytes!,
+                          child: LazyAttachmentImage(
+                            id: message.id,
+                            bytes: message.attachmentBytes,
+                            loadBytes: onLoadAttachment,
                           ),
                         ),
                       ),
@@ -3826,7 +3868,7 @@ class _MessageBubble extends StatelessWidget {
                           ),
                         ),
                         SizedBox(width: 8),
-                        if (message.attachmentBytes != null)
+                        if (message.attachmentAvailable)
                           IconButton(
                             tooltip: 'Scarica file',
                             visualDensity: VisualDensity.compact,
@@ -3868,8 +3910,7 @@ class _MessageBubble extends StatelessWidget {
                 onMention: onMention,
                 style: TextStyle(color: foreground, fontSize: 15, height: 1.3),
               ),
-            if (message.attachmentName != null &&
-                message.attachmentBytes == null)
+            if (message.attachmentName != null && !message.attachmentAvailable)
               Text(
                 message.attachmentDownloading
                     ? 'Download in corso…'

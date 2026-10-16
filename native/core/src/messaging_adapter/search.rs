@@ -105,13 +105,23 @@ pub(super) fn wipe_memory() -> CoreResult<()> {
 }
 
 pub(super) fn search(id: &str, query: &str, offset: usize) -> CoreResult<Value> {
+    read_search(id, query, offset, true, true)
+}
+
+pub(super) fn read_search(
+    id: &str,
+    query: &str,
+    offset: usize,
+    allow_load: bool,
+    include_data: bool,
+) -> CoreResult<Value> {
     validate_conversation_id(id)?;
     let query = query.trim().to_lowercase();
     if query.is_empty() || query.len() > 256 || offset > MAX_MESSAGES {
         return Err(CoreError::InvalidInput);
     }
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
-    ensure_messages_loaded(&mut store)?;
+    prepare_local_read(&mut store, allow_load)?;
     let mut index = INDEX
         .get_or_init(|| Mutex::new(Index::default()))
         .lock()
@@ -134,7 +144,7 @@ pub(super) fn search(id: &str, query: &str, offset: usize) -> CoreResult<Value> 
     });
     let total = positions.len();
     Ok(
-        json!({"messages": positions.into_iter().skip(offset).take(50).map(|index| message_json(&store.messages[index], &store)).collect::<Vec<_>>(),
+        json!({"messages": positions.into_iter().skip(offset).take(50).map(|index| message_json_with_data(&store.messages[index], &store, include_data)).collect::<Vec<_>>(),
         "total": total, "has_more": total > offset.saturating_add(50)}),
     )
 }

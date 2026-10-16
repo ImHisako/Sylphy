@@ -52,9 +52,9 @@ val verifySylphyNativeCore by tasks.registering {
         val metadata = Properties().apply {
             metadataFile.inputStream().use(::load)
         }
-        check(metadata.getProperty("abi") == "15") { "Stale Sylphy native ABI." }
-        check(metadata.getProperty("libsignal") == "signalapp/libsignal@v0.105.0") {
-            "Android native core was not built with libsignal v0.105.0."
+        check(metadata.getProperty("abi") == "17") { "Stale Sylphy native ABI." }
+        check(metadata.getProperty("libsignal") == "signalapp/libsignal@v0.105.1") {
+            "Android native core was not built with libsignal v0.105.1."
         }
         val nativeCore = file("../../native/core")
         val sourceFiles = (

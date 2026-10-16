@@ -1,13 +1,74 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sylphy/core/messaging/models.dart';
 import 'package:sylphy/core/messaging/secure_messaging_bridge.dart';
 import 'package:sylphy/core/messaging/sylphy_messaging_bridge.dart';
 import 'package:sylphy/core/native/native_core.dart';
+import 'package:sylphy/core/profile/user_profile.dart';
+import 'package:sylphy/main.dart';
 
 void main() {
+  testWidgets('disposing the app wipes caller-owned attachment buffers', (
+    tester,
+  ) async {
+    final bridge = SylphyMessagingBridge(core: _AttachmentCore());
+    final bytes = await bridge.readAttachment('chat', 'file');
+    await tester.pumpWidget(
+      SylphyApp(bridge: bridge, profileStore: _EmptyProfileStore()),
+    );
+    await tester.pumpAndSettle();
+    expect(bytes, [1, 2, 3]);
+    await tester.pumpWidget(const SizedBox());
+    expect(bytes, [0, 0, 0]);
+    expect(tester.takeException(), isNull);
+  });
+
+  test(
+    'attachment metadata stays light and fetched buffers are wiped on lock',
+    () async {
+      final core = _AttachmentCore();
+      core.messages.add({
+        ..._record('file', 1),
+        'attachment_name': 'file.bin',
+        'attachment_size': 3,
+        'attachment_state': 'ready',
+      });
+      final bridge = SylphyMessagingBridge(core: core);
+      final message = (await bridge.refreshMessages('chat')).single;
+      expect(message.attachmentAvailable, isTrue);
+      expect(message.attachmentBytes, isNull);
+      expect(message.canDownloadAttachment, isFalse);
+      expect(core.reads, 0);
+      final bytes = await bridge.readAttachment('chat', 'file');
+      expect(bytes, [1, 2, 3]);
+      expect(core.reads, 1);
+      bridge.clearCachesAfterAccountImport();
+      expect(bytes, [0, 0, 0]);
+    },
+  );
+
+  test('a late attachment read cannot survive a lock generation', () async {
+    final core = _AttachmentCore()..pending = Completer<NativeCoreResponse>();
+    final bridge = SylphyMessagingBridge(core: core);
+    final loading = bridge.readAttachment('chat', 'file');
+    final rejected = expectLater(
+      loading,
+      throwsA(isA<SecureMessagingException>()),
+    );
+    bridge.clearCachesAfterAccountImport();
+    core.pending!.complete(
+      const NativeCoreResponse(
+        ok: true,
+        code: 'ok',
+        data: {'bytes_base64': 'AQID'},
+      ),
+    );
+    await rejected;
+  });
   test(
     'download state changes invalidate placeholders without exposing keys',
     () async {
@@ -350,6 +411,38 @@ class _PagedCore extends _FakeNativeCore implements NativeCoreMessagePageApi {
       return older.future;
     }
     return Future.value(_page(latest, true, groupRevision: groupRevision));
+  }
+}
+
+class _EmptyProfileStore implements UserProfileStore {
+  @override
+  Future<UserProfile?> load() async => null;
+
+  @override
+  Future<UserProfile> save({
+    required String displayName,
+    Uint8List? photoBytes,
+  }) => throw UnsupportedError('not used');
+}
+
+class _AttachmentCore extends _FakeNativeCore
+    implements NativeAttachmentDataApi {
+  int reads = 0;
+  Completer<NativeCoreResponse>? pending;
+  @override
+  Future<NativeCoreResponse> readAttachmentInBackground(
+    String conversationId,
+    String messageId,
+  ) async {
+    reads++;
+    return pending?.future ??
+        Future.value(
+          const NativeCoreResponse(
+            ok: true,
+            code: 'ok',
+            data: {'bytes_base64': 'AQID'},
+          ),
+        );
   }
 }
 
