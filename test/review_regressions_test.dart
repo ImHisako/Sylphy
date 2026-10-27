@@ -60,6 +60,30 @@ void main() {
     );
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets('ignores conversation refresh completed after disposal', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final bridge = _LateConversationBridge();
+    await tester.pumpWidget(
+      SylphyApp(bridge: bridge, profileStore: _Profile()),
+    );
+    await tester.pumpAndSettle();
+    final pending = Completer<List<Conversation>>();
+    bridge.deferred = pending;
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+    pending.complete([
+      for (final item in bridge.conversations)
+        item.copyWith(lastMessage: 'Late message', unreadCount: 1),
+    ]);
+    await tester.pump();
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+  });
 }
 
 ChatMessage _message(String id, String body) => ChatMessage(
@@ -144,4 +168,17 @@ class _ReviewBridge implements SecureMessagingBridge, CachedMessagingBridge {
     required String fileName,
     required List<int> bytes,
   }) async {}
+}
+
+class _LateConversationBridge extends _ReviewBridge
+    implements InboxRefreshingBridge {
+  Completer<List<Conversation>>? deferred;
+  int revision = 0;
+  @override
+  int get inboxRevision => revision;
+  @override
+  Future<int> refreshInbox() async => ++revision;
+  @override
+  Future<List<Conversation>> refreshConversations() =>
+      deferred?.future ?? Future.value(conversations);
 }

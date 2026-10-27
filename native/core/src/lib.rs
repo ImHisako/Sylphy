@@ -8,13 +8,19 @@ mod atomic_file;
 mod blob_transport;
 pub mod bundle;
 mod device_sync;
+#[cfg(any(test, feature = "veilid"))]
+mod direct_delivery;
 pub mod envelope;
 pub mod error;
 pub mod ffi;
 pub mod hybrid;
 pub mod identity;
+#[cfg(any(test, feature = "veilid"))]
+mod identity_publication;
 mod invitation;
 pub mod messaging_adapter;
+#[cfg(any(test, feature = "veilid"))]
+mod network_recovery;
 mod offline_mailbox;
 pub mod peer_identity;
 pub mod ratchet_adapter;

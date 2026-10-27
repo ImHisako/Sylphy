@@ -4,8 +4,8 @@ use libsignal_protocol::{
     CiphertextMessage, DeviceId, GenericSignedPreKey, IdentityKeyPair, IdentityKeyStore,
     InMemSignalProtocolStore, KeyPair, KyberPreKeyRecord, KyberPreKeyStore, PreKeyBundle,
     PreKeyRecord, PreKeySignalMessage, PreKeyStore, ProtocolAddress, SessionRecord, SessionStore,
-    SignalMessage, SignedPreKeyRecord, SignedPreKeyStore, Timestamp, kem, message_decrypt,
-    message_encrypt, process_prekey_bundle,
+    SessionUsabilityRequirements, SignalMessage, SignedPreKeyRecord, SignedPreKeyStore, Timestamp,
+    kem, message_decrypt, message_encrypt, process_prekey_bundle,
 };
 use rand::{TryRngCore as _, rngs::OsRng};
 use serde::{Deserialize, Serialize};
@@ -28,10 +28,11 @@ struct Fixture {
     next_message: Vec<u8>,
 }
 
-fn previous_fixtures() -> [Fixture; 2] {
+fn previous_fixtures() -> [Fixture; 3] {
     [
         ("v0.102.1", include_str!("fixtures/libsignal-v0.102.1.json")),
         ("v0.105.0", include_str!("fixtures/libsignal-v0.105.0.json")),
+        ("v0.105.1", include_str!("fixtures/libsignal-v0.105.1.json")),
     ]
     .map(|(version, document)| {
         let fixture: Fixture = serde_json::from_str(document).unwrap();
@@ -229,6 +230,49 @@ fn previous_version_sessions_keep_skipped_keys_and_bidirectional_messages() {
     });
 }
 
+#[test]
+fn archived_legacy_sessions_decrypt_without_becoming_active_again() {
+    futures_executor::block_on(async {
+        for fixture in previous_fixtures() {
+            let (_, mut bob) = restore_sessions(&fixture).await;
+            let mut record = bob
+                .session_store
+                .load_session(&address("alice"))
+                .await
+                .unwrap()
+                .unwrap();
+            record.archive_current_state().unwrap();
+            bob.session_store
+                .store_session(&address("alice"), &record)
+                .await
+                .unwrap();
+            let delayed = CiphertextMessage::SignalMessage(
+                SignalMessage::try_from(fixture.delayed_message.as_slice()).unwrap(),
+            );
+            assert_eq!(
+                decrypt(&mut bob, &address("alice"), &address("bob"), &delayed)
+                    .await
+                    .unwrap(),
+                b"before-upgrade-delayed"
+            );
+            let record = bob
+                .session_store
+                .load_session(&address("alice"))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                !record
+                    .has_usable_sender_chain(
+                        SystemTime::now(),
+                        SessionUsabilityRequirements::NotStale
+                    )
+                    .unwrap()
+            );
+        }
+    });
+}
+
 // Run only with Cargo.toml and Cargo.lock pinned to the requested old version.
 // Never regenerate an older-version fixture using the version under test.
 #[test]
@@ -236,7 +280,10 @@ fn previous_version_sessions_keep_skipped_keys_and_bidirectional_messages() {
 fn generate_previous_version_fixture() {
     let version =
         std::env::var("SYLPHY_GENERATE_FIXTURE_VERSION").unwrap_or_else(|_| "v0.102.1".to_owned());
-    assert!(matches!(version.as_str(), "v0.102.1" | "v0.105.0"));
+    assert!(matches!(
+        version.as_str(),
+        "v0.102.1" | "v0.105.0" | "v0.105.1"
+    ));
     let provider = format!("signalapp/libsignal@{version}");
     assert_eq!(
         sylphy_core::ratchet_adapter::capability_status().provider,

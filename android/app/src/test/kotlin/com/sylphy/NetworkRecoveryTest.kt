@@ -4,6 +4,20 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NetworkRecoveryTest {
+    @Test fun recoversWhenMobileCoverageReturnsOnTheSameNetwork() {
+        val state = NetworkTransitionState()
+        val connected = state.update("mobile", true, true)!!
+        val noCoverage = state.update("mobile", true, false)!!
+        assertFalse(state.isCurrent(connected))
+        assertNull(state.update("mobile", true, false))
+        val recovered = state.update("mobile", true, true)!!
+        assertFalse(state.isCurrent(noCoverage))
+        assertTrue(state.isCurrent(recovered))
+        assertNull(state.update("mobile", true, true))
+        // Lack of Android validation never means an otherwise usable VPN is offline.
+        assertNotNull(state.update("vpn", true, false))
+    }
+
     @Test fun coalescesDuplicateCallbacksAndSupersedesOldRecoveryAttempts() {
         val state = NetworkTransitionState()
         val wifi = state.update("wifi", true)!!

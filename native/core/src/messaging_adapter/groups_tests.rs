@@ -1,6 +1,69 @@
 use super::*;
 
 #[test]
+fn replies_and_moderation_keep_the_author_when_group_message_ids_collide() {
+    let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+    let mut first = super::super::tests::history_message(1);
+    first.is_outgoing = false;
+    first.author_id = "alice".into();
+    first.id = "shared-id".into();
+    let mut second = first.clone();
+    second.author_id = "bob".into();
+    second.id = message_ids::incoming_id(std::slice::from_ref(&first), "bob", &first.id);
+    let first_ref = message_ids::reference(&first).unwrap();
+    let second_ref = message_ids::reference(&second).unwrap();
+    let saved = {
+        let mut store = contact_store().lock().unwrap();
+        std::mem::replace(
+            &mut *store,
+            ContactStore {
+                messages_loaded: true,
+                messages: vec![first.clone(), second.clone()],
+                ..Default::default()
+            },
+        )
+    };
+    let mut group = StoredGroup {
+        id: "chat".into(),
+        name: "group".into(),
+        description: String::new(),
+        mode: "group".into(),
+        admin_id: "alice".into(),
+        created_at_ms: 1,
+        members: vec![],
+        management: Default::default(),
+    };
+    // Local actions select the exact row, even when its ID is the legacy raw ID.
+    let mut action = Action::Pin {
+        message_id: first.id.clone(),
+        pinned: true,
+    };
+    qualify_action(&group, &mut action, true).unwrap();
+    assert!(matches!(action, Action::Pin { ref message_id, .. } if message_id == &first_ref));
+    let mut remote_legacy = Action::DeleteMessage {
+        message_id: first.id.clone(),
+    };
+    assert!(qualify_action(&group, &mut remote_legacy, false).is_err());
+    let mut remote = Action::DeleteMessage {
+        message_id: second_ref.clone(),
+    };
+    qualify_action(&group, &mut remote, false).unwrap();
+    group.management.deleted_messages.insert(second_ref.clone());
+    assert!(!message_deleted(&group, &first));
+    assert!(message_deleted(&group, &second));
+    let rich = encode_text("reply", Some(&second_ref)).unwrap();
+    let decoded = rich_metadata(&rich).unwrap();
+    assert_eq!(decoded.1.as_deref(), Some(second_ref.as_str()));
+    let store = contact_store().lock().unwrap();
+    assert_eq!(
+        message_ids::local_id(&store.messages, "chat", decoded.1.as_ref().unwrap()),
+        Some(second.id)
+    );
+    drop(store);
+    *contact_store().lock().unwrap() = saved;
+}
+
+#[test]
 fn moderation_deduplicates_requests_and_single_member_groups_keep_working() {
     let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
     struct Cleanup;

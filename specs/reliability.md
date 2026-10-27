@@ -1,5 +1,52 @@
 # Correzioni di affidabilità — settembre 2026
 
+## Correzioni del 27 ottobre 2026
+
+Il commit delle sessioni Signal scrive prima un journal cifrato
+`signal-transaction-v1.vault` con sessione e, quando necessario, stato globale
+delle prekey. La sua sostituzione atomica conferma la transazione. Se uno dei
+file finali non può essere sostituito, il messaggio rimane salvato e il journal
+completa la scrittura prima della successiva operazione crittografica, anche
+dopo un riavvio. Un errore precedente al journal ripristina lo stato in memoria
+e lascia il pacchetto ritentabile. Non cambia il formato delle sessioni esistenti.
+
+Il limite di 100.000 messaggi vale anche per invii, allegati, creazione di gruppi
+e avvisi di gestione. Gli invii vengono fermati con `storage_full` prima della
+cifratura e ricontrollati prima di modificare outbox e log, così la cronologia
+non supera il limite previsto dal parser al riavvio.
+
+Il refresh della schermata verifica nuovamente widget montato, bridge e
+generazione dei servizi dopo ogni attesa, prima di notificare o applicare i dati.
+La conferma applicativa della consegna diretta è descritta in
+[offline-delivery.md](offline-delivery.md).
+
+## Identificatori, invii e letture concorrenti
+
+La deduplica della ricezione usa mittente autenticato e ID originale. Se due
+mittenti usano lo stesso ID, il secondo messaggio riceve un ID locale distinto;
+log, riavvio e sincronizzazione conservano entrambi. Gli ID già salvati restano
+validi. Le ricevute usano l'ID originale; risposte, messaggi fissati e cancellazioni
+portano anche un riferimento al mittente nei campi opzionali `qualified_*`.
+I campi precedenti rimangono leggibili dai client vecchi, che non distinguono
+queste collisioni. Una richiesta remota precedente con un riferimento ambiguo
+viene rifiutata invece di selezionare un messaggio arbitrario.
+
+L'invio salva prima `messaging/outgoing-transaction-v1.vault`, cifrato con la
+chiave dell'archivio, contenente cronologia locale e consegne già cifrate.
+Il recupero completa log e outbox prima di consentire altre scritture o invii.
+Dopo il commit del journal, un errore di materializzazione lascia l'operazione
+accettata e recuperabile; non annulla il messaggio. Le scritture di recupero
+sono idempotenti. Eventuali ciphertext orfani prodotti dalle versioni precedenti
+restano nella coda senza essere trasmessi: il loro testo locale non può essere
+ricostruito retroattivamente dal ciphertext destinato al contatto.
+
+Ogni mutazione delle conversazioni invalida anche la lettura in corso nel
+bridge Dart. Un risultato superato attende i dati correnti e non ripopola cache
+o UI con una chat eliminata; la sua conclusione non cancella la richiesta nuova.
+Il cambio di account continua a scartare i risultati dell'account precedente.
+Le regressioni coprono entrambi gli ordini di completamento, collisioni fra
+mittenti reali, riferimenti di gruppo e interruzioni a ogni fase del commit.
+
 ## Scritture parziali e lettura dei backup — 11 settembre
 
 Un append del log conserva l'offset iniziale e annulla la scrittura se fallisce

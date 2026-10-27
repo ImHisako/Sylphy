@@ -68,7 +68,7 @@ try {
     }
     $metadata = @(
         'abi=20'
-        'libsignal=signalapp/libsignal@v0.105.1'
+        'libsignal=signalapp/libsignal@v0.106.0'
         "profile=$Profile"
     )
     [string[]]$sourceFiles = @(

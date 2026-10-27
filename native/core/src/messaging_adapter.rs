@@ -31,6 +31,8 @@ mod attachments;
 pub mod groups;
 #[cfg(test)]
 mod latency_tests;
+mod message_ids;
+mod outgoing_transaction;
 mod receipts;
 mod search;
 
@@ -481,6 +483,7 @@ pub fn configure_storage(storage_directory: &str) -> CoreResult<()> {
     }
     let directory = PathBuf::from(storage_directory).join("messaging");
     fs::create_dir_all(&directory).map_err(|_| CoreError::Internal)?;
+    outgoing_transaction::recover(&directory)?;
     let path = directory.join(CONTACT_STORE_FILE);
     let legacy_path = directory.join(LEGACY_CONTACT_STORE_FILE);
     let (contacts, migrated) = load_contacts(&path, &legacy_path)?;
@@ -813,7 +816,7 @@ pub(crate) fn read_conversations(allow_load: bool) -> CoreResult<Value> {
             "member_count": group.members.len() + usize::from(!group.management.removed),
             "is_admin": groups::is_admin(group).unwrap_or(false),
             "can_send_messages": groups::can_write(group).unwrap_or(false),
-            "pinned_message_ids": group.management.pinned,
+            "pinned_message_ids": group.management.pinned.iter().filter_map(|id| message_ids::local_id(&store.messages, &group.id, id)).collect::<Vec<_>>(),
             "group_revision": group.management.revision,
             "description": group.description,
             "safety": "verified",
@@ -1263,6 +1266,7 @@ fn queue_created_group(
     plaintext: &str,
     message_path: &Path,
 ) -> CoreResult<Value> {
+    ensure_message_capacity()?;
     let group_id = group.id.clone();
     let members = &group.members;
     // A single durable system message carries one encrypted delivery per
@@ -1335,7 +1339,7 @@ fn queue_created_group(
 }
 
 pub fn send_reply(conversation_id: &str, plaintext: &str, reply_to: &str) -> CoreResult<Value> {
-    let channel_id = {
+    let (channel_id, reply_reference) = {
         let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
         ensure_messages_loaded(&mut store)?;
         let original = store
@@ -1343,14 +1347,17 @@ pub fn send_reply(conversation_id: &str, plaintext: &str, reply_to: &str) -> Cor
             .iter()
             .find(|message| message.id == reply_to && message.conversation_id == conversation_id)
             .ok_or(CoreError::InvalidInput)?;
-        groups::rich_metadata(&original.body)?.2
+        (
+            groups::rich_metadata(&original.body)?.2,
+            message_ids::reference(original)?,
+        )
     };
     if let Some(channel_id) = channel_id {
         return groups::send_channel_text(conversation_id, plaintext, &channel_id, Some(reply_to));
     }
     send_text(
         conversation_id,
-        &groups::encode_text(plaintext, Some(reply_to))?,
+        &groups::encode_text(plaintext, Some(&reply_reference))?,
     )
 }
 
@@ -1372,6 +1379,7 @@ fn send_text_with(
     ) -> CoreResult<(Vec<secure_packet::SealedDelivery>, String)>,
 ) -> CoreResult<Value> {
     validate_conversation_id(conversation_id)?;
+    ensure_message_capacity()?;
     let group = current_group(conversation_id)?;
     if let Some(group) = group {
         let plaintext = plaintext.trim();
@@ -1493,6 +1501,7 @@ pub fn send_attachment_in_channel(
     channel_id: Option<&str>,
 ) -> CoreResult<Value> {
     validate_conversation_id(conversation_id)?;
+    ensure_message_capacity()?;
     let file_name = validate_attachment_name(file_name)?;
     if bytes_base64.len() > MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 {
         return Err(CoreError::LimitExceeded);
@@ -1938,7 +1947,7 @@ pub fn sync_inbound_messages() -> CoreResult<Value> {
                 // finite mailbox slots. Transient storage/network failures are
                 // deliberately left unacknowledged and will be fetched again.
                 discarded += 1;
-                let _ = veilid_adapter::acknowledge_inbound_payload(payload);
+                let _ = veilid_adapter::discard_inbound_payload(payload);
             }
             Err(error) => {
                 storage_full |= matches!(error, CoreError::StorageFull);
@@ -2210,15 +2219,19 @@ fn persist_inbound_payload_with(
         return Err(CoreError::VerificationFailed);
     }
     let id = contact_id(&inspected.sender.bundle.identity_ed25519);
-    {
+    let local_message_id = {
         let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
         ensure_messages_loaded(&mut store)?;
         if store.messages.iter().any(|message| {
-            message.id == inspected.message_id && !legacy_attachment_placeholder(message)
+            !message.is_outgoing
+                && message.author_id == id
+                && message_ids::wire(&message.id) == inspected.message_id
+                && !legacy_attachment_placeholder(message)
         }) {
             return Ok(false);
         }
-    }
+        message_ids::incoming_id(&store.messages, &id, &inspected.message_id)
+    };
     let mut opened = secure_packet::open(payload)?;
     if let Some(changed) = receipts::receive(&opened.plaintext, &opened.sender)? {
         opened.commit_ratchet()?;
@@ -2286,73 +2299,70 @@ fn persist_inbound_payload_with(
         opened.commit_ratchet()?;
         return Ok(is_new);
     }
-    let (conversation_id, plaintext) =
-        if let Some((group_id, body)) = decode_group_message(&opened.plaintext)? {
-            let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
-            if let Some(group) = store.groups.iter().find(|group| group.id == group_id) {
-                let sender_id = contact_id(&opened.sender.bundle.identity_ed25519);
-                if group.management.closed || group.management.removed {
-                    return Err(CoreError::GroupClosed);
-                }
-                if group
-                    .management
-                    .deleted_messages
-                    .contains(&opened.message_id)
-                {
-                    drop(store);
-                    opened.commit_ratchet()?;
-                    return Ok(false);
-                }
-                if !group.members.iter().any(|member| member.id == sender_id)
-                    && group.admin_id != sender_id
-                {
-                    return Err(CoreError::AuthenticationFailed);
-                }
-                let group = group.clone();
+    let (conversation_id, plaintext) = if let Some((group_id, body)) =
+        decode_group_message(&opened.plaintext)?
+    {
+        let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+        if let Some(group) = store.groups.iter().find(|group| group.id == group_id) {
+            let sender_id = contact_id(&opened.sender.bundle.identity_ed25519);
+            if group.management.closed || group.management.removed {
+                return Err(CoreError::GroupClosed);
+            }
+            if groups::reference_deleted(group, &message_ids::qualified(&id, &opened.message_id)) {
                 drop(store);
-                let (text, _, mut channel) = groups::rich_metadata(&body)?;
-                if let Some(encoded) = body.strip_prefix(ATTACHMENT_PREFIX) {
-                    let pointer: AttachmentPointer = serde_json::from_slice(
-                        &STANDARD_NO_PAD
-                            .decode(encoded)
-                            .map_err(|_| CoreError::InvalidInput)?,
-                    )
-                    .map_err(|_| CoreError::InvalidInput)?;
-                    channel = pointer.channel_id;
-                }
-                // A deleted channel is final; do not keep retrying late packets
-                // as though their channel snapshot had not arrived yet.
-                if channel
-                    .as_ref()
-                    .is_some_and(|id| group.management.deleted_channels.contains(id))
-                {
-                    opened.commit_ratchet()?;
-                    return Ok(false);
-                }
-                // A channel snapshot may arrive after its first message.
-                groups::enforce_channel(&group, channel.as_deref())
-                    .map_err(|_| CoreError::InboundDeferred)?;
-                groups::enforce_inbound(
-                    &group,
-                    &sender_id,
-                    &text,
-                    body.starts_with(ATTACHMENT_PREFIX),
-                )?;
-                (group_id, body)
-            } else {
-                // DHT delivery is unordered, including for known contacts.
-                // Keep the authenticated packet until its group invitation arrives.
-                return Err(CoreError::FeatureUnavailable);
+                opened.commit_ratchet()?;
+                return Ok(false);
             }
+            if !group.members.iter().any(|member| member.id == sender_id)
+                && group.admin_id != sender_id
+            {
+                return Err(CoreError::AuthenticationFailed);
+            }
+            let group = group.clone();
+            drop(store);
+            let (text, _, mut channel) = groups::rich_metadata(&body)?;
+            if let Some(encoded) = body.strip_prefix(ATTACHMENT_PREFIX) {
+                let pointer: AttachmentPointer = serde_json::from_slice(
+                    &STANDARD_NO_PAD
+                        .decode(encoded)
+                        .map_err(|_| CoreError::InvalidInput)?,
+                )
+                .map_err(|_| CoreError::InvalidInput)?;
+                channel = pointer.channel_id;
+            }
+            // A deleted channel is final; do not keep retrying late packets
+            // as though their channel snapshot had not arrived yet.
+            if channel
+                .as_ref()
+                .is_some_and(|id| group.management.deleted_channels.contains(id))
+            {
+                opened.commit_ratchet()?;
+                return Ok(false);
+            }
+            // A channel snapshot may arrive after its first message.
+            groups::enforce_channel(&group, channel.as_deref())
+                .map_err(|_| CoreError::InboundDeferred)?;
+            groups::enforce_inbound(
+                &group,
+                &sender_id,
+                &text,
+                body.starts_with(ATTACHMENT_PREFIX),
+            )?;
+            (group_id, body)
         } else {
-            if !allows_unknown_contacts()? {
-                let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
-                if !store.contacts.iter().any(|contact| contact.id == id) {
-                    return Err(CoreError::AuthenticationFailed);
-                }
+            // DHT delivery is unordered, including for known contacts.
+            // Keep the authenticated packet until its group invitation arrives.
+            return Err(CoreError::FeatureUnavailable);
+        }
+    } else {
+        if !allows_unknown_contacts()? {
+            let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+            if !store.contacts.iter().any(|contact| contact.id == id) {
+                return Err(CoreError::AuthenticationFailed);
             }
-            (id.clone(), opened.plaintext.clone())
-        };
+        }
+        (id.clone(), opened.plaintext.clone())
+    };
     // Persist the authenticated reference and commit the ratchet without fetching
     // any file. Downloads require an explicit local request on a separate worker.
     let attachment_pointer = parse_attachment_pointer(&plaintext)?;
@@ -2363,7 +2373,7 @@ fn persist_inbound_payload_with(
         (plaintext, None)
     };
     let message = StoredMessage {
-        id: opened.message_id.clone(),
+        id: local_message_id,
         conversation_id: conversation_id.clone(),
         author_id: id.clone(),
         body,
@@ -2512,11 +2522,17 @@ fn rollback_message(message_id: &str) {
     }
 }
 
+fn encode_sync_event(event: &DeviceSyncEvent) -> CoreResult<Vec<u8>> {
+    let mut value = serde_json::to_value(event).map_err(|_| CoreError::Internal)?;
+    message_ids::encode_references(&mut value);
+    serde_json::to_vec(&value).map_err(|_| CoreError::Internal)
+}
+
 fn queue_device_sync(event: &DeviceSyncEvent) {
     // Device synchronization is a secondary replication step. Once the local
     // mutation is durable it must never turn the primary operation into a
     // failure; mailbox delivery is retried by subsequent sync passes.
-    let Ok(encoded) = serde_json::to_vec(event) else {
+    let Ok(encoded) = encode_sync_event(event) else {
         return;
     };
     let pending = PendingDeviceSync {
@@ -2587,7 +2603,7 @@ fn flush_device_sync_outbox() {
         let prepared = pending
             .into_iter()
             .filter_map(|item| {
-                serde_json::to_vec(&item.event)
+                encode_sync_event(&item.event)
                     .ok()
                     .map(|encoded| crate::device_sync::Pending {
                         id: item.id,
@@ -2642,6 +2658,19 @@ fn flush_device_sync_outbox() {
         store.device_sync_outbox = retained;
     }
 }
+fn ensure_message_capacity() -> CoreResult<()> {
+    let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    ensure_messages_loaded(&mut store)?;
+    check_message_capacity(&store)
+}
+
+fn check_message_capacity(store: &ContactStore) -> CoreResult<()> {
+    if store.messages.len() >= MAX_MESSAGES {
+        return Err(CoreError::StorageFull);
+    }
+    Ok(())
+}
+
 fn queue_outgoing(
     message_path: &Path,
     mut message: StoredMessage,
@@ -2678,6 +2707,7 @@ fn queue_outgoing(
     }
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     ensure_messages_loaded(&mut store)?;
+    check_message_capacity(&store)?;
     message.receipts.recipients = store
         .groups
         .iter()
@@ -2694,25 +2724,26 @@ fn queue_outgoing(
         .outbox_path
         .clone()
         .ok_or(CoreError::FeatureUnavailable)?;
+    if outbox_path.parent() != message_path.parent() {
+        return Err(CoreError::InvalidInput);
+    }
     let original_len = store.outbox.len();
     if original_len.saturating_add(pending.len()) > MAX_OUTBOX_DELIVERIES {
         return Err(CoreError::LimitExceeded);
     }
-    store.outbox.extend(pending);
-    if let Err(error) = persist_outbox(&outbox_path, &store.outbox) {
-        store.outbox.truncate(original_len);
-        return Err(error);
+    if store.messages.iter().any(|item| item.id == message.id) {
+        return Err(CoreError::VerificationFailed);
     }
-    if let Err(error) = append_message_event(
+    let mut outbox = store.outbox.clone();
+    outbox.extend(pending.iter().cloned());
+    outgoing_transaction::check_history_capacity(
         message_path,
-        &MessageEvent::Upsert {
-            message: message.clone(),
-        },
-    ) {
-        store.outbox.truncate(original_len);
-        let _ = persist_outbox(&outbox_path, &store.outbox);
-        return Err(error);
-    }
+        &store.messages,
+        &message,
+        MAX_MESSAGE_STORE_BYTES,
+    )?;
+    outgoing_transaction::commit(message_path, &message, &pending, &outbox)?;
+    store.outbox = outbox;
     store.message_event_count += 1;
     store.messages.push(message);
     store.revision = store.revision.wrapping_add(1);
@@ -2858,6 +2889,27 @@ fn flush_outbox(only_message_id: Option<&str>) -> bool {
     })
 }
 
+// Old releases could leave ciphertext without its sender-side history. Keep
+// those entries for recovery, but do not transmit a user message invisible locally.
+fn dispatchable_outbox(store: &ContactStore) -> impl Iterator<Item = &PendingDelivery> {
+    let wanted = store
+        .outbox
+        .iter()
+        .filter(|item| !item.is_control)
+        .map(|item| item.message_id.as_str())
+        .collect::<HashSet<_>>();
+    let present = store
+        .messages
+        .iter()
+        .filter(|message| message.is_outgoing && wanted.contains(message.id.as_str()))
+        .map(|message| message.id.as_str())
+        .collect::<HashSet<_>>();
+    store
+        .outbox
+        .iter()
+        .filter(move |item| item.is_control || present.contains(item.message_id.as_str()))
+}
+
 // Network workers never mutate account storage. Completed results stay buffered
 // until the command thread commits them, and each free slot can serve a new
 // message without waiting for the slowest destination in a previous batch.
@@ -2865,16 +2917,17 @@ fn poll_current_outbox(generation: u64, only_message_id: Option<&str>) -> Option
     poll_outbox_transport_with(
         generation,
         |in_flight, capacity| {
-            let Ok(store) = contact_store().lock() else {
+            let Ok(mut store) = contact_store().lock() else {
                 return Vec::new();
             };
+            if ensure_messages_loaded(&mut store).is_err() {
+                return Vec::new();
+            }
             if store.generation != generation {
                 return Vec::new();
             }
             let now = current_time_ms().unwrap_or(0);
-            store
-                .outbox
-                .iter()
+            dispatchable_outbox(&store)
                 .filter(|item| only_message_id.is_none_or(|id| item.message_id == id))
                 .filter(|item| item.next_attempt_ms <= now && !in_flight.contains(&item.id))
                 .take(capacity)
@@ -3114,8 +3167,11 @@ fn apply_device_sync(encrypted: &[u8]) -> CoreResult<()> {
 }
 
 fn apply_device_sync_plaintext(plaintext: &[u8]) -> CoreResult<()> {
+    let mut encoded: Value =
+        serde_json::from_slice(plaintext).map_err(|_| CoreError::VerificationFailed)?;
+    message_ids::decode_references(&mut encoded)?;
     let event: DeviceSyncEvent =
-        serde_json::from_slice(&plaintext).map_err(|_| CoreError::VerificationFailed)?;
+        serde_json::from_value(encoded).map_err(|_| CoreError::VerificationFailed)?;
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     let contact_path = store.path.clone().ok_or(CoreError::FeatureUnavailable)?;
     let message_path = store
@@ -3304,8 +3360,11 @@ fn legacy_attachment_placeholder(message: &StoredMessage) -> bool {
 fn upsert_synced_message(
     store: &mut ContactStore,
     path: &Path,
-    message: StoredMessage,
+    mut message: StoredMessage,
 ) -> CoreResult<bool> {
+    if !message.is_outgoing {
+        message.id = message_ids::incoming_id(&store.messages, &message.author_id, &message.id);
+    }
     if let Some(index) = store.messages.iter().position(|item| item.id == message.id) {
         let merged = merge_synced_message(&store.messages[index], &message)?;
         if serde_json::to_vec(&merged).ok() == serde_json::to_vec(&store.messages[index]).ok() {
@@ -3510,6 +3569,11 @@ fn load_outbox(path: &Path) -> CoreResult<Vec<PendingDelivery>> {
 }
 
 fn persist_outbox(path: &Path, entries: &[PendingDelivery]) -> CoreResult<()> {
+    outgoing_transaction::recover(path.parent().ok_or(CoreError::Internal)?)?;
+    persist_outbox_raw(path, entries)
+}
+
+fn persist_outbox_raw(path: &Path, entries: &[PendingDelivery]) -> CoreResult<()> {
     if entries.len() > MAX_OUTBOX_DELIVERIES {
         return Err(CoreError::LimitExceeded);
     }
@@ -3640,6 +3704,9 @@ fn remove_private_file(path: &Path) -> CoreResult<()> {
 }
 
 fn ensure_messages_loaded(store: &mut ContactStore) -> CoreResult<()> {
+    if let Some(path) = &store.message_path {
+        outgoing_transaction::recover(path.parent().ok_or(CoreError::Internal)?)?;
+    }
     if store.messages_loaded {
         return Ok(());
     }
@@ -3779,6 +3846,7 @@ fn apply_message_event(messages: &mut Vec<StoredMessage>, event: MessageEvent) -
 }
 
 fn append_message_event(path: &Path, event: &MessageEvent) -> CoreResult<()> {
+    outgoing_transaction::recover(path.parent().ok_or(CoreError::Internal)?)?;
     append_message_event_with_limit(path, event, MAX_MESSAGE_STORE_BYTES)
 }
 
@@ -3832,6 +3900,7 @@ fn compact_message_log_if_needed(store: &mut ContactStore) -> CoreResult<()> {
 }
 
 fn write_message_snapshot(path: &Path, messages: &[StoredMessage]) -> CoreResult<()> {
+    outgoing_transaction::recover(path.parent().ok_or(CoreError::Internal)?)?;
     write_message_snapshot_with_limit(path, messages, MAX_MESSAGE_STORE_BYTES)
 }
 
@@ -3931,7 +4000,7 @@ fn message_json_with_data(
         "author_id": message.author_id,
         "author_name": author_name,
         "body": text,
-        "reply_to": reply_to,
+        "reply_to": reply_to.as_deref().and_then(|id| message_ids::local_id(&store.messages, &message.conversation_id, id)),
         "channel_id": channel_id,
         "sent_at_ms": message.sent_at_ms,
         "order_at_ms": message_order_ms(message),
@@ -4221,6 +4290,9 @@ fn grouped_hex(bytes: &[u8]) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+#[cfg(test)]
+mod review_regressions;
 
 #[cfg(test)]
 mod tests {

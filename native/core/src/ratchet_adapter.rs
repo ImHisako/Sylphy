@@ -17,7 +17,7 @@ pub fn capability_status() -> RatchetCapabilityStatus {
     RatchetCapabilityStatus {
         compiled: cfg!(feature = "signal-ratchet"),
         provider: if cfg!(feature = "signal-ratchet") {
-            "signalapp/libsignal@v0.105.1"
+            "signalapp/libsignal@v0.106.0"
         } else {
             "not-compiled"
         },
@@ -42,9 +42,9 @@ mod signal {
         CiphertextMessage, DeviceId, Direction, GenericSignedPreKey, IdentityChange, IdentityKey,
         IdentityKeyPair, IdentityKeyStore, KeyPair, KyberPreKeyId, KyberPreKeyRecord,
         KyberPreKeyStore, PreKeyBundle, PreKeyId, PreKeyRecord, PreKeySignalMessage, PreKeyStore,
-        ProtocolAddress, PublicKey, SessionStore, SignalMessage, SignalProtocolError,
-        SignedPreKeyId, SignedPreKeyRecord, SignedPreKeyStore, Timestamp, kem, message_decrypt,
-        message_encrypt, process_prekey_bundle,
+        ProtocolAddress, PublicKey, SessionStore, SessionUsabilityRequirements, SignalMessage,
+        SignalProtocolError, SignedPreKeyId, SignedPreKeyRecord, SignedPreKeyStore, Timestamp, kem,
+        message_decrypt, message_encrypt, process_prekey_bundle,
     };
     use rand::{Rng as _, TryRngCore as _, rngs::OsRng};
     use serde::{Deserialize, Serialize};
@@ -68,6 +68,18 @@ mod signal {
     const MAX_SESSIONS: usize = 2_048;
     const MAX_GLOBAL_STORE_BYTES: usize = 8 * 1024 * 1024;
     const MAX_SESSION_STORE_BYTES: usize = 1024 * 1024;
+    const TRANSACTION_FILE: &str = "signal-transaction-v1.vault";
+    const MAX_TRANSACTION_BYTES: usize =
+        4 * (MAX_GLOBAL_STORE_BYTES + MAX_SESSION_STORE_BYTES) + 1024;
+
+    #[derive(Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct StoreTransaction {
+        version: u8,
+        session_file: String,
+        session: Vec<u8>,
+        global: Option<Vec<u8>>,
+    }
 
     #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
     #[serde(rename_all = "snake_case")]
@@ -345,13 +357,20 @@ mod signal {
     impl PendingDecrypt {
         pub fn commit(mut self) -> CoreResult<()> {
             let mut runtime = store().lock().map_err(|_| CoreError::Internal)?;
-            let result = (|| {
-                persist_session(&mut runtime, &self.address)?;
-                if self.is_pre_key {
-                    persist_global(&runtime)?;
-                }
-                Ok(())
-            })();
+            let identity_changed = self
+                .before
+                .as_ref()
+                .and_then(|before| before.global.as_ref())
+                .map(|global| &global.identity.known_keys)
+                != runtime
+                    .global
+                    .as_ref()
+                    .map(|global| &global.identity.known_keys);
+            let result = persist_transaction(
+                &mut runtime,
+                &self.address,
+                self.is_pre_key || identity_changed,
+            );
             if result.is_ok() {
                 self.before = None;
             }
@@ -520,41 +539,68 @@ mod signal {
         let mut runtime = store().lock().map_err(|_| CoreError::Internal)?;
         ensure_loaded(&mut runtime)?;
         ensure_session_loaded(&mut runtime, &address)?;
-        let had_session = runtime
-            .sessions
-            .records
-            .contains_key(&address_key(&address));
-        let RuntimeStore {
-            global, sessions, ..
-        } = &mut *runtime;
-        let global = global.as_mut().ok_or(CoreError::Internal)?;
-        if !had_session {
-            let bundle = decode_public_bundle(remote)?;
-            protocol(futures_executor::block_on(process_prekey_bundle(
+        let before = runtime.clone();
+        let result = (|| {
+            // Tahini can retain archived sessions without an active sender
+            // chain (for example after breaking a session deadlock). Reusing
+            // the record alone would leave every subsequent send failing.
+            let usable_session = runtime
+                .sessions
+                .records
+                .get(&address_key(&address))
+                .map(|encoded| {
+                    let record = protocol(libsignal_protocol::SessionRecord::deserialize(encoded))?;
+                    protocol(record.has_usable_sender_chain(
+                        SystemTime::now(),
+                        SessionUsabilityRequirements::NotStale
+                            | SessionUsabilityRequirements::EstablishedWithPqxdh
+                            | SessionUsabilityRequirements::Spqr,
+                    ))
+                })
+                .transpose()?
+                .unwrap_or(false);
+            let RuntimeStore {
+                global, sessions, ..
+            } = &mut *runtime;
+            let global = global.as_mut().ok_or(CoreError::Internal)?;
+            if !usable_session {
+                let bundle = decode_public_bundle(remote)?;
+                protocol(futures_executor::block_on(process_prekey_bundle(
+                    &address,
+                    &local_address,
+                    sessions,
+                    &mut global.identity,
+                    &bundle,
+                    SystemTime::now(),
+                    &mut OsRng.unwrap_err(),
+                )))?;
+            }
+            let ciphertext = protocol(futures_executor::block_on(message_encrypt(
+                plaintext,
                 &address,
                 &local_address,
                 sessions,
                 &mut global.identity,
-                &bundle,
                 SystemTime::now(),
                 &mut OsRng.unwrap_err(),
             )))?;
+            let wire = WireMessage::from_ciphertext(&ciphertext)?;
+            let encoded = serde_json::to_vec(&wire).map_err(|_| CoreError::Internal)?;
+            let identity_changed = before
+                .global
+                .as_ref()
+                .map(|global| &global.identity.known_keys)
+                != runtime
+                    .global
+                    .as_ref()
+                    .map(|global| &global.identity.known_keys);
+            persist_transaction(&mut runtime, &address, !usable_session || identity_changed)?;
+            Ok(encoded)
+        })();
+        if result.is_err() {
+            *runtime = before;
         }
-        let ciphertext = protocol(futures_executor::block_on(message_encrypt(
-            plaintext,
-            &address,
-            &local_address,
-            sessions,
-            &mut global.identity,
-            SystemTime::now(),
-            &mut OsRng.unwrap_err(),
-        )))?;
-        persist_session(&mut runtime, &address)?;
-        if !had_session {
-            persist_global(&runtime)?;
-        }
-        let wire = WireMessage::from_ciphertext(&ciphertext)?;
-        serde_json::to_vec(&wire).map_err(|_| CoreError::Internal)
+        result
     }
 
     pub fn decrypt(
@@ -608,6 +654,36 @@ mod signal {
     }
 
     fn ensure_loaded(runtime: &mut RuntimeStore) -> CoreResult<()> {
+        let recovering_new_session = !runtime.loaded
+            && runtime
+                .root
+                .as_ref()
+                .is_some_and(|root| root.join(TRANSACTION_FILE).exists());
+        // A damaged local journal is a storage failure, never evidence that
+        // the incoming network packet is invalid and should be discarded.
+        recover_transaction(runtime).map_err(|_| CoreError::Internal)?;
+        if recovering_new_session {
+            runtime.session_file_count = fs::read_dir(
+                runtime
+                    .root
+                    .as_ref()
+                    .ok_or(CoreError::Internal)?
+                    .join(SESSION_DIRECTORY),
+            )
+            .map_err(|_| CoreError::Internal)?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "vault")
+            })
+            .take(MAX_SESSIONS + 1)
+            .count();
+            if runtime.session_file_count > MAX_SESSIONS {
+                return Err(CoreError::LimitExceeded);
+            }
+        }
         if runtime.loaded {
             return Ok(());
         }
@@ -761,7 +837,16 @@ mod signal {
         atomic_file::replace(&root.join(STORE_FILE), &encrypted)
     }
 
-    fn persist_session(runtime: &mut RuntimeStore, address: &ProtocolAddress) -> CoreResult<()> {
+    // The encrypted journal is the commit point for the session and pre-key
+    // stores. Once durable, a failed materialization must not roll back the
+    // message or the in-memory ratchet. Recovery completes it before any later
+    // ratchet operation, including after process restart.
+    fn persist_transaction(
+        runtime: &mut RuntimeStore,
+        address: &ProtocolAddress,
+        include_global: bool,
+    ) -> CoreResult<()> {
+        recover_transaction(runtime).map_err(|_| CoreError::Internal)?;
         let key = address_key(address);
         let record = runtime
             .sessions
@@ -772,11 +857,97 @@ mod signal {
         let encrypted = vault::seal_with_key(&storage_key()?, &encoded)?;
         let path = session_path(runtime, &key)?;
         let is_new = !path.exists();
-        atomic_file::replace(&path, &encrypted)?;
+        let global = if include_global {
+            let encoded = Zeroizing::new(
+                serde_json::to_vec(runtime.global.as_ref().ok_or(CoreError::Internal)?)
+                    .map_err(|_| CoreError::Internal)?,
+            );
+            if encoded.len() > MAX_GLOBAL_STORE_BYTES {
+                return Err(CoreError::StorageFull);
+            }
+            Some(vault::seal_with_key(&storage_key()?, &encoded)?)
+        } else {
+            None
+        };
+        if encoded.len() > MAX_SESSION_STORE_BYTES {
+            return Err(CoreError::StorageFull);
+        }
+        let transaction = StoreTransaction {
+            version: 1,
+            session_file: path
+                .file_name()
+                .and_then(|v| v.to_str())
+                .ok_or(CoreError::Internal)?
+                .to_owned(),
+            session: encrypted,
+            global,
+        };
+        let journal = vault::seal_with_key(
+            &storage_key()?,
+            &Zeroizing::new(serde_json::to_vec(&transaction).map_err(|_| CoreError::Internal)?),
+        )?;
+        if journal.len() > MAX_TRANSACTION_BYTES {
+            return Err(CoreError::StorageFull);
+        }
+        let journal_path = runtime
+            .root
+            .as_ref()
+            .ok_or(CoreError::FeatureUnavailable)?
+            .join(TRANSACTION_FILE);
+        if let Err(error) = atomic_file::replace(&journal_path, &journal) {
+            // A directory-sync error can occur after the atomic replacement.
+            if fs::read(&journal_path).ok().as_deref() != Some(journal.as_slice()) {
+                return Err(error);
+            }
+        }
         if is_new {
             runtime.session_file_count += 1;
         }
+        let _ = recover_transaction(runtime);
         Ok(())
+    }
+
+    fn recover_transaction(runtime: &RuntimeStore) -> CoreResult<()> {
+        let root = runtime.root.as_ref().ok_or(CoreError::FeatureUnavailable)?;
+        let path = root.join(TRANSACTION_FILE);
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(CoreError::Internal),
+        };
+        if metadata.len() > MAX_TRANSACTION_BYTES as u64 {
+            return Err(CoreError::LimitExceeded);
+        }
+        let plaintext = vault::open_with_key(
+            &storage_key()?,
+            &fs::read(&path).map_err(|_| CoreError::Internal)?,
+        )?;
+        let transaction: StoreTransaction =
+            serde_json::from_slice(&plaintext).map_err(|_| CoreError::VerificationFailed)?;
+        if transaction.version != 1 {
+            return Err(CoreError::UnsupportedVersion);
+        }
+        let name = &transaction.session_file;
+        if name.len() != 70
+            || !name.ends_with(".vault")
+            || !name.as_bytes()[..64].iter().all(u8::is_ascii_hexdigit)
+            || transaction.session.is_empty()
+            || transaction.session.len() > MAX_SESSION_STORE_BYTES + 64
+            || transaction
+                .global
+                .as_ref()
+                .is_some_and(|v| v.is_empty() || v.len() > MAX_GLOBAL_STORE_BYTES + 64)
+        {
+            return Err(CoreError::VerificationFailed);
+        }
+        atomic_file::replace(
+            &root.join(SESSION_DIRECTORY).join(name),
+            &transaction.session,
+        )?;
+        if let Some(global) = transaction.global {
+            atomic_file::replace(&root.join(STORE_FILE), &global)?;
+        }
+        fs::remove_file(path).map_err(|_| CoreError::Internal)
     }
 
     fn session_path(runtime: &RuntimeStore, address_key: &str) -> CoreResult<PathBuf> {
@@ -825,6 +996,100 @@ mod signal {
 
     fn protocol<T>(result: Result<T, SignalProtocolError>) -> CoreResult<T> {
         result.map_err(|_| CoreError::VerificationFailed)
+    }
+
+    #[cfg(test)]
+    mod upgrade_tests {
+        use super::*;
+
+        #[test]
+        fn tahini_reestablishes_archived_sender_and_persists_learned_identity() {
+            let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+            let directory = std::env::temp_dir().join(format!(
+                "sylphy-tahini-{}-{}",
+                std::process::id(),
+                current_time_ms().unwrap()
+            ));
+            let alice_root = directory.join("alice").to_string_lossy().into_owned();
+            let bob_root = directory.join("bob").to_string_lossy().into_owned();
+            const PASSWORD: &str = "tahini-test-vault";
+            identity::ensure_identity(&bob_root, PASSWORD, None, None).unwrap();
+            let bob_identity = identity::active_identity()
+                .unwrap()
+                .identity_public_key()
+                .unwrap();
+            let bob_bundle = public_pre_key_bundle().unwrap();
+            identity::ensure_identity(&alice_root, PASSWORD, None, None).unwrap();
+            let alice_identity = identity::active_identity()
+                .unwrap()
+                .identity_public_key()
+                .unwrap();
+            let alice_bundle = public_pre_key_bundle().unwrap();
+            let first = encrypt(&bob_identity, &bob_bundle, b"before archive").unwrap();
+            let address = peer_address(&bob_identity, bob_bundle.device_id).unwrap();
+            let key = address_key(&address);
+            let old_session_id = {
+                let mut runtime = store().lock().unwrap();
+                let mut record =
+                    libsignal_protocol::SessionRecord::deserialize(&runtime.sessions.records[&key])
+                        .unwrap();
+                let id = record.alice_base_key().unwrap().to_vec();
+                record.archive_current_state().unwrap();
+                runtime
+                    .sessions
+                    .records
+                    .insert(key.clone(), record.serialize().unwrap());
+                persist_transaction(&mut runtime, &address, false).unwrap();
+                id
+            };
+            identity::activate_from_storage(&bob_root, PASSWORD).unwrap();
+            let (body, pending) = decrypt(&alice_identity, alice_bundle.device_id, &first).unwrap();
+            assert_eq!(body, b"before archive");
+            pending.commit().unwrap();
+            identity::activate_from_storage(&alice_root, PASSWORD).unwrap();
+            // This record still exists on disk, but its only session is archived.
+            let second = encrypt(&bob_identity, &bob_bundle, b"after archive").unwrap();
+            {
+                let runtime = store().lock().unwrap();
+                let record =
+                    libsignal_protocol::SessionRecord::deserialize(&runtime.sessions.records[&key])
+                        .unwrap();
+                assert_eq!(record.archived_session_count(), 1);
+                assert_ne!(record.alice_base_key().unwrap(), old_session_id);
+            }
+            identity::activate_from_storage(&bob_root, PASSWORD).unwrap();
+            let (body, pending) =
+                decrypt(&alice_identity, alice_bundle.device_id, &second).unwrap();
+            assert_eq!(body, b"after archive");
+            pending.commit().unwrap();
+            let reply = encrypt(&alice_identity, &alice_bundle, b"reply").unwrap();
+            identity::activate_from_storage(&alice_root, PASSWORD).unwrap();
+            let (body, pending) = decrypt(&bob_identity, bob_bundle.device_id, &reply).unwrap();
+            assert_eq!(body, b"reply");
+            pending.commit().unwrap();
+            {
+                let mut runtime = store().lock().unwrap();
+                runtime.global.as_mut().unwrap().identity.known_keys.clear();
+                persist_global(&runtime).unwrap();
+            }
+            // v0.106.0 saves the peer identity on every encryption, including
+            // when no new session is needed. That trust state must be durable.
+            encrypt(&bob_identity, &bob_bundle, b"existing active session").unwrap();
+            identity::activate_from_storage(&alice_root, PASSWORD).unwrap();
+            public_pre_key_bundle().unwrap();
+            assert!(
+                store()
+                    .lock()
+                    .unwrap()
+                    .global
+                    .as_ref()
+                    .unwrap()
+                    .identity
+                    .known_keys
+                    .contains_key(&key)
+            );
+            fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     pub fn self_test() -> CoreResult<()> {

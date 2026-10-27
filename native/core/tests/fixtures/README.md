@@ -1,5 +1,19 @@
 # libsignal upgrade fixture
 
+`libsignal-v0.105.1.json` was generated on 2026-10-27 with official libsignal
+v0.105.1, commit `1738ead8a12ffe539f6309958123dadb16dc3b95`, **before**
+upgrading the dependency to v0.106.0. Its SHA-256 is
+`85f69dd9f834991d24598412fcb46b508c2d35bbff104cbe18c678ff6eb9f59c`.
+It uses the same disposable scenarios as the older fixtures. All three are
+read by the current compatibility tests, including decryption from an archived
+session without promoting it back to the active sender slot under Tahini.
+
+For the v0.106.0 upgrade, a separate local harness linked v0.105.1 and v0.106.0
+in the same process. It alternated which endpoint used each version and verified
+skipped keys, replay rejection, 32 new messages in both directions, and reading
+the updated session records across library versions. This is a protocol test,
+not a device test.
+
 `libsignal-v0.105.0.json` was generated on 2026-10-16 with official libsignal
 v0.105.0, commit `4beb029d8a941f81e7d9c6d8af1ed25a677569a8`, **before**
 upgrading the dependency to v0.105.1. Its SHA-256 is
@@ -40,3 +54,6 @@ To reproduce v0.105.0 instead, pin its original commit and provider, set
 `SYLPHY_GENERATE_FIXTURE_VERSION=v0.105.0`, and run the same ignored generator.
 The generator checks the runtime provider before writing the version-specific
 file. Its default remains v0.102.1 for the older reproduction command.
+
+For v0.105.1, use its original commit and provider and set
+`SYLPHY_GENERATE_FIXTURE_VERSION=v0.105.1` before running the same generator.

@@ -704,11 +704,20 @@ pub fn details(id: &str) -> CoreResult<Value> {
         "restriction": group.management.restrictions.get(&local)}),
         );
     }
+    let pinned = {
+        let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+        group
+            .management
+            .pinned
+            .iter()
+            .filter_map(|id| message_ids::local_id(&store.messages, &group.id, id))
+            .collect::<Vec<_>>()
+    };
     Ok(
         json!({"id": group.id, "name": group.name, "description": group.description,
         "revision": group.management.revision, "policy": group.management.policy,
         "permissions": permissions(&group, &local)?, "is_owner": local == owner,
-        "members": members, "pinned": group.management.pinned,
+        "members": members, "pinned": pinned,
         "show_action_notices": group.management.show_action_notices,
         "channels": group.management.channels,
         "pending_actions": group.management.requests.iter().filter(|request| request.actor == local).map(|request| &request.action).collect::<Vec<_>>(),
@@ -892,9 +901,65 @@ fn already_applied(group: &StoredGroup, action: &Action) -> bool {
     }
 }
 
-pub fn act(id: &str, action: Action) -> CoreResult<Value> {
+fn same_reference(first: &str, second: &str) -> bool {
+    if message_ids::wire(first) != first && message_ids::wire(second) != second {
+        first == second
+    } else {
+        message_ids::wire(first) == message_ids::wire(second)
+    }
+}
+
+fn qualify_action(group: &StoredGroup, action: &mut Action, local: bool) -> CoreResult<()> {
+    let target = match action {
+        Action::Pin { message_id, .. } | Action::DeleteMessage { message_id } => message_id,
+        _ => return Ok(()),
+    };
+    let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+    ensure_messages_loaded(&mut store)?;
+    let selected = if local {
+        store
+            .messages
+            .iter()
+            .find(|message| message.conversation_id == group.id && message.id == *target)
+    } else {
+        None
+    };
+    let selected = if let Some(message) = selected {
+        Some(message)
+    } else {
+        let mut matches = store.messages.iter().filter(|message| {
+            message.conversation_id == group.id && message_ids::matches(message, target)
+        });
+        let first = matches.next();
+        if matches.next().is_some() {
+            return Err(CoreError::InvalidInput);
+        }
+        first
+    };
+    if let Some(message) = selected {
+        *target = message_ids::reference(message)?;
+    }
+    Ok(())
+}
+
+fn decode_control(bytes: &[u8]) -> CoreResult<Control> {
+    let mut value: Value = serde_json::from_slice(bytes).map_err(|_| CoreError::InvalidInput)?;
+    message_ids::decode_references(&mut value)?;
+    serde_json::from_value(value).map_err(|_| CoreError::InvalidInput)
+}
+
+pub(super) fn reference_deleted(group: &StoredGroup, target: &str) -> bool {
+    group.management.deleted_messages.contains(target)
+        || group
+            .management
+            .deleted_messages
+            .contains(message_ids::wire(target))
+}
+
+pub fn act(id: &str, mut action: Action) -> CoreResult<Value> {
     let group = current_group(id)?.ok_or(CoreError::InvalidInput)?;
     let local = local_id()?;
+    qualify_action(&group, &mut action, true)?;
     authorized(&group, &local, &action)?;
     require_updated(&group)?;
     if matches!(
@@ -955,6 +1020,8 @@ pub fn act(id: &str, action: Action) -> CoreResult<Value> {
 }
 
 fn apply_request(mut group: StoredGroup, request: &Request) -> CoreResult<()> {
+    let mut request = request.clone();
+    qualify_action(&group, &mut request.action, false)?;
     if group.management.processed.contains(&request.id) {
         return Ok(());
     }
@@ -1011,12 +1078,12 @@ fn apply_request(mut group: StoredGroup, request: &Request) -> CoreResult<()> {
                     .filter(|message| {
                         message.conversation_id == group.id && message_deleted(&group, message)
                     })
-                    .map(|message| message.id.as_str())
+                    .filter_map(|message| message_ids::reference(message).ok())
                     .collect::<HashSet<_>>();
                 group
                     .management
                     .pinned
-                    .retain(|id| !deleted.contains(id.as_str()));
+                    .retain(|id| !deleted.iter().any(|target| same_reference(id, target)));
             }
             "Un canale è stato eliminato"
         }
@@ -1136,15 +1203,16 @@ fn apply_request(mut group: StoredGroup, request: &Request) -> CoreResult<()> {
         }
         Action::Pin { message_id, pinned } => {
             let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
-            if !store
-                .messages
-                .iter()
-                .any(|message| message.id == *message_id && message.conversation_id == group.id)
-                || group.management.deleted_messages.contains(message_id)
+            if !store.messages.iter().any(|message| {
+                message_ids::matches(message, message_id) && message.conversation_id == group.id
+            }) || group.management.deleted_messages.contains(message_id)
             {
                 return Err(CoreError::InvalidInput);
             }
-            group.management.pinned.retain(|id| id != message_id);
+            group
+                .management
+                .pinned
+                .retain(|id| !same_reference(id, message_id));
             if *pinned {
                 group.management.pinned.push(message_id.clone());
             }
@@ -1157,7 +1225,10 @@ fn apply_request(mut group: StoredGroup, request: &Request) -> CoreResult<()> {
         Action::DeleteMessage { message_id } => {
             validate_conversation_id(message_id)?;
             group.management.deleted_messages.insert(message_id.clone());
-            group.management.pinned.retain(|id| id != message_id);
+            group
+                .management
+                .pinned
+                .retain(|id| !same_reference(id, message_id));
             "Un messaggio è stato eliminato per tutti"
         }
         Action::Close => {
@@ -1272,7 +1343,9 @@ fn seal_control(control: &Control, recipients: &[GroupMember]) -> CoreResult<Vec
     if recipients.is_empty() {
         return Ok(Vec::new());
     }
-    let encoded = serde_json::to_vec(control).map_err(|_| CoreError::Internal)?;
+    let mut value = serde_json::to_value(control).map_err(|_| CoreError::Internal)?;
+    message_ids::encode_references(&mut value);
+    let encoded = serde_json::to_vec(&value).map_err(|_| CoreError::Internal)?;
     // Small requests need only the existing encrypted direct transport. Avoid
     // publishing and fetching a DHT attachment before the owner can apply them.
     if encoded.len() <= 4096
@@ -1574,8 +1647,7 @@ where
         if encoded.len() > 4096 {
             return Err(CoreError::LimitExceeded);
         }
-        let control: Control =
-            serde_json::from_str(encoded).map_err(|_| CoreError::InvalidInput)?;
+        let control = decode_control(encoded.as_bytes())?;
         return receive_control(control, sender).map(Some);
     }
     let Some(encoded) = body.strip_prefix(CONTROL) else {
@@ -1608,8 +1680,7 @@ where
     if plaintext.len() != pointer.size {
         return Err(CoreError::VerificationFailed);
     }
-    let control: Control =
-        serde_json::from_slice(&plaintext).map_err(|_| CoreError::InvalidInput)?;
+    let control = decode_control(&plaintext)?;
     receive_control(control, sender).map(Some)
 }
 
@@ -1951,20 +2022,48 @@ fn apply_local_effects(
         )?;
         store.outbox = outbox;
     }
+    let notice_author = if outgoing {
+        "me".to_owned()
+    } else {
+        group.admin_id.clone()
+    };
+    let notice_id = store
+        .messages
+        .iter()
+        .find(|message| {
+            message.is_outgoing == outgoing
+                && message.author_id == notice_author
+                && message_ids::wire(&message.id) == event_id
+        })
+        .map(|message| message.id.clone())
+        .unwrap_or_else(|| {
+            if store.messages.iter().any(|message| message.id == event_id) {
+                message_ids::qualified(
+                    &if outgoing {
+                        local_id().unwrap_or_else(|_| notice_author.clone())
+                    } else {
+                        notice_author.clone()
+                    },
+                    event_id,
+                )
+            } else {
+                event_id.to_owned()
+            }
+        });
     if group.management.show_action_notices
         && !notice.is_empty()
         && !group.management.closed
         && !group.management.left
-        && !store.messages.iter().any(|message| message.id == event_id)
+        && !store
+            .messages
+            .iter()
+            .any(|message| message.id == notice_id && message.author_id == notice_author)
     {
+        check_message_capacity(&store)?;
         let message = StoredMessage {
-            id: event_id.to_owned(),
+            id: notice_id,
             conversation_id: group.id.clone(),
-            author_id: if outgoing {
-                "me".to_owned()
-            } else {
-                group.admin_id.clone()
-            },
+            author_id: notice_author,
             body: notice.to_owned(),
             sent_at_ms: current_time_ms()?,
             received_at_ms: 0,
@@ -2004,17 +2103,17 @@ pub(super) fn encode_channel_text(
     if let Some(id) = channel_id {
         validate_conversation_id(id)?;
     }
+    let mut value = serde_json::to_value(RichText {
+        version: 1,
+        text: text.to_owned(),
+        reply_to: reply_to.map(str::to_owned),
+        channel_id: channel_id.map(str::to_owned),
+    })
+    .map_err(|_| CoreError::Internal)?;
+    message_ids::encode_references(&mut value);
     Ok(format!(
         "{RICH}{}",
-        STANDARD_NO_PAD.encode(
-            serde_json::to_vec(&RichText {
-                version: 1,
-                text: text.to_owned(),
-                reply_to: reply_to.map(str::to_owned),
-                channel_id: channel_id.map(str::to_owned)
-            })
-            .map_err(|_| CoreError::Internal)?
-        )
+        STANDARD_NO_PAD.encode(serde_json::to_vec(&value).map_err(|_| CoreError::Internal)?)
     ))
 }
 
@@ -2030,12 +2129,14 @@ pub(super) fn rich_metadata(body: &str) -> CoreResult<(String, Option<String>, O
     if encoded.len() > MAX_MESSAGE_BODY_BYTES {
         return Err(CoreError::LimitExceeded);
     }
-    let rich: RichText = serde_json::from_slice(
+    let mut value: Value = serde_json::from_slice(
         &STANDARD_NO_PAD
             .decode(encoded)
             .map_err(|_| CoreError::InvalidInput)?,
     )
     .map_err(|_| CoreError::InvalidInput)?;
+    message_ids::decode_references(&mut value)?;
+    let rich: RichText = serde_json::from_value(value).map_err(|_| CoreError::InvalidInput)?;
     if rich.version != 1 || rich.text.trim().is_empty() {
         return Err(CoreError::InvalidInput);
     }
@@ -2072,7 +2173,7 @@ fn require_channel_capability(group: &StoredGroup, required: &str) -> CoreResult
 }
 
 pub(super) fn message_deleted(group: &StoredGroup, message: &StoredMessage) -> bool {
-    group.management.deleted_messages.contains(&message.id)
+    message_ids::reference(message).is_ok_and(|id| reference_deleted(group, &id))
         || (!group.management.deleted_channels.is_empty()
             && rich_metadata(&message.body).is_ok_and(|(_, _, channel)| {
                 channel.is_some_and(|id| group.management.deleted_channels.contains(&id))
@@ -2105,6 +2206,7 @@ pub fn send_channel_text(
     if text.trim().is_empty() {
         return Err(CoreError::InvalidInput);
     }
+    let mut qualified_reply = None;
     if let Some(reply) = reply_to {
         let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
         ensure_messages_loaded(&mut store)?;
@@ -2113,11 +2215,19 @@ pub fn send_channel_text(
             .iter()
             .find(|message| message.conversation_id == id && message.id == reply)
             .ok_or(CoreError::InvalidInput)?;
+        qualified_reply = Some(message_ids::reference(original)?);
         if rich_metadata(&original.body)?.2.as_deref() != Some(channel_id) {
             return Err(CoreError::InvalidInput);
         }
     }
-    send_text(id, &encode_channel_text(text, reply_to, Some(channel_id))?)
+    send_text(
+        id,
+        &encode_channel_text(
+            text,
+            qualified_reply.as_deref().or(reply_to),
+            Some(channel_id),
+        )?,
+    )
 }
 
 pub fn search(id: &str, query: &str, offset: usize) -> CoreResult<Value> {

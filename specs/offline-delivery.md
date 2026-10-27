@@ -20,11 +20,20 @@ liberano capacità ma non costituiscono ricevute di lettura. Cancellare una
 conversazione elimina i suoi tentativi ancora nella coda locale; non ritira
 pacchetti già inviati o depositati.
 
-Una consegna diretta riuscita porta a `sent` senza attendere un secondo
-deposito nella DHT. La mailbox viene usata come fallback quando il percorso
-diretto fallisce. Una mailbox piena o indisponibile non riporta in coda un
-pacchetto già affidato al trasporto diretto; se entrambi i percorsi falliscono,
-il ciphertext rimane nella coda persistente per il retry.
+La consegna diretta usa `AppCall`: la risposta positiva è
+`sylphy-stored-v1: || SHA256(ciphertext)` e viene inviata solo dopo il salvataggio
+locale e il commit recuperabile della ratchet. Solo questa risposta porta a
+`sent` senza attendere un secondo deposito nella DHT. Una coda piena, un blocco
+del vault prima del salvataggio, un timeout o una risposta diversa attivano il
+fallback nella mailbox; se anche il deposito fallisce, il ciphertext resta nella
+coda persistente del mittente. Una conferma persa può produrre un secondo recapito,
+deduplicato tramite la coppia mittente autenticato e message ID originale.
+
+I vecchi destinatari senza supporto `AppCall` vengono raggiunti tramite il
+fallback offline quando la capability è disponibile. Per il primo messaggio
+diretto a un contatto sconosciuto serve un destinatario aggiornato. La ricezione
+dei vecchi `AppMessage` resta compatibile, ma soltanto i mittenti aggiornati
+attendono la conferma applicativa prima di rimuovere la copia locale.
 
 ## Capability per coppia
 

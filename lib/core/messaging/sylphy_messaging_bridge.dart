@@ -86,7 +86,7 @@ class SylphyMessagingBridge
       'command': 'join_group',
       'invitation_code': invitationCode,
     });
-    _conversationCache = null;
+    _invalidateConversations();
     return _requiredString(response.data, 'group_id');
   }
 
@@ -139,7 +139,7 @@ class SylphyMessagingBridge
       'conversation_id': conversationId,
       'action': action,
     });
-    _conversationCache = null;
+    _invalidateConversations();
     _expandedHistories.remove(conversationId);
     _messageListCache.remove(conversationId);
     return response.data['state'] as String? ?? 'applied';
@@ -169,7 +169,7 @@ class SylphyMessagingBridge
       'plaintext': plaintext,
       'reply_to': replyTo,
     });
-    _conversationCache = null;
+    _invalidateConversations();
   }
 
   @override
@@ -179,7 +179,7 @@ class SylphyMessagingBridge
       'conversation_id': conversationId,
       if (channelId != null) 'channel_id': channelId,
     });
-    _conversationCache = null;
+    _invalidateConversations();
     return response.data['all_read'] == true;
   }
 
@@ -197,7 +197,7 @@ class SylphyMessagingBridge
       'plaintext': text,
       if (replyTo != null) 'reply_to': replyTo,
     });
-    _conversationCache = null;
+    _invalidateConversations();
   }
 
   @override
@@ -215,7 +215,7 @@ class SylphyMessagingBridge
       'file_name': fileName,
       'bytes_base64': base64Encode(bytes),
     });
-    _conversationCache = null;
+    _invalidateConversations();
   }
 
   final Map<String, ChatMessage> _messageCache = {};
@@ -229,6 +229,7 @@ class SylphyMessagingBridge
   Future<int>? _inboxRefresh;
   int _inboxRevision = 0;
   int _cacheGeneration = 0;
+  int _conversationGeneration = 0;
   final ValueNotifier<int> _inboxChanges = ValueNotifier(0);
   @override
   bool inboxStorageFull = false;
@@ -248,7 +249,7 @@ class SylphyMessagingBridge
       bytes?.fillRange(0, bytes.length, 0);
     }
     inboxStorageFull = false;
-    _conversationCache = null;
+    _invalidateConversations();
     _messageCache.clear();
     _groupRevisions.clear();
     _groupDetailLoads.clear();
@@ -315,21 +316,37 @@ class SylphyMessagingBridge
   @override
   Future<List<Conversation>> refreshConversations() {
     final generation = _cacheGeneration;
+    final conversationGeneration = _conversationGeneration;
     return _conversationRefresh ??= _performConversationRefresh().whenComplete(
       () {
-        if (generation == _cacheGeneration) _conversationRefresh = null;
+        if (generation == _cacheGeneration &&
+            conversationGeneration == _conversationGeneration) {
+          _conversationRefresh = null;
+        }
       },
     );
   }
 
   Future<List<Conversation>> _performConversationRefresh() async {
     final generation = _cacheGeneration;
+    final conversationGeneration = _conversationGeneration;
     final core = _core;
     final response = core is NativeCoreClient
         ? await core.listConversationsInBackground()
         : core.listConversations();
     if (generation != _cacheGeneration) return const [];
+    if (conversationGeneration != _conversationGeneration) {
+      // A mutation superseded this snapshot. Existing callers must receive
+      // the current data too, rather than repopulating their UI with old rows.
+      return _conversationCache ?? refreshConversations();
+    }
     return _parseConversations(response);
+  }
+
+  void _invalidateConversations() {
+    _conversationGeneration++;
+    _conversationCache = null;
+    _conversationRefresh = null;
   }
 
   List<Conversation> _parseConversations(NativeCoreResponse response) {
@@ -544,7 +561,7 @@ class SylphyMessagingBridge
             invitationCode: invitationCode,
           );
     _requireSuccess(response);
-    _conversationCache = null;
+    _invalidateConversations();
     return _requiredString(response.data, 'contact_id');
   }
 
@@ -565,7 +582,7 @@ class SylphyMessagingBridge
         description: description,
       );
       _requireSuccess(response);
-      _conversationCache = null;
+      _invalidateConversations();
       return _requiredString(response.data, 'group_id');
     }
     if (core is! NativeCoreGroupApi) {
@@ -578,7 +595,7 @@ class SylphyMessagingBridge
       description: description,
     );
     _requireSuccess(response);
-    _conversationCache = null;
+    _invalidateConversations();
     return _requiredString(response.data, 'group_id');
   }
 
@@ -591,7 +608,7 @@ class SylphyMessagingBridge
           ? await core.markConversationReadInBackground(conversationId)
           : core.markConversationRead(conversationId),
     );
-    _conversationCache = null;
+    _invalidateConversations();
   }
 
   @override
@@ -603,7 +620,7 @@ class SylphyMessagingBridge
           ? await core.deleteConversationInBackground(conversationId)
           : core.deleteConversation(conversationId),
     );
-    _conversationCache = null;
+    _invalidateConversations();
     _messageListCache.remove(conversationId);
     _expandedHistories.remove(conversationId);
     _groupDetailsCache.remove(conversationId);
@@ -629,7 +646,7 @@ class SylphyMessagingBridge
               verified: verified,
             ),
     );
-    _conversationCache = null;
+    _invalidateConversations();
   }
 
   @override
@@ -647,7 +664,7 @@ class SylphyMessagingBridge
             )
           : core.sendText(conversationId: conversationId, plaintext: plaintext),
     );
-    _conversationCache = null;
+    _invalidateConversations();
   }
 
   @override
@@ -673,7 +690,7 @@ class SylphyMessagingBridge
               bytesBase64: encoded,
             ),
     );
-    _conversationCache = null;
+    _invalidateConversations();
   }
 }
 

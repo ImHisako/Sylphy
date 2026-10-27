@@ -35,7 +35,11 @@ internal object NetworkRecovery {
             // Validation probes can be blocked by VPNs or privacy-oriented networks.
             // INTERNET is only a hint; Veilid still verifies actual connectivity.
             val online = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
-            val revision = transitions.update(network, online) ?: return@Runnable
+            // Mobile data can lose and regain reachability without changing the
+            // Network object or its INTERNET capability. Treat validation changes
+            // as recovery hints too, without requiring validation on VPNs.
+            val validated = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+            val revision = transitions.update(network, online, validated) ?: return@Runnable
             available = online
             recover(online, revision, 0)
         }

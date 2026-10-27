@@ -6,6 +6,9 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{CoreError, CoreResult};
 
+#[cfg(feature = "veilid")]
+use crate::network_recovery::reconnect_attachment_with;
+
 use crate::peer_identity::{MailboxAddress, PublishedIdentity};
 
 #[cfg(feature = "veilid")]
@@ -26,6 +29,8 @@ pub(crate) struct InboundPayload {
     offline_digest: Option<[u8; 32]>,
     #[cfg(feature = "veilid")]
     offline_receipt: Option<OfflineReceipt>,
+    #[cfg(feature = "veilid")]
+    direct_call: Option<veilid_core::OperationId>,
 }
 
 #[cfg(feature = "veilid")]
@@ -95,9 +100,11 @@ pub struct VeilidNode {
     inbound_envelopes: Arc<Mutex<VecDeque<InboundPayload>>>,
     seen_mailbox_slots: Arc<Mutex<HashMap<u32, Vec<u8>>>>,
     private_route: Arc<Mutex<Option<veilid_core::RouteBlob>>>,
+    last_route_blob: Option<Vec<u8>>,
     route_needs_publish: Arc<std::sync::atomic::AtomicBool>,
     mailbox_task: Option<tokio::task::JoinHandle<()>>,
     offline_task: Option<tokio::task::JoinHandle<()>>,
+    connection_recovery: Option<tokio::task::JoinHandle<()>>,
     offline_targets: Arc<Mutex<Vec<crate::offline_mailbox::MailboxKeys>>>,
     offline_seen: Arc<Mutex<HashMap<[u8; 32], bool>>>,
 }
@@ -117,6 +124,11 @@ impl VeilidNode {
             Arc::new(move |update| match update {
                 veilid_core::VeilidUpdate::AppMessage(message) => {
                     enqueue_inbound_envelope(&callback_inbox, message.message(), None);
+                }
+                veilid_core::VeilidUpdate::AppCall(call) => {
+                    // Queueing is not delivery. Reply only after the message
+                    // and ratchet have been committed by sync_inbound_messages.
+                    enqueue_inbound_request(&callback_inbox, call.message(), None, Some(call.id()));
                 }
                 veilid_core::VeilidUpdate::RouteChange(change) => {
                     if let Ok(mut route) = callback_route.lock() {
@@ -156,9 +168,11 @@ impl VeilidNode {
             inbound_envelopes,
             seen_mailbox_slots,
             private_route,
+            last_route_blob: None,
             route_needs_publish,
             mailbox_task: None,
             offline_task: Some(offline_task),
+            connection_recovery: None,
             offline_targets,
             offline_seen,
         })
@@ -170,9 +184,11 @@ impl VeilidNode {
             inbound_envelopes: Arc::new(Mutex::new(VecDeque::new())),
             seen_mailbox_slots: Arc::new(Mutex::new(HashMap::new())),
             private_route: Arc::new(Mutex::new(None)),
+            last_route_blob: None,
             route_needs_publish: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mailbox_task: None,
             offline_task: None,
+            connection_recovery: None,
             offline_targets: Arc::new(Mutex::new(Vec::new())),
             offline_seen: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -182,17 +198,27 @@ impl VeilidNode {
         self.api.attach().await
     }
 
+    fn is_recovering_connection(&self) -> bool {
+        self.connection_recovery
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+    }
+
     pub async fn status(&self) -> Result<VeilidNodeStatus, veilid_core::VeilidAPIError> {
         let state = self.api.get_state().await?;
         Ok(VeilidNodeStatus {
             compiled: true,
             running: true,
-            attachment_state: if network_available() {
+            attachment_state: if network_available() && self.is_recovering_connection() {
+                "attaching".into()
+            } else if network_available() {
                 state.attachment.state.to_string()
             } else {
                 "detached".into()
             },
-            public_internet_ready: network_available() && state.attachment.public_internet_ready,
+            public_internet_ready: network_available()
+                && !self.is_recovering_connection()
+                && state.attachment.public_internet_ready,
             live_peer_count: state.attachment.live_peer_count.to_string(),
             route_needs_publish: self
                 .route_needs_publish
@@ -249,6 +275,10 @@ impl VeilidNode {
     }
 
     pub async fn shutdown(mut self) {
+        if let Some(task) = self.connection_recovery.take() {
+            task.abort();
+            let _ = task.await;
+        }
         if let Some(task) = self.offline_task.take() {
             task.abort();
             let _ = task.await;
@@ -266,10 +296,20 @@ pub fn local_route_blob() -> CoreResult<Vec<u8>> {
     let mut state = lock_runtime()?;
     let VeilidRuntime { runtime, node } = &mut *state;
     let node = node.as_mut().ok_or(CoreError::NetworkStartupFailed)?;
-    runtime
+    if !network_available() || node.is_recovering_connection() {
+        // Sealing a queued message needs a sender endpoint even while offline.
+        // Network handoff and DHT publication stay blocked by network_executor.
+        return node
+            .last_route_blob
+            .clone()
+            .ok_or(CoreError::NetworkAttachFailed);
+    }
+    let blob = runtime
         .block_on(node.create_private_route())
         .map(|route| route.blob)
-        .map_err(|_| CoreError::NetworkStartupFailed)
+        .map_err(|_| CoreError::NetworkStartupFailed)?;
+    node.last_route_blob = Some(blob.clone());
+    Ok(blob)
 }
 
 #[cfg(not(feature = "veilid"))]
@@ -283,10 +323,27 @@ pub fn publish_identity(
     identity: &PublishedIdentity,
 ) -> CoreResult<(String, String)> {
     identity.validate()?;
-    let result = publish_record(
-        descriptor_json,
-        serde_json::to_vec(identity).map_err(|_| CoreError::Internal)?,
-    )?;
+    let encoded = serde_json::to_vec(identity).map_err(|_| CoreError::Internal)?;
+    let cached = crate::identity_publication::cached_value(descriptor_json);
+    let bytes = if let Some(value) = cached
+        .as_ref()
+        .filter(|value| crate::identity_publication::matches(value, &encoded))
+    {
+        value.clone()
+    } else {
+        crate::identity_publication::encode(encoded, |data| {
+            publish_blob_with_limit(data, crate::identity_publication::MAX_IDENTITY_BYTES)
+        })?
+    };
+    let (code, descriptor) = publish_record(descriptor_json, bytes.clone())?;
+    let descriptor = crate::identity_publication::cache_value(&descriptor, &bytes)?;
+    if let Some(previous) = cached.filter(|previous| *previous != bytes) {
+        if let Some((key, count)) = crate::identity_publication::blob_reference(&previous) {
+            // Only retire the old locally-owned record once the new discovery
+            // pointer has been published. An ambiguous write keeps the blob.
+            let _ = delete_attachment_blob(&key, count);
+        }
+    }
     if let Ok(state) = lock_runtime() {
         if let Some(node) = &state.node {
             if let Ok(route) = node.private_route.lock() {
@@ -300,19 +357,28 @@ pub fn publish_identity(
             }
         }
     }
-    Ok(result)
+    Ok((code, descriptor))
+}
+
+#[cfg(feature = "veilid")]
+fn parse_record_descriptor(encoded: &str) -> CoreResult<veilid_core::DHTRecordDescriptor> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(encoded).map_err(|_| CoreError::VerificationFailed)?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove(crate::identity_publication::CACHE_FIELD);
+    }
+    serde_json::from_value(value).map_err(|_| CoreError::VerificationFailed)
 }
 
 #[cfg(feature = "veilid")]
 fn publish_record(descriptor_json: Option<&str>, bytes: Vec<u8>) -> CoreResult<(String, String)> {
-    use veilid_core::{CRYPTO_KIND_VLD0, DHTRecordDescriptor, DHTSchema};
+    use veilid_core::{CRYPTO_KIND_VLD0, DHTSchema};
     let (runtime, api) = network_executor()?;
     let routing = api
         .routing_context()
         .map_err(|_| CoreError::NetworkStartupFailed)?;
     let descriptor = if let Some(encoded) = descriptor_json {
-        let stored: DHTRecordDescriptor =
-            serde_json::from_str(encoded).map_err(|_| CoreError::VerificationFailed)?;
+        let stored = parse_record_descriptor(encoded)?;
         let _ = runtime
             .block_on(routing.open_dht_record(stored.key(), stored.owner_keypair()))
             .map_err(|_| CoreError::NetworkStartupFailed)?;
@@ -390,7 +456,14 @@ fn read_identity_record(code: &str) -> CoreResult<Vec<u8>> {
         .block_on(routing.close_dht_record(key))
         .map_err(|_| CoreError::NetworkStartupFailed);
     let value = value.and_then(|value| closed.map(|()| value))?;
-    Ok(value.data().to_vec())
+    crate::identity_publication::decode(value.data(), |key, count| {
+        fetch_blob_with_limit(
+            key,
+            count,
+            22,
+            crate::identity_publication::MAX_IDENTITY_BYTES,
+        )
+    })
 }
 
 #[cfg(feature = "veilid")]
@@ -423,8 +496,7 @@ pub(crate) fn resolve_invitation(_: &str) -> CoreResult<(PublishedIdentity, Stri
 
 #[cfg(feature = "veilid")]
 pub(crate) fn owned_identity_code(descriptor: &str) -> CoreResult<String> {
-    let descriptor: veilid_core::DHTRecordDescriptor =
-        serde_json::from_str(descriptor).map_err(|_| CoreError::VerificationFailed)?;
+    let descriptor = parse_record_descriptor(descriptor)?;
     Ok(format!("sylphy:{}", descriptor.key()))
 }
 
@@ -435,10 +507,7 @@ pub(crate) fn owned_identity_code(_descriptor: &str) -> CoreResult<String> {
 
 #[cfg(feature = "veilid")]
 pub fn resolve_owned_identity(descriptor_json: &str) -> CoreResult<PublishedIdentity> {
-    use veilid_core::DHTRecordDescriptor;
-
-    let descriptor: DHTRecordDescriptor =
-        serde_json::from_str(descriptor_json).map_err(|_| CoreError::VerificationFailed)?;
+    let descriptor = parse_record_descriptor(descriptor_json)?;
     resolve_identity(&descriptor.key().to_string())
 }
 
@@ -459,6 +528,9 @@ pub fn ensure_mailbox(descriptor_json: Option<&str>) -> CoreResult<(MailboxAddre
     let mut state = lock_runtime()?;
     let VeilidRuntime { runtime, node } = &mut *state;
     let node = node.as_mut().ok_or(CoreError::NetworkStartupFailed)?;
+    if !network_available() || node.is_recovering_connection() {
+        return Err(CoreError::NetworkAttachFailed);
+    }
     let routing = node
         .routing_context()
         .map_err(|_| CoreError::NetworkStartupFailed)?;
@@ -959,17 +1031,21 @@ pub fn send_payload(route_blob: &[u8], payload: Vec<u8>) -> CoreResult<()> {
     let route_id = api
         .import_remote_private_route(route_blob.to_vec())
         .map_err(|_| CoreError::NetworkAttachFailed)?;
+    let expected = crate::direct_delivery::acknowledgement(&payload);
     let result = runtime.block_on(async {
         let routing = api.routing_context()?.with_default_safety()?;
         tokio::time::timeout(
             std::time::Duration::from_secs(12),
-            routing.app_message(veilid_core::Target::RouteId(route_id.clone()), payload),
+            routing.app_call(veilid_core::Target::RouteId(route_id.clone()), payload),
         )
         .await
         .map_err(|_| veilid_core::VeilidAPIError::generic("direct send timeout"))?
     });
     let _ = api.release_private_route(route_id);
-    result.map_err(|_| CoreError::NetworkAttachFailed)
+    crate::direct_delivery::confirm(
+        &expected,
+        result.map_err(|_| CoreError::NetworkAttachFailed),
+    )
 }
 
 #[cfg(not(feature = "veilid"))]
@@ -1005,6 +1081,27 @@ pub(crate) fn take_inbound_payloads() -> CoreResult<Vec<InboundPayload>> {
 
 #[cfg(feature = "veilid")]
 pub(crate) fn acknowledge_inbound_payload(payload: InboundPayload) -> CoreResult<()> {
+    finish_inbound_payload(payload, true)
+}
+
+#[cfg(feature = "veilid")]
+fn finish_inbound_payload(payload: InboundPayload, persisted: bool) -> CoreResult<()> {
+    if let Some(call_id) = payload.direct_call {
+        let state = lock_runtime()?;
+        if let Some(node) = &state.node {
+            let response = if persisted {
+                crate::direct_delivery::acknowledgement(&payload.payload)
+            } else {
+                b"sylphy-rejected-v1".to_vec()
+            };
+            // A lost/expired reply leaves the sender's outbox or offline copy
+            // intact. It must not interrupt processing of the remaining inbox.
+            let api = node.api.clone();
+            state.runtime.spawn(async move {
+                let _ = api.app_call_reply(call_id, response).await;
+            });
+        }
+    }
     // Mailbox slots form a short-lived journal shared by every linked device.
     // A consumer must not erase an entry before the other devices have seen it.
     let _ = payload.mailbox_subkey;
@@ -1035,6 +1132,16 @@ pub(crate) fn acknowledge_inbound_payload(payload: InboundPayload) -> CoreResult
 
 #[cfg(not(feature = "veilid"))]
 pub(crate) fn acknowledge_inbound_payload(_payload: InboundPayload) -> CoreResult<()> {
+    Ok(())
+}
+
+#[cfg(feature = "veilid")]
+pub(crate) fn discard_inbound_payload(payload: InboundPayload) -> CoreResult<()> {
+    finish_inbound_payload(payload, false)
+}
+
+#[cfg(not(feature = "veilid"))]
+pub(crate) fn discard_inbound_payload(_payload: InboundPayload) -> CoreResult<()> {
     Ok(())
 }
 
@@ -1314,13 +1421,19 @@ pub(crate) fn platform_network_changed(available: bool) -> CoreResult<()> {
     NETWORK_AVAILABLE.store(available, std::sync::atomic::Ordering::Release);
     NETWORK_WAKE.notify_one();
     crate::activity_events::notify();
+    // Loss of coverage must be observable even while a command is using the
+    // runtime. The recovery task observes this flag and stops before attaching.
     if !available {
         return Ok(());
     }
-    let state = lock_runtime()?;
-    let Some(node) = state.node.as_ref() else {
+    let mut state = lock_runtime()?;
+    let handle = state.runtime.handle().clone();
+    let Some(node) = state.node.as_mut() else {
         return Ok(());
     };
+    if let Some(task) = node.connection_recovery.take() {
+        task.abort();
+    }
     let previous_route = node
         .private_route
         .lock()
@@ -1331,7 +1444,46 @@ pub(crate) fn platform_network_changed(available: bool) -> CoreResult<()> {
     }
     node.route_needs_publish
         .store(true, std::sync::atomic::Ordering::Release);
-    state.runtime.block_on(reattach_if_detached(node))
+    if available {
+        // A mobile network can still look attached after losing coverage. A
+        // detach/attach in the same tick only toggles maintain_peers and never
+        // tears down stale sockets. Wait for the actual detached state off the
+        // command thread, then attach and let identity publication renew routes.
+        let api = node.api.clone();
+        node.connection_recovery = Some(handle.spawn(async move {
+            while network_available() {
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(20),
+                    reconnect_attachment_with(
+                        || async {
+                            let _ = api.detach().await;
+                        },
+                        || async {
+                            api.get_state()
+                                .await
+                                .map(|state| state.attachment.state.is_detached())
+                                .map_err(|_| CoreError::NetworkStartupFailed)
+                        },
+                        || async {
+                            api.attach()
+                                .await
+                                .map_err(|error| classify_attach_error(&error))
+                        },
+                        || tokio::time::sleep(std::time::Duration::from_millis(250)),
+                        network_available,
+                    ),
+                )
+                .await;
+                if matches!(result, Ok(Ok(()))) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            NETWORK_WAKE.notify_one();
+            crate::activity_events::notify();
+        }));
+    }
+    Ok(())
 }
 
 #[cfg(all(feature = "veilid", target_os = "android"))]
@@ -1351,6 +1503,9 @@ pub(crate) fn platform_network_changed(available: bool) -> CoreResult<()> {
 
 #[cfg(feature = "veilid")]
 async fn reattach_if_detached(node: &VeilidNode) -> CoreResult<()> {
+    if node.is_recovering_connection() {
+        return Ok(());
+    }
     let state = node
         .api
         .get_state()
@@ -1495,6 +1650,7 @@ async fn poll_offline_mailbox_once(
                 mailbox_subkey: None,
                 offline_digest: Some(digest),
                 offline_receipt: Some(receipt),
+                direct_call: None,
             });
             crate::activity_events::notify();
         }
@@ -1683,6 +1839,16 @@ fn enqueue_inbound_envelope(
     payload: &[u8],
     mailbox_subkey: Option<u32>,
 ) -> bool {
+    enqueue_inbound_request(inbox, payload, mailbox_subkey, None)
+}
+
+#[cfg(feature = "veilid")]
+fn enqueue_inbound_request(
+    inbox: &Mutex<VecDeque<InboundPayload>>,
+    payload: &[u8],
+    mailbox_subkey: Option<u32>,
+    direct_call: Option<veilid_core::OperationId>,
+) -> bool {
     if payload.is_empty() || payload.len() > MAX_INBOUND_ENVELOPE_BYTES {
         return false;
     }
@@ -1696,6 +1862,7 @@ fn enqueue_inbound_envelope(
             mailbox_subkey,
             offline_digest: None,
             offline_receipt: None,
+            direct_call,
         });
         crate::activity_events::notify();
         return true;
@@ -1744,12 +1911,11 @@ fn lock_runtime() -> CoreResult<std::sync::MutexGuard<'static, VeilidRuntime>> {
 fn network_executor() -> CoreResult<(tokio::runtime::Handle, veilid_core::VeilidAPI)> {
     let state = lock_runtime()?;
     let handle = state.runtime.handle().clone();
-    let api = state
-        .node
-        .as_ref()
-        .ok_or(CoreError::NetworkStartupFailed)?
-        .api
-        .clone();
+    let node = state.node.as_ref().ok_or(CoreError::NetworkStartupFailed)?;
+    if !network_available() || node.is_recovering_connection() {
+        return Err(CoreError::NetworkAttachFailed);
+    }
+    let api = node.api.clone();
     Ok((handle, api))
 }
 

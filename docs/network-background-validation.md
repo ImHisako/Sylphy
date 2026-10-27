@@ -78,6 +78,22 @@ Non confrontare un limite superiore UI con una misura interna del solo core.
 
 ## Prove in background e cambio rete
 
+Il recupero Android considera anche i cambi di validazione sulla stessa rete
+mobile: perdere e ritrovare copertura può lasciare invariati il `Network` e la
+capability `INTERNET`. La validazione resta un indizio per il recupero, senza
+essere un requisito per usare VPN o reti che bloccano i probe Android.
+Al cambio rete il core invalida la rotta privata e avvia un recupero asincrono:
+richiede il distacco, aspetta lo stato realmente scollegato e solo dopo riaggancia.
+Il semplice riaggancio condizionato a `detached` non recupera un nodo che risulta
+ancora collegato con socket obsoleti. Durante il recupero la UI mostra connessione
+in corso e i nuovi invii rimangono nella coda cifrata. Una nuova transizione o
+la chiusura del nodo cancella il tentativo precedente. La ripubblicazione
+dell'identità e la coda di invio conservano i meccanismi di retry esistenti.
+
+I test automatici verificano la transizione di validazione sulla stessa rete,
+l'attesa del distacco prima del riaggancio e l'interruzione se manca di nuovo la
+rete. Rimane necessaria la prova di perdita e ritorno della copertura su Android.
+
 Eseguire con account di test e traffico isolato, annotando versione Android e
 impostazioni di batteria; non registrare ID, contatti o contenuti personali.
 
@@ -103,6 +119,22 @@ impostazioni di batteria; non registrare ID, contatti o contenuti personali.
 La UI automatizzata misura solo la chat visibile: non attribuisce una latenza
 di visualizzazione a un messaggio mentre lo schermo è spento. Notifica,
 persistenza e comparsa dopo riapertura sono verifiche distinte.
+
+## Conferma diretta e blocco del vault
+
+Con entrambi i client aggiornati e già presenti nelle rispettive rubriche:
+
+1. Bloccare B mentre A invia. A deve conservare il ciphertext fino alla conferma
+   applicativa o al deposito offline; il solo accodamento su B non basta.
+   Riavviare B ancora bloccato, poi sbloccarlo: verificare una sola copia.
+2. Ripetere con mailbox piena o rete DHT indisponibile: l'invio deve restare in
+   coda su A e riprendere quando almeno un percorso torna disponibile.
+3. Interrompere la rete dopo il salvataggio su B e prima della risposta ad A.
+   Il retry deve usare lo stesso ID e produrre una sola riga e una sola notifica.
+
+I test automatici coprono conferma legata al ciphertext, risposta mancante o
+errata, fallback e recupero locale delle transazioni. Non sostituiscono queste
+prove del callback Veilid e del lifecycle Android su telefoni reali.
 
 Fonti Android: [stato della rete](https://developer.android.com/develop/connectivity/network-ops/reading-network-state),
 [Doze e App Standby](https://developer.android.com/training/monitoring-device-state/doze-standby).

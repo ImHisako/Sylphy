@@ -12,13 +12,16 @@ internal class NetworkTransitionState {
     private var network: Any? = null
     private var initialized = false
     private var online = false
+    private var validated = false
     private var revision = 0L
 
-    fun update(network: Any?, online: Boolean): Long? {
-        if (initialized && this.network == network && this.online == online) return null
+    fun update(network: Any?, online: Boolean, validated: Boolean = false): Long? {
+        if (initialized && this.network == network && this.online == online &&
+            this.validated == validated) return null
         initialized = true
         this.network = network
         this.online = online
+        this.validated = validated
         revision++
         return revision
     }

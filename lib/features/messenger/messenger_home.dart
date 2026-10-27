@@ -222,9 +222,10 @@ class _MessengerHomeState extends State<MessengerHome>
       return;
     }
     _isRefreshingInbox = true;
+    final bridge = widget.bridge;
+    final servicesGeneration = widget.servicesGeneration;
     var revisionChanged = false;
     try {
-      final bridge = widget.bridge;
       // A local conversation refresh is still useful while offline, but the
       // native inbox command requires a running Veilid node. Avoid turning an
       // expected offline/startup state into an error every three seconds.
@@ -232,6 +233,11 @@ class _MessengerHomeState extends State<MessengerHome>
           (widget.nativeCore == null ||
               widget.veilidService.snapshot.isAttached)) {
         final revision = await (bridge as InboxRefreshingBridge).refreshInbox();
+        if (!mounted ||
+            !identical(bridge, widget.bridge) ||
+            servicesGeneration != widget.servicesGeneration) {
+          return;
+        }
         revisionChanged = revision != _lastInboxRevision;
         _lastInboxRevision = revision;
         final storageFull =
@@ -261,11 +267,14 @@ class _MessengerHomeState extends State<MessengerHome>
         scheduleMicrotask(() => _refreshInbox(force: true));
       }
     }
-    if (!mounted) return;
+    if (!mounted ||
+        !identical(bridge, widget.bridge) ||
+        servicesGeneration != widget.servicesGeneration) {
+      return;
+    }
     if (!force && !revisionChanged) return;
     List<Conversation> conversations;
     try {
-      final bridge = widget.bridge;
       conversations = bridge is CachedMessagingBridge
           ? await bridge.refreshConversations()
           : _readConversations();
@@ -275,6 +284,11 @@ class _MessengerHomeState extends State<MessengerHome>
         action: 'conversation_refresh_failed',
         error: error,
       );
+      return;
+    }
+    if (!mounted ||
+        !identical(bridge, widget.bridge) ||
+        servicesGeneration != widget.servicesGeneration) {
       return;
     }
     final signature = _signatureForConversations(conversations);

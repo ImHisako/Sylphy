@@ -133,7 +133,10 @@ fn flush_with(
         let body = format!(
             "{PREFIX}{}",
             serde_json::to_string(&Receipt {
-                message_ids: ids.clone(),
+                message_ids: ids
+                    .iter()
+                    .map(|id| message_ids::wire(id).to_owned())
+                    .collect(),
                 state: state.clone(),
             })
             .map_err(|_| CoreError::Internal)?
@@ -268,7 +271,11 @@ pub(super) fn receive(body: &str, sender: &PublishedIdentity) -> CoreResult<Opti
         .ok_or(CoreError::FeatureUnavailable)?;
     let mut changes = Vec::new();
     for id in receipt.message_ids {
-        let Some(index) = store.messages.iter().position(|m| m.id == id) else {
+        let Some(index) = store
+            .messages
+            .iter()
+            .position(|m| m.is_outgoing && message_ids::wire(&m.id) == message_ids::wire(&id))
+        else {
             continue;
         };
         let mut message = store.messages[index].clone();
