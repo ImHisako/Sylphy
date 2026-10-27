@@ -205,12 +205,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Hosted runner defaults can advance beyond Gradle 8.12's supported JDKs.
+      - name: Install Java 17 for Android
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
       - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
+
+      - name: Use the selected JDK in Flutter
+        run: flutter config --jdk-dir "$JAVA_HOME"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
