@@ -1,5 +1,32 @@
 # Prestazioni della messaggistica
 
+## Invii indipendenti quando un messaggio fallisce
+
+La selezione della outbox distingue messaggi nuovi e ritentativi già scaduti.
+Preferisce fino a tre nuovi invii, poi dà un turno a un ritentativo disponibile;
+il conteggio prosegue tra i cicli e avanza soltanto se il worker parte. Se una
+delle due code non ha lavoro eseguibile, l'altra usa subito gli slot disponibili.
+I ritentativi sono ordinati per scadenza, conservando il backoff persistente.
+
+Restano quattro worker complessivi. Al massimo due consegne dello stesso
+messaggio e tre della stessa destinazione possono occupare gli slot, contando
+anche quelli già avviati. Un messaggio per molti dispositivi non può quindi
+occupare l'intera coda; una destinazione non raggiungibile lascia almeno uno
+slot alle altre. Il secondo messaggio della stessa chat può partire mentre il
+primo è ancora in corso, senza aspettarne il successo. Se tutti gli slot utili
+sono occupati si attende la conclusione o il timeout di un tentativo: non viene
+promessa una consegna immediata quando manca la rete.
+
+Ogni messaggio conserva ID, ciphertext e risultato indipendenti. Un errore
+lascia soltanto quella consegna nella coda cifrata; un successo successivo può
+diventare `sent` e rimanerlo dopo il riavvio. Restano invariati la conferma dopo
+persistenza, la deduplica e il divieto di inviare messaggi privi di cronologia
+locale. I test coprono fanout, destinatario lento, backlog di ritentativi,
+equità tra cicli con un solo slot libero e fallimento/successo seguito da riavvio.
+Una prova con cifratura ibrida e Signal reali riceve il secondo pacchetto di
+una nuova sessione prima del primo, poi riavvia il destinatario e recupera il
+primo pacchetto senza duplicare il secondo.
+
 ## Upload, consegna alternativa e mailbox a eventi — ABI 21
 
 Gli allegati in uscita vengono prima salvati nella cronologia cifrata con uno

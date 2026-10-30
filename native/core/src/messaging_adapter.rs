@@ -32,6 +32,7 @@ pub mod groups;
 #[cfg(test)]
 mod latency_tests;
 mod message_ids;
+mod outbox_schedule;
 mod outgoing_transaction;
 mod receipts;
 mod search;
@@ -359,6 +360,7 @@ type TransportResults = Vec<(PendingDelivery, bool)>;
 struct OutboxTransport {
     generation: u64,
     in_flight: HashSet<String>,
+    schedule: outbox_schedule::Schedule,
     completed: TransportResults,
     sender: std::sync::mpsc::Sender<(PendingDelivery, bool)>,
     receiver: std::sync::mpsc::Receiver<(PendingDelivery, bool)>,
@@ -369,6 +371,7 @@ impl OutboxTransport {
         Self {
             generation,
             in_flight: HashSet::new(),
+            schedule: Default::default(),
             completed: Vec::new(),
             sender,
             receiver,
@@ -2872,7 +2875,7 @@ fn dispatchable_outbox(store: &ContactStore) -> impl Iterator<Item = &PendingDel
 fn poll_current_outbox(generation: u64, only_message_id: Option<&str>) -> Option<TransportResults> {
     poll_outbox_transport_with(
         generation,
-        |in_flight, capacity| {
+        |in_flight, capacity, schedule| {
             let Ok(mut store) = contact_store().lock() else {
                 return Vec::new();
             };
@@ -2883,12 +2886,7 @@ fn poll_current_outbox(generation: u64, only_message_id: Option<&str>) -> Option
                 return Vec::new();
             }
             let now = current_time_ms().unwrap_or(0);
-            dispatchable_outbox(&store)
-                .filter(|item| only_message_id.is_none_or(|id| item.message_id == id))
-                .filter(|item| item.next_attempt_ms <= now && !in_flight.contains(&item.id))
-                .take(capacity)
-                .cloned()
-                .collect()
+            outbox_schedule::select(&store, in_flight, capacity, now, only_message_id, *schedule)
         },
         |item, sender| {
             let epoch = crate::performance::epoch();
@@ -2915,7 +2913,7 @@ fn poll_current_outbox(generation: u64, only_message_id: Option<&str>) -> Option
 
 fn poll_outbox_transport_with(
     generation: u64,
-    select: impl FnOnce(&HashSet<String>, usize) -> Vec<PendingDelivery>,
+    select: impl FnOnce(&HashSet<String>, usize, &outbox_schedule::Schedule) -> Vec<PendingDelivery>,
     mut spawn: impl FnMut(PendingDelivery, std::sync::mpsc::Sender<(PendingDelivery, bool)>) -> bool,
 ) -> Option<TransportResults> {
     let mut state = OUTBOX_TRANSPORT.lock().ok()?;
@@ -2930,13 +2928,15 @@ fn poll_outbox_transport_with(
         state.completed.push(result);
     }
     let capacity = MAX_OUTBOX_IN_FLIGHT.saturating_sub(state.in_flight.len());
-    for item in select(&state.in_flight, capacity)
+    for item in select(&state.in_flight, capacity, &state.schedule)
         .into_iter()
         .take(capacity)
     {
         let id = item.id.clone();
+        let fresh = item.attempts == 0;
         if !state.in_flight.contains(&id) && spawn(item, state.sender.clone()) {
             state.in_flight.insert(id);
+            state.schedule.dispatched(fresh);
         }
     }
     (!state.completed.is_empty()).then(|| state.completed.clone())
