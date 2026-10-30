@@ -1,4 +1,5 @@
 import '../../core/privacy/app_palette.dart';
+import '../../core/privacy/halloween_background.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -2803,64 +2804,67 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
             ],
           ),
         ),
-        child: Column(
-          children: [
-            if (widget.showHeader)
-              _ChatHeader(
-                conversation: widget.conversation,
-                bridge: widget.bridge,
-                onChanged: widget.onChanged,
-                onOpenProfile: widget.onToggleDetails,
-                onOpenGroup: widget.conversation.isGroup && _management != null
-                    ? _manageGroup
-                    : null,
-              ),
-            Expanded(
-              child: _supportsChannels && !_channelsLoaded
-                  ? Center(
-                      child: _channelLoadFailed
-                          ? TextButton.icon(
-                              onPressed: _loadChannels,
-                              icon: Icon(Icons.refresh_rounded),
-                              label: Text('Riprova a caricare i canali'),
-                            )
-                          : CircularProgressIndicator(),
-                    )
-                  : !_hasChannelList
-                  ? messagePane
-                  : widget.showHeader
-                  ? Row(
-                      children: [
-                        SizedBox(width: 280, child: _buildChannelList()),
-                        VerticalDivider(width: 1),
-                        Expanded(
-                          child: _channelSelected
-                              ? messagePane
-                              : Center(
-                                  child: Padding(
-                                    padding: EdgeInsets.all(24),
-                                    child: Text(
-                                      'Seleziona un canale per iniziare a messaggiare',
-                                      textAlign: TextAlign.center,
+        child: HalloweenBackground(
+          child: Column(
+            children: [
+              if (widget.showHeader)
+                _ChatHeader(
+                  conversation: widget.conversation,
+                  bridge: widget.bridge,
+                  onChanged: widget.onChanged,
+                  onOpenProfile: widget.onToggleDetails,
+                  onOpenGroup:
+                      widget.conversation.isGroup && _management != null
+                      ? _manageGroup
+                      : null,
+                ),
+              Expanded(
+                child: _supportsChannels && !_channelsLoaded
+                    ? Center(
+                        child: _channelLoadFailed
+                            ? TextButton.icon(
+                                onPressed: _loadChannels,
+                                icon: Icon(Icons.refresh_rounded),
+                                label: Text('Riprova a caricare i canali'),
+                              )
+                            : CircularProgressIndicator(),
+                      )
+                    : !_hasChannelList
+                    ? messagePane
+                    : widget.showHeader
+                    ? Row(
+                        children: [
+                          SizedBox(width: 280, child: _buildChannelList()),
+                          VerticalDivider(width: 1),
+                          Expanded(
+                            child: _channelSelected
+                                ? messagePane
+                                : Center(
+                                    child: Padding(
+                                      padding: EdgeInsets.all(24),
+                                      child: Text(
+                                        'Seleziona un canale per iniziare a messaggiare',
+                                        textAlign: TextAlign.center,
+                                      ),
                                     ),
                                   ),
-                                ),
-                        ),
-                      ],
-                    )
-                  : _channelSelected
-                  ? messagePane
-                  : Row(
-                      children: [
-                        if (widget.conversationRail != null) ...[
-                          SizedBox(width: 76, child: widget.conversationRail),
-                          VerticalDivider(width: 1),
+                          ),
                         ],
-                        Expanded(child: _buildChannelList()),
-                      ],
-                    ),
-            ),
-          ],
+                      )
+                    : _channelSelected
+                    ? messagePane
+                    : Row(
+                        children: [
+                          if (widget.conversationRail != null) ...[
+                            SizedBox(width: 76, child: widget.conversationRail),
+                            VerticalDivider(width: 1),
+                          ],
+                          Expanded(child: _buildChannelList()),
+                        ],
+                      ),
+              ),
+            ],
+          ),
         ),
       ),
     );

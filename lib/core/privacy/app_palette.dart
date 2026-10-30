@@ -7,6 +7,7 @@ class AppPalette {
   static Color get primary => switch (themeName) {
     'cyan' => const Color(0xFF72DCFF),
     'pink' => const Color(0xFFFFA6D8),
+    'halloween' => const Color(0xFFFFAA5C),
     'white' => const Color(0xFF496A08),
     _ => const Color(0xFFCFF36A),
   };
@@ -31,6 +32,10 @@ class AppPalette {
       return hsl.withLightness(hsl.lightness.clamp(0.0, 0.32)).toColor();
     }
     if (neutral && high < 45 && themeName == 'amoled') return Colors.black;
+    if (neutral && high < 45 && themeName == 'halloween') {
+      final shade = (r + g + b) ~/ 3;
+      return Color.fromARGB(255, shade + 7, shade, shade + 12);
+    }
     if (neutral && high < 45 && themeName == 'black') {
       final shade = (r + g + b) ~/ 3;
       return Color.fromARGB(255, shade, shade, shade);

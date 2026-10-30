@@ -43,7 +43,7 @@ void main() {
         incognitoKeyboard: true,
         streamProof: true,
         allowScreenshots: true,
-        themeName: 'pink',
+        themeName: 'halloween',
         identityRotationHours: 13,
         sendReadReceipts: false,
       ),
@@ -56,7 +56,7 @@ void main() {
     expect(restored.value.incognitoKeyboard, isTrue);
     expect(restored.value.streamProof, isTrue);
     expect(restored.value.allowScreenshots, isTrue);
-    expect(restored.value.themeName, 'pink');
+    expect(restored.value.themeName, 'halloween');
     expect(restored.value.identityRotationHours, 13);
     expect(restored.value.sendReadReceipts, isFalse);
     expect(restored.value.showReadReceipts, isTrue);

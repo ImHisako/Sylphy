@@ -327,6 +327,7 @@ class _SettingsPageState extends State<SettingsPage> {
                             'pink',
                             'amoled',
                             'white',
+                            'halloween',
                           ].contains(privacy.themeName)
                           ? privacy.themeName
                           : 'sylphy',
@@ -348,6 +349,10 @@ class _SettingsPageState extends State<SettingsPage> {
                           child: Text('AMOLED'),
                         ),
                         DropdownMenuItem(value: 'white', child: Text('White')),
+                        DropdownMenuItem(
+                          value: 'halloween',
+                          child: Text('Halloween'),
+                        ),
                       ],
                       onChanged: (value) {
                         if (value != null) {

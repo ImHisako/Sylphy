@@ -10,6 +10,7 @@ void main() {
   for (final entry in {
     'cyan': const Color(0xFF72DCFF),
     'pink': const Color(0xFFFFA6D8),
+    'halloween': const Color(0xFFFFAA5C),
   }.entries) {
     testWidgets(
       'connected network and empty inbox use the ${entry.key} accent',

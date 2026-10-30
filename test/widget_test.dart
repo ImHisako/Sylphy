@@ -411,6 +411,7 @@ void main() {
         'pink',
         'amoled',
         'white',
+        'halloween',
       ]) {
         await tester.runAsync(
           () => privacy.update(privacy.value.copyWith(themeName: name)),

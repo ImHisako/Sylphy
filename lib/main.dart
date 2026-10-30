@@ -14,6 +14,7 @@ import 'core/native/native_core.dart';
 import 'core/profile/user_profile.dart';
 import 'core/privacy/privacy_settings.dart';
 import 'core/privacy/app_security.dart';
+import 'core/privacy/halloween_background.dart';
 import 'features/settings/app_security_widgets.dart';
 import 'features/settings/account_transfer_page.dart';
 import 'features/settings/account_transfer_recovery.dart';
@@ -664,6 +665,9 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       navigatorObservers: [_DiagnosticNavigatorObserver()],
       builder: (context, child) {
         final media = MediaQuery.of(context);
+        final themedContent = HalloweenBackground(
+          child: child ?? const SizedBox.shrink(),
+        );
         final contents = MediaQuery(
           data: media.copyWith(
             disableAnimations:
@@ -672,7 +676,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
           child: StreamProofHost(
             settings: _privacySettings,
             child: widget.updates == null
-                ? child ?? SizedBox.shrink()
+                ? themedContent
                 : UpdateHost(
                     controller: widget.updates!,
                     navigatorKey: _navigatorKey,
@@ -682,7 +686,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
                         exit(0);
                       }
                     },
-                    child: child ?? SizedBox.shrink(),
+                    child: themedContent,
                   ),
           ),
         );
@@ -696,7 +700,9 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: colorScheme,
-        scaffoldBackgroundColor: surface,
+        scaffoldBackgroundColor: AppPalette.themeName == 'halloween'
+            ? Colors.transparent
+            : surface,
         dividerColor: outline.withValues(alpha: 0.65),
         visualDensity: VisualDensity.standard,
         splashFactory: InkSparkle.splashFactory,

@@ -15,8 +15,11 @@ in [settings-and-account-transfer.md](settings-and-account-transfer.md).
 - `incognito_keyboard` imposta `enableIMEPersonalizedLearning: false` nel campo
   dei messaggi. Gboard e altre tastiere compatibili possono rispettare questa
   richiesta; la preferenza non forza il comportamento di tastiere esterne.
-- `theme_name` seleziona Sylphy, Black, Cyan, Pink, AMOLED o White. Tema e preferenza
+- `theme_name` seleziona Sylphy, Black, Cyan, Pink, AMOLED, White o Halloween. Tema e preferenza
   della tastiera sono salvati nel record cifrato delle impostazioni.
+- Halloween (`halloween`) è disponibile su Android, Windows e Linux tutto
+  l'anno. Usa superfici viola scuro, accenti arancioni e uno sfondo statico con
+  cinque pipistrelli, visibile anche nelle chat senza intercettare i gesti.
 - Le notifiche Android in primo piano hanno un tag per conversazione e vengono
   cancellate dopo la lettura. La notifica riepilogativa del servizio viene rimossa
   quando non rimangono messaggi non letti; la notifica del servizio resta attiva.
