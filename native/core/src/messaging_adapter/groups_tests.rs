@@ -714,6 +714,7 @@ fn inbound_antispam_timing_is_retryable_while_local_send_limits_remain_errors() 
             attachment_name: None,
             attachment_base64: None,
             attachment_pointer: None,
+            pending_upload: None,
         });
     }
     assert!(matches!(
@@ -925,6 +926,7 @@ fn group_permissions_restrictions_slow_mode_and_spam_are_enforced_natively() {
             attachment_name: None,
             attachment_base64: None,
             attachment_pointer: None,
+            pending_upload: None,
         });
     }
     value.management.policy.slow_mode_seconds = 30;
@@ -932,6 +934,25 @@ fn group_permissions_restrictions_slow_mode_and_spam_are_enforced_natively() {
         enforce(&value, &member.id, "nuovo", false),
         Err(CoreError::SlowModeActive)
     ));
+    let pending_id = contact_store()
+        .lock()
+        .unwrap()
+        .messages
+        .last()
+        .unwrap()
+        .id
+        .clone();
+    assert!(enforce_pending_media(&value, &member.id, "foto.png", &pending_id).is_ok());
+    assert!(matches!(
+        enforce_pending_media(&value, &member.id, "foto.png", "another-message"),
+        Err(CoreError::SlowModeActive)
+    ));
+    value.management.policy.send_media = false;
+    assert!(matches!(
+        enforce_pending_media(&value, &member.id, "foto.png", &pending_id),
+        Err(CoreError::GroupPermissionDenied)
+    ));
+    value.management.policy.send_media = true;
     value.management.policy.slow_mode_seconds = 0;
     value.management.policy.aggressive_antispam = true;
     assert!(matches!(

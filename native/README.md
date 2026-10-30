@@ -95,6 +95,12 @@ installs in `bundle/lib`.
 
 ## Native API and persistence
 
+ABI v21 adds durable asynchronous uploads, early offline delivery alongside a
+slow direct attempt, watched mailboxes with bounded parallel reads, and a local
+content-free performance snapshot. Outgoing files return after encrypted local
+enqueue. Native libraries must be rebuilt; wire envelopes and Signal sessions
+keep their existing versions. See [performance](../specs/performance.md).
+
 ABI v20 adds Android network-change recovery, bounded direct delivery attempts,
 authenticated rerouting of pending ciphertext, and distinct busy/locked results
 for event-driven background reception. Device measurements are documented in

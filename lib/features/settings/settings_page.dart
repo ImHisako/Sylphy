@@ -13,6 +13,7 @@ import 'account_transfer_page.dart';
 import 'android_notification_settings.dart';
 import 'app_security_widgets.dart';
 import 'identity_rotation_settings.dart';
+import 'performance_settings.dart';
 import '../../core/identity/identity_service.dart';
 import '../updates/update_host.dart';
 
@@ -439,9 +440,12 @@ class _SettingsPageState extends State<SettingsPage> {
         _SettingsSection(
           id: 'diagnostics',
           title: 'Diagnostica',
-          detail: 'DEVELOPER OPTIONS · controlli e log senza messaggi o chiavi',
+          detail:
+              'DEVELOPER OPTIONS · prestazioni e log senza messaggi o chiavi',
           icon: Icons.bug_report_outlined,
           children: [
+            PerformanceSettings(nativeCore: widget.nativeCore),
+            const SizedBox(height: 16),
             Text(
               'DEVELOPER OPTIONS',
               style: Theme.of(context).textTheme.labelMedium?.copyWith(

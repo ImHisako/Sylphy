@@ -168,6 +168,7 @@ mod tests {
             attachment_name: None,
             attachment_base64: None,
             attachment_pointer: None,
+            pending_upload: None,
         }
     }
     #[test]

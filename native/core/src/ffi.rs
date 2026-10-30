@@ -23,6 +23,10 @@ pub(crate) static ACCOUNT_STATE_LOCK: std::sync::RwLock<()> = std::sync::RwLock:
 #[derive(Debug, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum CoreRequest {
+    PerformanceSnapshot {
+        #[serde(default)]
+        reset: bool,
+    },
     ConfigureSecurity {
         storage_directory: String,
     },
@@ -294,6 +298,21 @@ pub unsafe extern "C" fn sylphy_core_free_string(value: *mut c_char) {
 
 fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
     let request: CoreRequest = serde_json::from_str(body).map_err(|_| CoreError::InvalidInput)?;
+    if let CoreRequest::PerformanceSnapshot { reset } = request {
+        let _account = ACCOUNT_STATE_LOCK
+            .try_read()
+            .map_err(|_| CoreError::FeatureUnavailable)?;
+        if app_security::is_locked() {
+            return Err(CoreError::VaultLocked);
+        }
+        let mut data = crate::performance::snapshot(reset);
+        data["active_uploads"] = json!(messaging_adapter::active_upload_count());
+        return Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data,
+        });
+    }
     if let CoreRequest::WaitForActivity { after, timeout_ms } = request {
         if timeout_ms > 30_000 {
             return Err(CoreError::InvalidInput);
@@ -328,7 +347,9 @@ fn dispatch(body: &str) -> Result<CoreResponse, CoreError> {
         }
         return dispatch_request(request);
     }
+    let wait = crate::performance::Timer::start(crate::performance::Stage::CommandWait);
     let _command_guard = COMMAND_LOCK.lock().map_err(|_| CoreError::Internal)?;
+    wait.finish(true);
     if !matches!(
         request,
         CoreRequest::ConfigureSecurity { .. }
@@ -406,7 +427,9 @@ fn dispatch_request(request: CoreRequest) -> Result<CoreResponse, CoreError> {
             code: "ok",
             data: messaging_adapter::read_attachment(&conversation_id, &message_id)?,
         }),
-        CoreRequest::WaitForActivity { .. } => Err(CoreError::InvalidInput),
+        CoreRequest::WaitForActivity { .. } | CoreRequest::PerformanceSnapshot { .. } => {
+            Err(CoreError::InvalidInput)
+        }
         CoreRequest::ConfigureSecurity { storage_directory } => Ok(CoreResponse {
             ok: true,
             code: "ok",
@@ -897,6 +920,31 @@ fn serialize_response(response: CoreResponse) -> *mut c_char {
 #[cfg(test)]
 mod tests {
     use super::CoreRequest;
+
+    #[test]
+    fn performance_report_bypasses_the_command_queue_and_obeys_the_account_barrier() {
+        let _identity = crate::identity::TEST_IDENTITY_LOCK.lock().unwrap();
+        let command = super::COMMAND_LOCK.lock().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let result = super::dispatch(r#"{"command":"performance_snapshot"}"#);
+            if let Ok(response) = &result {
+                assert_eq!(response.data["version"], 1);
+                assert!(response.data["stages"].is_object());
+                assert!(!response.data.to_string().contains("message_id"));
+            }
+            send.send(()).unwrap();
+        });
+        let finished = receive.recv_timeout(std::time::Duration::from_secs(2));
+        drop(command);
+        reader.join().unwrap();
+        finished.unwrap();
+        let _account = super::ACCOUNT_STATE_LOCK.write().unwrap();
+        assert!(matches!(
+            super::dispatch(r#"{"command":"performance_snapshot"}"#),
+            Err(crate::error::CoreError::FeatureUnavailable)
+        ));
+    }
 
     #[test]
     fn group_details_bypass_network_queue_but_not_account_transitions() {

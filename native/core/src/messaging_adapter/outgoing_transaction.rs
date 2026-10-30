@@ -67,8 +67,15 @@ pub(super) fn check_history_capacity(
     // Reject a logical capacity failure before committing the intent. Otherwise
     // recovery could block even the deletion needed to make the new message fit.
     let mut compacted = MESSAGE_LOG_MAGIC.len() as u64 + addition;
-    for message in history {
-        compacted = compacted.saturating_add(event_size(message)?);
+    for previous in history {
+        if previous.id == message.id
+            && previous.conversation_id == message.conversation_id
+            && previous.author_id == message.author_id
+            && previous.is_outgoing == message.is_outgoing
+        {
+            continue; // An upload completion replaces its durable pending row.
+        }
+        compacted = compacted.saturating_add(event_size(previous)?);
         if compacted > limit {
             return Err(CoreError::StorageFull);
         }

@@ -6,7 +6,16 @@ Il recupero transazionale del profilo durante l’importazione è documentato in
 [settings-and-account-transfer.md](settings-and-account-transfer.md). Non cambia
 il formato del backup né il numero ABI.
 
-Il confine Flutter/Rust è una singola ABI C JSON, attualmente alla versione 20. Le richieste sono UTF-8; le risposte di stato non riportano password, chiavi, plaintext o diagnostica crittografica. I comandi messaging possono restituire soltanto read model già autenticati e decrittati dal core. Ogni stringa restituita viene liberata esclusivamente tramite `sylphy_core_free_string`.
+Il confine Flutter/Rust è una singola ABI C JSON, attualmente alla versione 21. Le richieste sono UTF-8; le risposte di stato non riportano password, chiavi, plaintext o diagnostica crittografica. I comandi messaging possono restituire soltanto read model già autenticati e decrittati dal core. Ogni stringa restituita viene liberata esclusivamente tramite `sylphy_core_free_string`.
+
+ABI 21 rende durabile e asincrono l'upload degli allegati, anticipa il deposito
+offline in caso di attesa diretta e usa watch DHT con recupero periodico e
+parallelismo limitato. `performance_snapshot` (`reset: bool`, predefinito false)
+espone soltanto durate aggregate e contatori locali, con gate dell'account e
+controllo del vault. Il client richiede le nuove librerie native. Pacchetti di
+rete e formato delle sessioni Signal mantengono le versioni precedenti; il campo
+opzionale `pending_upload` appartiene esclusivamente alla persistenza locale.
+Dettagli e limiti: [performance.md](performance.md).
 
 ABI 20 aggiunge il segnale JNI Android di cambio rete, gli esiti busy/locked
 separati per il servizio di ricezione e il recupero della rotta dalla sessione
@@ -52,12 +61,14 @@ Il contratto e la migrazione sono descritti in [app-security.md](app-security.md
 
 ## Verifica del bundle Android
 
-`native/build-android.ps1` registra ABI 20 e hash SHA-256 in `sylphy-core.properties`.
+`native/build-android.ps1` registra ABI 21 e hash SHA-256 in `sylphy-core.properties`.
 
 ABI 14 aggiunge `request_attachment` (`conversation_id`, `message_id`, `cancel`)
 per avviare o annullare un download esplicito senza attendere la rete. I read
 model espongono `attachment_state` (`pending`, `queued`, `downloading`, `failed`,
-`ready`, `unavailable`) e `attachment_size`, mai chiavi o riferimenti DHT.
+`ready`, `unavailable`, `upload_queued`, `uploading`, `upload_failed`) e `attachment_size`, mai chiavi o riferimenti DHT.
+Per un allegato locale in upload, lo stesso `request_attachment` sospende
+(`cancel: true`) o riprende (`cancel: false`) la coda durabile.
 Il riferimento completo resta nel log cifrato e nei backup cifrati. Un worker
 separato recupera i chunk; solo il thread dei comandi applica un risultato
 autenticato dopo aver ricontrollato account, messaggio e riferimento.
