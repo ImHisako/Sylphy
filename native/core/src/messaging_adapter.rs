@@ -33,9 +33,15 @@ pub mod groups;
 mod latency_tests;
 mod message_ids;
 mod notifications;
+mod outbox_schedule;
 mod outgoing_transaction;
 mod receipts;
 mod search;
+mod uploads;
+
+pub(crate) fn active_upload_count() -> usize {
+    uploads::active_count()
+}
 
 const MAX_CONVERSATION_ID_BYTES: usize = 128;
 const MAX_DISPLAY_NAME_CHARS: usize = 64;
@@ -212,6 +218,8 @@ struct StoredMessage {
     attachment_base64: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     attachment_pointer: Option<AttachmentPointer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_upload: Option<uploads::Pending>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -355,6 +363,7 @@ type TransportResults = Vec<(PendingDelivery, bool)>;
 struct OutboxTransport {
     generation: u64,
     in_flight: HashSet<String>,
+    schedule: outbox_schedule::Schedule,
     completed: TransportResults,
     sender: std::sync::mpsc::Sender<(PendingDelivery, bool)>,
     receiver: std::sync::mpsc::Receiver<(PendingDelivery, bool)>,
@@ -365,6 +374,7 @@ impl OutboxTransport {
         Self {
             generation,
             in_flight: HashSet::new(),
+            schedule: Default::default(),
             completed: Vec::new(),
             sender,
             receiver,
@@ -439,6 +449,8 @@ pub(crate) fn wipe_memory() -> CoreResult<()> {
     drop(store);
     let search = search::wipe_memory();
     attachments::reset();
+    uploads::reset();
+    crate::performance::clear();
     let outbox = OUTBOX_TRANSPORT
         .lock()
         .map(|mut transport| *transport = None)
@@ -507,6 +519,8 @@ pub fn configure_storage(storage_directory: &str) -> CoreResult<()> {
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     store.generation = store.generation.wrapping_add(1);
     attachments::reset();
+    uploads::reset();
+    crate::performance::clear();
     store.path = Some(path);
     store.message_path = Some(directory.join(MESSAGE_LOG_FILE));
     store.legacy_message_path = Some(directory.join(MESSAGE_STORE_FILE));
@@ -550,6 +564,7 @@ pub(crate) fn import_account_backup(value: Value) -> CoreResult<()> {
     // Old backups without the durable outbox cannot promise automatic retry.
     for message in &mut backup.messages {
         if message.delivery_state == "queued"
+            && message.pending_upload.is_none()
             && !backup
                 .outbox
                 .iter()
@@ -602,6 +617,12 @@ pub(crate) fn validate_account_backup(value: &Value) -> CoreResult<()> {
     if backup.version != 1
         || backup.contacts.len() > MAX_CONTACTS
         || backup.messages.len() > MAX_MESSAGES
+        || backup
+            .messages
+            .iter()
+            .filter(|m| m.pending_upload.as_ref().is_some_and(|p| !p.paused))
+            .count()
+            > uploads::MAX_PENDING
         || backup.groups.len() > MAX_CONTACTS
         || backup.outbox.len() > MAX_OUTBOX_DELIVERIES
         || backup.attachment_leases.len() > MAX_OUTBOX_DELIVERIES
@@ -692,6 +713,22 @@ fn validate_backup_messages(
 }
 
 fn validate_stored_message(message: &StoredMessage) -> CoreResult<()> {
+    if let Some(pending) = &message.pending_upload {
+        if !message.is_outgoing
+            || message.author_id != "me"
+            || message.delivery_state != "queued"
+            || message.attachment_base64.is_none()
+            || message.attachment_name.is_none()
+            || message.attachment_pointer.is_some()
+            || message.id.len() != 32
+            || !message.id.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(CoreError::VerificationFailed);
+        }
+        if let Some(channel) = &pending.channel_id {
+            validate_conversation_id(channel)?;
+        }
+    }
     if let Some(pointer) = &message.attachment_pointer {
         validate_attachment_pointer(pointer)?;
         if message.attachment_name.as_deref() != Some(pointer.file_name.as_str()) {
@@ -746,6 +783,7 @@ pub fn list_conversations() -> CoreResult<Value> {
 
 pub(crate) fn read_conversations(allow_load: bool) -> CoreResult<Value> {
     if allow_load {
+        uploads::poll()?;
         attachments::poll()?;
     }
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
@@ -883,6 +921,7 @@ fn message_page(
     include_data: bool,
 ) -> CoreResult<Value> {
     if allow_load {
+        uploads::poll()?;
         attachments::poll()?;
     }
     validate_conversation_id(conversation_id)?;
@@ -1321,6 +1360,7 @@ fn queue_created_group(
         attachment_name: None,
         attachment_base64: None,
         attachment_pointer: None,
+        pending_upload: None,
     };
     if let Err(error) = queue_outgoing(message_path, system_message, deliveries) {
         if let Ok(mut store) = contact_store().lock() {
@@ -1371,11 +1411,14 @@ pub fn send_reply(conversation_id: &str, plaintext: &str, reply_to: &str) -> Cor
 }
 
 pub fn send_text(conversation_id: &str, plaintext: &str) -> CoreResult<Value> {
-    send_text_with(
+    let timer = crate::performance::Timer::start(crate::performance::Stage::TextPrepare);
+    let result = send_text_with(
         conversation_id,
         plaintext,
         secure_packet::seal_for_all_with_id,
-    )
+    );
+    timer.finish(result.is_ok());
+    result
 }
 
 fn send_text_with(
@@ -1443,6 +1486,7 @@ fn send_text_with(
             attachment_name: None,
             attachment_base64: None,
             attachment_pointer: None,
+            pending_upload: None,
         };
         queue_outgoing(&message_path, message, deliveries)?;
         return Ok(json!({"message_id": message_id, "delivery_state": delivery_state}));
@@ -1479,6 +1523,7 @@ fn send_text_with(
         attachment_name: None,
         attachment_base64: None,
         attachment_pointer: None,
+        pending_upload: None,
     };
     queue_outgoing(&message_path, message.clone(), deliveries)?;
     Ok(json!({
@@ -1500,6 +1545,16 @@ pub fn request_attachment(
     message_id: &str,
     cancel: bool,
 ) -> CoreResult<Value> {
+    let upload = {
+        let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+        ensure_messages_loaded(&mut store)?;
+        store.messages.iter().any(|m| {
+            m.id == message_id && m.conversation_id == conversation_id && m.pending_upload.is_some()
+        })
+    };
+    if upload {
+        return uploads::request(conversation_id, message_id, cancel);
+    }
     attachments::request(conversation_id, message_id, cancel)
 }
 
@@ -1515,199 +1570,82 @@ pub fn send_attachment_in_channel(
     if bytes_base64.len() > MAX_ATTACHMENT_BYTES.div_ceil(3) * 4 {
         return Err(CoreError::LimitExceeded);
     }
-    let bytes = STANDARD
-        .decode(bytes_base64)
-        .map_err(|_| CoreError::InvalidInput)?;
+    let bytes = zeroize::Zeroizing::new(
+        STANDARD
+            .decode(bytes_base64)
+            .map_err(|_| CoreError::InvalidInput)?,
+    );
     if bytes.is_empty() || bytes.len() > MAX_ATTACHMENT_BYTES {
         return Err(CoreError::LimitExceeded);
     }
     let group = current_group(conversation_id)?;
-    if let Some(group) = group {
+    if let Some(group) = &group {
         let local_id = contact_id(&identity::active_identity()?.identity_public_key()?);
-        groups::enforce(&group, &local_id, &file_name, true)?;
-        groups::enforce_channel(&group, channel_id)?;
+        groups::enforce(group, &local_id, &file_name, true)?;
+        groups::enforce_channel(group, channel_id)?;
         if channel_id.is_some() {
-            groups::require_updated(&group)?;
+            groups::require_updated(group)?;
         }
-        if group.members.is_empty() {
-            let message_path = contact_store()
-                .lock()
-                .map_err(|_| CoreError::Internal)?
-                .message_path
-                .clone()
-                .ok_or(CoreError::FeatureUnavailable)?;
-            let message_id = groups::new_id();
-            let message = StoredMessage {
-                id: message_id.clone(),
-                conversation_id: conversation_id.to_owned(),
-                author_id: "me".to_owned(),
-                author_name: None,
-                body: groups::encode_channel_text(&format!("📎 {file_name}"), None, channel_id)?,
-                sent_at_ms: current_time_ms()?,
-                received_at_ms: 0,
-                is_outgoing: true,
-                is_read: true,
-                delivery_state: "delivered".to_owned(),
-                receipts: Default::default(),
-                attachment_name: Some(file_name),
-                attachment_base64: Some(STANDARD.encode(bytes)),
-                attachment_pointer: None,
-            };
-            queue_outgoing(&message_path, message, vec![])?;
-            return Ok(json!({"message_id": message_id, "delivery_state": "delivered"}));
-        }
-        let mut key = [0_u8; 32];
-        let mut nonce = [0_u8; 24];
-        OsRng.fill_bytes(&mut key);
-        OsRng.fill_bytes(&mut nonce);
-        let cipher = XChaCha20Poly1305::new((&key).into());
-        let encrypted = cipher
-            .encrypt(XNonce::from_slice(&nonce), bytes.as_slice())
-            .map_err(|_| CoreError::Internal)?;
-        let (record_key, chunk_count) = veilid_adapter::publish_attachment_blob(&encrypted)?;
-        if let Err(error) = register_attachment_lease(&record_key, chunk_count) {
-            let _ = veilid_adapter::delete_attachment_blob(&record_key, chunk_count);
-            return Err(error);
-        }
-        let pointer = AttachmentPointer {
-            version: 1,
-            file_name: file_name.clone(),
-            size: bytes.len(),
-            record_key: record_key.clone(),
-            chunk_count,
-            key_base64: STANDARD_NO_PAD.encode(key),
-            nonce_base64: STANDARD_NO_PAD.encode(nonce),
-            channel_id: channel_id.map(str::to_owned),
-        };
-        let control = format!(
-            "{ATTACHMENT_PREFIX}{}",
-            STANDARD_NO_PAD.encode(serde_json::to_vec(&pointer).map_err(|_| CoreError::Internal)?,)
-        );
-        let wrapped = format!(
-            "{GROUP_MESSAGE_PREFIX}{conversation_id}:{}",
-            STANDARD_NO_PAD.encode(control.as_bytes())
-        );
-        let mut deliveries = Vec::new();
-        let mut id_bytes = [0_u8; 16];
-        OsRng.fill_bytes(&mut id_bytes);
-        for member in &group.members {
-            let result = secure_packet::seal_for_all_with_id(&member.identity, &wrapped, &id_bytes);
-            match result {
-                Ok((mut sealed, _)) => deliveries.append(&mut sealed),
-                Err(error) => {
-                    let _ = veilid_adapter::delete_attachment_blob(&record_key, chunk_count);
-                    remove_attachment_lease(&record_key);
-                    return Err(error);
-                }
-            }
-        }
-        let message_path = contact_store()
-            .lock()
-            .map_err(|_| CoreError::Internal)?
-            .message_path
-            .clone()
-            .ok_or(CoreError::FeatureUnavailable)?;
-        let message_id = compact_hex(&id_bytes);
-        let message = StoredMessage {
-            id: message_id.clone(),
-            conversation_id: conversation_id.to_owned(),
-            author_id: "me".to_owned(),
-            body: groups::encode_channel_text(&format!("📎 {file_name}"), None, channel_id)?,
-            sent_at_ms: current_time_ms()?,
-            received_at_ms: 0,
-            author_name: None,
-            is_outgoing: true,
-            is_read: true,
-            delivery_state: "queued".to_owned(),
-            receipts: Default::default(),
-            attachment_name: Some(file_name),
-            attachment_base64: Some(STANDARD.encode(bytes)),
-            attachment_pointer: None,
-        };
-        if let Err(error) = queue_outgoing(&message_path, message, deliveries) {
-            let _ = veilid_adapter::delete_attachment_blob(&record_key, chunk_count);
-            remove_attachment_lease(&record_key);
-            return Err(error);
-        }
-        return Ok(json!({
-            "message_id": message_id,
-            "delivery_state": "queued"
-        }));
+    } else if channel_id.is_some() {
+        return Err(CoreError::InvalidInput);
     }
     let message_path = {
         let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
-        store
-            .contacts
+        if group.is_none()
+            && !store
+                .contacts
+                .iter()
+                .any(|c| c.id == conversation_id && c.published_identity.is_some())
+        {
+            return Err(CoreError::InvalidInput);
+        }
+        if store
+            .messages
             .iter()
-            .find(|contact| contact.id == conversation_id)
-            .ok_or(CoreError::InvalidInput)?;
+            .filter(|m| m.pending_upload.as_ref().is_some_and(|p| !p.paused))
+            .count()
+            >= uploads::MAX_PENDING
+        {
+            return Err(CoreError::LimitExceeded);
+        }
         store
             .message_path
             .clone()
             .ok_or(CoreError::FeatureUnavailable)?
     };
-    let recipient = refreshed_recipient(conversation_id)?;
-    let mut key = [0_u8; 32];
-    let mut nonce = [0_u8; 24];
-    OsRng.fill_bytes(&mut key);
-    OsRng.fill_bytes(&mut nonce);
-    let cipher = XChaCha20Poly1305::new((&key).into());
-    let encrypted = cipher
-        .encrypt(XNonce::from_slice(&nonce), bytes.as_slice())
-        .map_err(|_| CoreError::Internal)?;
-    let (record_key, chunk_count) = veilid_adapter::publish_attachment_blob(&encrypted)?;
-    if let Err(error) = register_attachment_lease(&record_key, chunk_count) {
-        let _ = veilid_adapter::delete_attachment_blob(&record_key, chunk_count);
-        return Err(error);
-    }
-    let pointer = AttachmentPointer {
-        version: 1,
-        file_name: file_name.clone(),
-        size: bytes.len(),
-        record_key: record_key.clone(),
-        chunk_count,
-        key_base64: STANDARD_NO_PAD.encode(key),
-        nonce_base64: STANDARD_NO_PAD.encode(nonce),
-        channel_id: None,
-    };
-    let control = format!(
-        "{ATTACHMENT_PREFIX}{}",
-        STANDARD_NO_PAD.encode(serde_json::to_vec(&pointer).map_err(|_| CoreError::Internal)?)
-    );
-    let (deliveries, message_id) = match secure_packet::seal_for_all(&recipient, &control) {
-        Ok(value) => value,
-        Err(error) => {
-            let _ = veilid_adapter::delete_attachment_blob(&record_key, chunk_count);
-            remove_attachment_lease(&record_key);
-            return Err(error);
-        }
-    };
-    let now_ms = current_time_ms()?;
+    let needs_upload = group.as_ref().is_none_or(|g| !g.members.is_empty());
+    let id = groups::new_id();
     let message = StoredMessage {
-        id: message_id.clone(),
+        id: id.clone(),
         conversation_id: conversation_id.to_owned(),
         author_id: "me".to_owned(),
-        body: format!("📎 {file_name}"),
-        sent_at_ms: now_ms,
-        received_at_ms: 0,
         author_name: None,
+        body: groups::encode_channel_text(&format!("📎 {file_name}"), None, channel_id)?,
+        sent_at_ms: current_time_ms()?,
+        received_at_ms: 0,
         is_outgoing: true,
         is_read: true,
-        delivery_state: "queued".to_owned(),
+        delivery_state: if needs_upload { "queued" } else { "delivered" }.to_owned(),
         receipts: Default::default(),
         attachment_name: Some(file_name),
-        attachment_base64: Some(STANDARD.encode(bytes)),
+        attachment_base64: Some(STANDARD.encode(bytes.as_slice())),
         attachment_pointer: None,
+        pending_upload: needs_upload.then(|| uploads::Pending {
+            attempts: 0,
+            next_attempt_ms: 0,
+            channel_id: channel_id.map(str::to_owned),
+            paused: false,
+        }),
     };
-    if let Err(error) = queue_outgoing(&message_path, message, deliveries) {
-        let _ = veilid_adapter::delete_attachment_blob(&record_key, chunk_count);
-        remove_attachment_lease(&record_key);
-        return Err(error);
-    }
-    Ok(json!({
-        "message_id": message_id,
-        "delivery_state": "queued"
-    }))
+    // Persist the file in the existing encrypted history before returning. The
+    // network worker receives ciphertext only and never holds COMMAND_LOCK.
+    queue_outgoing(&message_path, message, vec![])?;
+    // The durable enqueue is success even if starting a worker is temporarily
+    // unavailable. A later unlocked sync reconstructs the job from history.
+    let _ = uploads::poll();
+    Ok(
+        json!({"message_id": id, "delivery_state": if needs_upload { "queued" } else { "delivered" }}),
+    )
 }
 
 pub fn mark_conversation_read(conversation_id: &str) -> CoreResult<Value> {
@@ -1956,7 +1894,10 @@ pub fn sync_inbound_messages() -> CoreResult<Value> {
     let mut discarded = 0_usize;
     let mut storage_full = false;
     for payload in payloads {
-        match persist_inbound_payload(&payload.payload) {
+        let timer = crate::performance::Timer::start(crate::performance::Stage::InboundPersist);
+        let result = persist_inbound_payload(&payload.payload);
+        timer.finish(result.is_ok());
+        match result {
             Ok(is_new) => {
                 persisted += usize::from(is_new);
                 veilid_adapter::acknowledge_inbound_payload(payload)?;
@@ -1976,6 +1917,7 @@ pub fn sync_inbound_messages() -> CoreResult<Value> {
     }
     // Receive first: a slow or unavailable recipient must not delay messages
     // that have already arrived for us.
+    let _ = uploads::poll();
     groups::process_requests();
     receipts::flush();
     let _ = flush_outbox(None);
@@ -2408,6 +2350,7 @@ fn persist_inbound_payload_with(
         attachment_name,
         attachment_base64: None,
         attachment_pointer,
+        pending_upload: None,
     };
     validate_stored_message(&message)?;
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
@@ -2718,7 +2661,7 @@ fn queue_outgoing(
             }
         })
         .collect::<Vec<_>>();
-    if pending.is_empty() {
+    if pending.is_empty() && message.pending_upload.is_none() {
         let group =
             current_group(&message.conversation_id)?.ok_or(CoreError::VerificationFailed)?;
         if !group.members.is_empty() || !groups::can_write(&group)? {
@@ -2728,7 +2671,21 @@ fn queue_outgoing(
     }
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     ensure_messages_loaded(&mut store)?;
-    check_message_capacity(&store)?;
+    let replacement = store.messages.iter().position(|item| item.id == message.id);
+    if let Some(index) = replacement {
+        let previous = &store.messages[index];
+        if previous.pending_upload.is_none()
+            || message.pending_upload.is_some()
+            || previous.conversation_id != message.conversation_id
+            || previous.attachment_base64 != message.attachment_base64
+            || previous.body != message.body
+            || !message.is_outgoing
+        {
+            return Err(CoreError::VerificationFailed);
+        }
+    } else {
+        check_message_capacity(&store)?;
+    }
     message.receipts.recipients = store
         .groups
         .iter()
@@ -2752,9 +2709,6 @@ fn queue_outgoing(
     if original_len.saturating_add(pending.len()) > MAX_OUTBOX_DELIVERIES {
         return Err(CoreError::LimitExceeded);
     }
-    if store.messages.iter().any(|item| item.id == message.id) {
-        return Err(CoreError::VerificationFailed);
-    }
     let mut outbox = store.outbox.clone();
     outbox.extend(pending.iter().cloned());
     outgoing_transaction::check_history_capacity(
@@ -2766,7 +2720,12 @@ fn queue_outgoing(
     outgoing_transaction::commit(message_path, &message, &pending, &outbox)?;
     store.outbox = outbox;
     store.message_event_count += 1;
-    store.messages.push(message);
+    if let Some(index) = replacement {
+        wipe_message_memory(&mut store.messages[index]);
+        store.messages[index] = message;
+    } else {
+        store.messages.push(message);
+    }
     store.revision = store.revision.wrapping_add(1);
     let _ = compact_message_log_if_needed(&mut store);
     let generation = store.generation;
@@ -2937,7 +2896,7 @@ fn dispatchable_outbox(store: &ContactStore) -> impl Iterator<Item = &PendingDel
 fn poll_current_outbox(generation: u64, only_message_id: Option<&str>) -> Option<TransportResults> {
     poll_outbox_transport_with(
         generation,
-        |in_flight, capacity| {
+        |in_flight, capacity, schedule| {
             let Ok(mut store) = contact_store().lock() else {
                 return Vec::new();
             };
@@ -2948,35 +2907,21 @@ fn poll_current_outbox(generation: u64, only_message_id: Option<&str>) -> Option
                 return Vec::new();
             }
             let now = current_time_ms().unwrap_or(0);
-            dispatchable_outbox(&store)
-                .filter(|item| only_message_id.is_none_or(|id| item.message_id == id))
-                .filter(|item| item.next_attempt_ms <= now && !in_flight.contains(&item.id))
-                .take(capacity)
-                .cloned()
-                .collect()
+            outbox_schedule::select(&store, in_flight, capacity, now, only_message_id, *schedule)
         },
         |item, sender| {
+            let epoch = crate::performance::epoch();
             std::thread::Builder::new()
                 .name("sylphy-outbox".to_owned())
                 .spawn(move || {
                     let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        deliver_with_offline_fallback(
-                            || {
-                                veilid_adapter::deliver_payload(
-                                    &item.route_blob,
-                                    None,
-                                    item.payload.clone(),
-                                )
-                            },
-                            || {
-                                item.offline_keys.as_ref().map_or(
-                                    Err(CoreError::FeatureUnavailable),
-                                    |keys| {
-                                        veilid_adapter::store_offline_payload(keys, &item.payload)
-                                    },
-                                )
-                            },
+                        veilid_adapter::deliver_pending_payload(
+                            &item.route_blob,
+                            item.offline_keys.as_ref(),
+                            &item.payload,
+                            epoch,
                         )
+                        .is_ok()
                     }))
                     .unwrap_or(false);
                     let _ = sender.send((item, delivered));
@@ -2989,7 +2934,7 @@ fn poll_current_outbox(generation: u64, only_message_id: Option<&str>) -> Option
 
 fn poll_outbox_transport_with(
     generation: u64,
-    select: impl FnOnce(&HashSet<String>, usize) -> Vec<PendingDelivery>,
+    select: impl FnOnce(&HashSet<String>, usize, &outbox_schedule::Schedule) -> Vec<PendingDelivery>,
     mut spawn: impl FnMut(PendingDelivery, std::sync::mpsc::Sender<(PendingDelivery, bool)>) -> bool,
 ) -> Option<TransportResults> {
     let mut state = OUTBOX_TRANSPORT.lock().ok()?;
@@ -3004,13 +2949,15 @@ fn poll_outbox_transport_with(
         state.completed.push(result);
     }
     let capacity = MAX_OUTBOX_IN_FLIGHT.saturating_sub(state.in_flight.len());
-    for item in select(&state.in_flight, capacity)
+    for item in select(&state.in_flight, capacity, &state.schedule)
         .into_iter()
         .take(capacity)
     {
         let id = item.id.clone();
+        let fresh = item.attempts == 0;
         if !state.in_flight.contains(&id) && spawn(item, state.sender.clone()) {
             state.in_flight.insert(id);
+            state.schedule.dispatched(fresh);
         }
     }
     (!state.completed.is_empty()).then(|| state.completed.clone())
@@ -3038,6 +2985,7 @@ fn acknowledge_outbox_results(
         .retain(|id| !delivered.contains(id) && !failed.contains(id));
 }
 
+#[cfg(test)]
 fn deliver_with_offline_fallback(
     direct: impl FnOnce() -> CoreResult<()>,
     offline: impl FnOnce() -> CoreResult<()>,
@@ -3355,6 +3303,9 @@ fn merge_synced_message(
     };
     if rank(&incoming.delivery_state) > rank(&existing.delivery_state) {
         merged.delivery_state = incoming.delivery_state.clone();
+    }
+    if incoming.pending_upload.is_none() && rank(&incoming.delivery_state) >= 2 {
+        merged.pending_upload = None; // Another linked device completed this upload.
     }
     receipts::refresh_state(&mut merged);
     if existing.attachment_base64.is_none() && incoming.attachment_base64.is_some() {
@@ -4034,7 +3985,9 @@ fn message_json_with_data(
                 let padding = encoded.as_bytes().iter().rev().take_while(|byte| **byte == b'=').count();
                 encoded.len() / 4 * 3 - padding
             })),
-        "attachment_state": if message.attachment_base64.is_some() { "ready" }
+        "attachment_state": if message.pending_upload.as_ref().is_some_and(|p| p.paused) { "upload_failed" }
+            else if message.pending_upload.is_some() { uploads::status(store.generation, &message.id) }
+            else if message.attachment_base64.is_some() { "ready" }
             else if message.attachment_pointer.is_some() { attachments::status(store.generation, &message.id) }
             else { "unavailable" },
     })
@@ -4602,11 +4555,23 @@ mod tests {
         assert!(vault::seal_with_key(&[9; 32], &sync_event).unwrap().len() <= 3 * 1024 * 1024);
         let mut delivery = pending_delivery(&id);
         delivery.payload = payload.clone();
+        let mut upload = history_message(2);
+        upload.id = "00112233445566778899aabbccddeeff".to_owned();
+        upload.conversation_id = contact.id.clone();
+        upload.delivery_state = "queued".to_owned();
+        upload.attachment_name = Some("pending.bin".to_owned());
+        upload.attachment_base64 = Some(STANDARD.encode([1, 2, 3]));
+        upload.pending_upload = Some(uploads::Pending {
+            attempts: 0,
+            next_attempt_ms: 0,
+            channel_id: None,
+            paused: false,
+        });
         let backup = MessagingAccountBackup {
             version: 1,
             contacts: vec![contact.clone()],
             groups: Vec::new(),
-            messages: vec![message.clone()],
+            messages: vec![message.clone(), upload],
             outbox: vec![delivery],
             attachment_leases: Vec::new(),
         };
@@ -4618,6 +4583,8 @@ mod tests {
             serde_json::to_value(payload).unwrap()
         );
         assert_eq!(restored["messages"][0]["delivery_state"], "queued");
+        assert_eq!(restored["messages"][1]["delivery_state"], "queued");
+        assert!(restored["messages"][1]["pending_upload"].is_object());
         assert_eq!(
             restored["messages"][0]["attachment_base64"],
             message.attachment_base64.as_deref().unwrap()
@@ -4636,6 +4603,10 @@ mod tests {
         let mut legacy = serde_json::to_value(backup).unwrap();
         legacy.as_object_mut().unwrap().remove("outbox");
         import_account_backup(legacy).unwrap();
+        assert_eq!(
+            export_account_backup().unwrap()["messages"][1]["delivery_state"],
+            "queued"
+        );
         assert_eq!(
             export_account_backup().unwrap()["messages"][0]["delivery_state"],
             "not_restored"
@@ -4714,6 +4685,7 @@ mod tests {
             attachment_name: None,
             attachment_base64: None,
             attachment_pointer: None,
+            pending_upload: None,
         }
     }
 
@@ -5019,6 +4991,7 @@ mod tests {
             attachment_name: None,
             attachment_base64: None,
             attachment_pointer: None,
+            pending_upload: None,
         };
         let path = contact_store()
             .lock()

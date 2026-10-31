@@ -15,6 +15,13 @@ applica i risultati solo se appartengono ancora alla stessa generazione dello
 storage account. Un invio parziale a più dispositivi resta `queued` finché
 tutte le consegne sono completate. Il backoff cresce da 5 secondi a 5 minuti.
 
+Il risultato di un messaggio non è un prerequisito per inviare il successivo,
+anche nella stessa conversazione. La selezione alterna nuovi invii e retry,
+limita le copie contemporanee dello stesso messaggio e riserva capacità alle
+altre destinazioni. Un invio fallito conserva soltanto il proprio ciphertext
+per i tentativi successivi; non impedisce di salvare il successo degli altri.
+I limiti e le prove di regressione sono in [performance.md](performance.md).
+
 `sent` significa affidato al trasporto, non ricevuto o letto. Le conferme DHT
 liberano capacità ma non costituiscono ricevute di lettura. Cancellare una
 conversazione elimina i suoi tentativi ancora nella coda locale; non ritira

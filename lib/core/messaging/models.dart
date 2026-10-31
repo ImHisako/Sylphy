@@ -47,11 +47,17 @@ class ChatMessage {
   final String? attachmentName;
   final Uint8List? attachmentBytes;
   bool get attachmentAvailable =>
-      attachmentBytes != null || attachmentState == 'ready';
+      attachmentBytes != null ||
+      attachmentState == 'ready' ||
+      attachmentUploadPending;
   final String attachmentState;
   final int? attachmentSize;
   bool get attachmentDownloading =>
       attachmentState == 'queued' || attachmentState == 'downloading';
+  bool get attachmentUploadPending =>
+      isOutgoing &&
+      attachmentName != null &&
+      {'upload_queued', 'uploading', 'upload_failed'}.contains(attachmentState);
   bool get canDownloadAttachment =>
       attachmentBytes == null &&
       {'pending', 'failed'}.contains(attachmentState);

@@ -1,5 +1,107 @@
 # Prestazioni della messaggistica
 
+## Invii indipendenti quando un messaggio fallisce
+
+La selezione della outbox distingue messaggi nuovi e ritentativi già scaduti.
+Preferisce fino a tre nuovi invii, poi dà un turno a un ritentativo disponibile;
+il conteggio prosegue tra i cicli e avanza soltanto se il worker parte. Se una
+delle due code non ha lavoro eseguibile, l'altra usa subito gli slot disponibili.
+I ritentativi sono ordinati per scadenza, conservando il backoff persistente.
+
+Restano quattro worker complessivi. Al massimo due consegne dello stesso
+messaggio e tre della stessa destinazione possono occupare gli slot, contando
+anche quelli già avviati. Un messaggio per molti dispositivi non può quindi
+occupare l'intera coda; una destinazione non raggiungibile lascia almeno uno
+slot alle altre. Il secondo messaggio della stessa chat può partire mentre il
+primo è ancora in corso, senza aspettarne il successo. Se tutti gli slot utili
+sono occupati si attende la conclusione o il timeout di un tentativo: non viene
+promessa una consegna immediata quando manca la rete.
+
+Ogni messaggio conserva ID, ciphertext e risultato indipendenti. Un errore
+lascia soltanto quella consegna nella coda cifrata; un successo successivo può
+diventare `sent` e rimanerlo dopo il riavvio. Restano invariati la conferma dopo
+persistenza, la deduplica e il divieto di inviare messaggi privi di cronologia
+locale. I test coprono fanout, destinatario lento, backlog di ritentativi,
+equità tra cicli con un solo slot libero e fallimento/successo seguito da riavvio.
+Una prova con cifratura ibrida e Signal reali riceve il secondo pacchetto di
+una nuova sessione prima del primo, poi riavvia il destinatario e recupera il
+primo pacchetto senza duplicare il secondo.
+
+## Upload, consegna alternativa e mailbox a eventi — ABI 21
+
+Gli allegati in uscita vengono prima salvati nella cronologia cifrata con uno
+stato locale `pending_upload`. La risposta al comando conferma l'accodamento
+durabile. Al massimo quattro file possono essere abilitati nella coda e due worker possono
+caricare contemporaneamente: ricevono soltanto ciphertext e un segnale di
+cancellazione, senza chiavi del file, credenziali o accesso al vault.
+La rete non occupa il mutex dei comandi né l'isolate che accoda i messaggi.
+
+Il thread dei comandi applica un risultato soltanto se account, generazione,
+messaggio e permessi di gruppo sono ancora validi. Cifra il riferimento per i
+destinatari e aggiorna messaggio/outbox con il journal esistente, conservando
+lo stesso ID. Il worker conserva il blob solo dopo questa conferma locale.
+Blocco, cambio account, cancellazione e risultati obsoleti distruggono le chiavi
+in memoria e annullano il lavoro; i file pubblicati senza un commit vengono
+rimossi per quanto consentito dalla rete. I worker mantengono il loro limite
+anche durante la pulizia. Errori transitori riprendono con il backoff esistente;
+riavvio e importazione ripristinano i file pendenti dall'archivio cifrato.
+`attachment_state` distingue `upload_queued`, `uploading` e `upload_failed`
+dai download. Si può sospendere e riprendere un invio; un errore definitivo di
+permessi o verifica lo sospende, conservando il file locale. La ripresa ricontrolla
+i permessi senza contare il messaggio pendente contro il proprio slow mode.
+
+Ogni slot della outbox può avviare il deposito offline mentre la consegna
+diretta è ancora in attesa, usando gli stessi byte già persistenti. La soglia
+iniziale è di 2 secondi. Dopo otto consegne dirette riuscite viene stimata dal
+95° percentile degli ultimi 128 campioni riusciti, raddoppiato più 250 ms,
+con un limite di 750–4000 ms. Un errore diretto avvia subito il deposito;
+un successo diretto prima della soglia non lo avvia. Vince la prima conferma
+valida: risposta applicativa autenticata dopo persistenza oppure deposito DHT
+verificato. Il fallimento di un percorso non annulla quello ancora in corso.
+La deduplica resta necessaria perché un'operazione remota può completarsi anche
+dopo l'annullamento della sua attesa locale. Non vengono aggiunti thread per
+questo confronto; restano quattro slot, con al massimo due percorsi per slot.
+Il percorso DHT ha un limite complessivo di 20 secondi. La scelta può aumentare
+il traffico DHT quando un percorso diretto è lento.
+
+Fino a 64 mailbox ricevono watch firmati tramite Veilid `ValueChange`. I record
+rimangono aperti finché il watch è utile, vengono rinnovati e i watch decaduti
+vengono ricreati. Tutti i destinatari, inclusi quelli oltre il limite dei watch,
+mantengono un timer di recupero che accoda i controlli ogni 10 secondi; il
+completamento dipende dal carico e dalla rete, non è un limite di latenza.
+Un massimo di quattro letture
+procede contemporaneamente. Gli eventi anticipano i contatti in coda e un
+cambiamento durante una lettura ne programma una seconda senza duplicare lo
+stesso lavoro in corso. La coda resta equa per gli altri contatti.
+Le future sono possedute dal task del nodo: fermarlo rilascia anche le capacità
+dei record in corso. Lease locali chiudono gli handle non osservati anche quando
+la consegna anticipata o un cambio rete annullano un'operazione.
+
+## Misure locali e confronto tra dispositivi
+
+Impostazioni → Diagnostica → Prestazioni dei messaggi espone campioni limitati
+in memoria: attesa degli invii nella coda Flutter, durata dei comandi di invio,
+refresh delle conversazioni fino al frame successivo, attesa del core,
+preparazione del testo, upload, consegna diretta, deposito offline, lettura DHT
+e persistenza in ricezione. Ogni fase riporta mediana e 95° percentile, contatori
+e capacità 128; una fase senza campioni espone valori nulli. Il report copiabile
+non contiene messaggi, contatti, file, riferimenti DHT o chiavi e non viene
+inviato automaticamente. Il comando `performance_snapshot` non attende il mutex
+dei comandi, rispetta il gate dell'account e richiede un vault sbloccato.
+Reset e cambi account invalidano anche i campioni delle operazioni già in corso,
+che non possono ripopolare una nuova finestra di misura dopo il completamento.
+
+Questi tempi di fase non sono sommabili per ricostruire una consegna e non
+dimostrano un guadagno tra due telefoni. `tool/measure_message_latency.py`
+misura intervalli con un unico orologio sul computer negli scenari foreground,
+upload in corso, schermo spento e Wi-Fi → dati mobili. Il report distingue
+visualizzazione e cambiamenti delle notifiche, conserva l'incertezza ADB e i
+timeout e registra soltanto versione/build dei due client, senza seriali.
+`tool/compare_message_latency.py` confronta scenari omogenei e produce intervalli
+del delta, senza inventare percentuali di miglioramento. Procedura, consenso
+agli invii di test e ripristino delle condizioni sono in
+[network-background-validation.md](../docs/network-background-validation.md).
+
 Riconnessione e ricezione in background (ABI 20), strumento di misura e prove
 fisiche ancora da eseguire: [procedura](../docs/network-background-validation.md).
 

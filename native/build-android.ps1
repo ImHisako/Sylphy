@@ -67,7 +67,7 @@ try {
         exit $LASTEXITCODE
     }
     $metadata = @(
-        'abi=20'
+        'abi=21'
         'libsignal=signalapp/libsignal@v0.106.0'
         "profile=$Profile"
     )

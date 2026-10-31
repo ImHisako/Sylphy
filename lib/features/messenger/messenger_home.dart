@@ -1,4 +1,6 @@
 import '../../core/privacy/app_palette.dart';
+import '../../core/privacy/halloween_background.dart';
+import '../../core/diagnostics/performance_timings.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -14,7 +16,6 @@ import '../../core/native/native_core.dart';
 import '../../core/identity/identity_service.dart';
 import '../../core/profile/user_profile.dart';
 import '../../core/privacy/privacy_settings.dart';
-import '../../core/privacy/halloween_background.dart';
 import '../../core/platform/message_notifications.dart';
 import '../../core/platform/attachment_downloads.dart';
 import '../../core/veilid/veilid_service.dart';
@@ -223,6 +224,8 @@ class _MessengerHomeState extends State<MessengerHome>
       return;
     }
     _isRefreshingInbox = true;
+    final refreshTime = Stopwatch()..start();
+    final refreshGeneration = PerformanceTimings.generation;
     final bridge = widget.bridge;
     final servicesGeneration = widget.servicesGeneration;
     var revisionChanged = false;
@@ -294,6 +297,17 @@ class _MessengerHomeState extends State<MessengerHome>
     }
     final signature = _signatureForConversations(conversations);
     if (!force && signature == _conversationSignature) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted &&
+          identical(bridge, widget.bridge) &&
+          servicesGeneration == widget.servicesGeneration) {
+        PerformanceTimings.record(
+          PerformanceStage.inboxRefreshToFrame,
+          refreshTime.elapsed,
+          generation: refreshGeneration,
+        );
+      }
+    });
     final hasNewMessage = conversations.any(
       (conversation) =>
           !conversation.isMuted &&
@@ -3969,6 +3983,14 @@ class _MessageBubble extends StatelessWidget {
                           ),
                         ),
                         SizedBox(width: 8),
+                        if (message.attachmentUploadPending &&
+                            message.attachmentState != 'upload_failed' &&
+                            onRetrieveAttachment != null)
+                          IconButton(
+                            tooltip: 'Sospendi invio allegato',
+                            onPressed: () => onRetrieveAttachment!(true),
+                            icon: Icon(Icons.pause_rounded, color: foreground),
+                          ),
                         if (message.attachmentAvailable)
                           IconButton(
                             tooltip: 'Scarica file',
@@ -4011,7 +4033,24 @@ class _MessageBubble extends StatelessWidget {
                 onMention: onMention,
                 style: TextStyle(color: foreground, fontSize: 15, height: 1.3),
               ),
-            if (message.attachmentName != null && !message.attachmentAvailable)
+            if (message.attachmentUploadPending)
+              Text(
+                message.attachmentState == 'upload_failed'
+                    ? 'Invio allegato sospeso.'
+                    : message.attachmentState == 'uploading'
+                    ? 'Invio allegato in corso…'
+                    : 'Allegato in attesa di invio',
+                style: TextStyle(color: foreground, fontSize: 11),
+              ),
+            if (message.attachmentState == 'upload_failed' &&
+                onRetrieveAttachment != null)
+              TextButton(
+                onPressed: () => onRetrieveAttachment!(false),
+                child: const Text('Riprova invio'),
+              ),
+            if (message.attachmentName != null &&
+                !message.attachmentAvailable &&
+                !message.attachmentUploadPending)
               Text(
                 message.attachmentDownloading
                     ? 'Download in corso…'

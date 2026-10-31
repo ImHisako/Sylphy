@@ -1,5 +1,67 @@
 # Riconnessione, ricezione in background e misure fisiche
 
+## Confronto prima/dopo — ABI 21, 30 ottobre 2026
+
+Le nuove build includono upload asincroni durabili, deposito offline anticipato,
+watch DHT e misure locali. I controlli automatici non sostituiscono una prova
+fra dispositivi: non è stato attribuito alcun guadagno fisico a queste modifiche.
+Usare due account di test isolati e ripetere con stessi telefoni, reti, numero
+di campioni e condizioni. I report includono versione/build, mai seriali,
+contatti, contenuti, nomi dei file o riferimenti DHT.
+
+Esempio in primo piano, dopo aver aperto e sbloccato le chat reciproche:
+
+```powershell
+py -3 tool/measure_message_latency.py --sender SERIAL_A --receiver SERIAL_B `
+  --sender-chat-title "Test B" --receiver-chat-title "Test A" `
+  --send-test-messages --scenario foreground --samples 20 --label before `
+  --output build/latency-before.json
+```
+
+Ripetere sulla build successiva con `--label after` e un altro file. Confrontare:
+
+```powershell
+py -3 tool/compare_message_latency.py build/latency-before.json build/latency-after.json
+```
+
+Il delta è dopo meno prima: un intervallo completamente negativo indica una
+riduzione osservata, mentre intervalli sovrapposti non consentono una conclusione
+precisa. Considerare anche timeout e quantità di campioni; non confrontare
+notifiche a schermo spento con visualizzazione in primo piano. Il confronto
+rifiuta report incompleti e condizioni di osservazione differenti.
+
+Gli altri scenari usano gli stessi parametri e un file distinto per ciascuno:
+
+- `--scenario during-upload`: avviare un file sufficientemente grande nella
+  chat del mittente. Lo strumento verifica l'indicatore “Invio allegato in corso”
+  prima del messaggio di prova. Per confrontare una build precedente priva
+  dell'indicatore usare `--confirm-upload-in-progress` su entrambe le build:
+  la condizione viene dichiarata dall'operatore, non verificata automaticamente.
+  `--pause-between-samples` permette di riavviare un upload fra campioni.
+- `--scenario screen-off --allow-device-state-changes --samples 1`: il
+  destinatario parte acceso con la chat aperta; lo strumento spegne lo schermo,
+  osserva soltanto i metadati delle notifiche messaggi Sylphy attive e tenta di
+  riaccenderlo in `finally`. Non sblocca il telefono. Per più campioni aggiungere
+  `--pause-between-samples` e risbloccare manualmente la chat tra una prova e
+  l'altra. Il report misura cambiamenti delle notifiche, non la comparsa del
+  messaggio né un'associazione certa con il singolo probe: usare traffico isolato.
+- `--scenario network-change --allow-device-state-changes`: il destinatario
+  deve avere Wi-Fi attivo, SIM pronta e dati mobili già abilitati. Lo strumento
+  disabilita temporaneamente il Wi-Fi prima dell'invio e tenta sempre di
+  ripristinarlo. Non modifica i dati mobili né le impostazioni del vault.
+
+Se ADB viene scollegato il ripristino può fallire: verificare manualmente
+schermo e Wi-Fi. Gli invii richiedono sempre `--send-test-messages`; i probe
+rimangono nella cronologia. Se la protezione blocca il vault a schermo spento,
+il timeout è un risultato atteso: non viene aggirata. Per la prova di ricezione
+sbloccata configurare esplicitamente un account di test con la policy voluta.
+
+Impostazioni → Diagnostica → Prestazioni dei messaggi consente di azzerare e
+copiare le misure delle singole fasi. I campioni restano in memoria, senza logging
+dei contenuti. I tempi di fase non sono un benchmark end-to-end. Per analizzare
+il rendering usare una build profile su hardware reale; per confrontare la
+consegna mantenere la stessa modalità di build prima e dopo.
+
 ## Stato del 16 ottobre 2026
 
 Sono implementati il monitor della rete predefinita Android, il riaggancio di

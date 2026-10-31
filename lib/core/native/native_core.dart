@@ -8,8 +8,9 @@ import 'dart:isolate';
 import 'package:ffi/ffi.dart';
 
 import '../diagnostics/app_log.dart';
+import '../diagnostics/performance_timings.dart';
 
-const _expectedAbiVersion = 20;
+const _expectedAbiVersion = 21;
 
 /// A local group read may race an account transition on the other worker.
 /// Retry once through that worker's queue, after the transition completes.
@@ -132,6 +133,10 @@ abstract interface class NativeConversationNotificationApi {
   });
 }
 
+abstract interface class NativePerformanceApi {
+  Future<NativeCoreResponse> performanceSnapshot({bool reset = false});
+}
+
 abstract interface class NativeAttachmentDataApi {
   Future<NativeCoreResponse> readAttachmentInBackground(
     String conversationId,
@@ -161,7 +166,8 @@ class NativeCoreClient
         NativeActivityEventsApi,
         NativeConversationNotificationApi,
         NativeAttachmentDataApi,
-        NativeAccountTransferApi {
+        NativeAccountTransferApi,
+        NativePerformanceApi {
   NativeCoreClient._(this._call, this._freeString, this.abiVersion);
 
   final _DartCall _call;
@@ -444,7 +450,23 @@ class NativeCoreClient
 
   Future<NativeCoreResponse> securityCommandInBackground(
     Map<String, Object> request,
-  ) => _callInBackground(request, priority: true);
+  ) {
+    if ({
+      'lock_vault',
+      'close_vault',
+      'import_account',
+    }.contains(request['command'])) {
+      PerformanceTimings.clear();
+    }
+    return _callInBackground(request, priority: true);
+  }
+
+  @override
+  Future<NativeCoreResponse> performanceSnapshot({bool reset = false}) =>
+      _workerCall({
+        'command': 'performance_snapshot',
+        'reset': reset,
+      }, readOnly: true);
 
   @override
   NativeCoreResponse sendText({
@@ -595,13 +617,16 @@ class NativeCoreClient
     required String backupBase64,
     required String storageDirectory,
     required String vaultPassword,
-  }) => _callInBackground({
-    'command': 'import_account',
-    'transfer_password': transferPassword,
-    'backup_base64': backupBase64,
-    'storage_directory': storageDirectory,
-    'vault_password': vaultPassword,
-  });
+  }) {
+    PerformanceTimings.clear();
+    return _callInBackground({
+      'command': 'import_account',
+      'transfer_password': transferPassword,
+      'backup_base64': backupBase64,
+      'storage_directory': storageDirectory,
+      'vault_password': vaultPassword,
+    });
+  }
 
   Future<NativeCoreResponse> protectLocalDataInBackground({
     required String vaultPassword,
@@ -678,6 +703,21 @@ class NativeCoreClient
   Future<void> _executeBackgroundCall(_PendingNativeCall pending) async {
     final request = pending.request;
     final command = request['command'] as String? ?? 'unknown';
+    final measure = const {
+      'send_text',
+      'send_reply',
+      'send_channel_text',
+      'send_attachment',
+      'send_channel_attachment',
+    }.contains(command);
+    pending.queued.stop();
+    if (measure) {
+      PerformanceTimings.record(
+        PerformanceStage.commandQueue,
+        pending.queued.elapsed,
+        generation: pending.generation,
+      );
+    }
     final stopwatch = Stopwatch()..start();
     AppLog.instance.record(
       category: 'native_core',
@@ -704,6 +744,13 @@ class NativeCoreClient
       pending.completer.completeError(error);
     } finally {
       _pendingBackgroundCalls -= 1;
+      if (measure) {
+        PerformanceTimings.record(
+          PerformanceStage.commandTotal,
+          stopwatch.elapsed,
+          generation: pending.generation,
+        );
+      }
       _workerBusy = false;
       if (_pendingBackgroundCalls == 0) {
         for (final waiter in _idleWaiters) {
@@ -898,6 +945,8 @@ class _PendingNativeCall {
   _PendingNativeCall(this.request);
 
   final Map<String, Object> request;
+  final Stopwatch queued = Stopwatch()..start();
+  final int generation = PerformanceTimings.generation;
   final Completer<NativeCoreResponse> completer = Completer();
 }
 

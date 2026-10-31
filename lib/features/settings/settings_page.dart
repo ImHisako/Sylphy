@@ -14,6 +14,7 @@ import 'android_notification_settings.dart';
 import 'app_security_widgets.dart';
 import 'identity_rotation_settings.dart';
 import 'settings_search.dart';
+import 'performance_settings.dart';
 import '../../core/identity/identity_service.dart';
 import '../updates/update_host.dart';
 
@@ -503,9 +504,15 @@ class _SettingsPageState extends State<SettingsPage> {
         _SettingsSection(
           id: 'diagnostics',
           title: 'Diagnostica',
-          detail: 'DEVELOPER OPTIONS · controlli e log senza messaggi o chiavi',
+          detail:
+              'DEVELOPER OPTIONS · prestazioni e log senza messaggi o chiavi',
           icon: Icons.bug_report_outlined,
           children: [
+            SettingsSearchTarget(
+              id: 'performance-settings',
+              child: PerformanceSettings(nativeCore: widget.nativeCore),
+            ),
+            const SizedBox(height: 16),
             Text(
               'DEVELOPER OPTIONS',
               style: Theme.of(context).textTheme.labelMedium?.copyWith(
@@ -780,6 +787,12 @@ class _SettingsPageState extends State<SettingsPage> {
             'versione release github scarica installa disponibile',
           ),
         ],
+        const SettingsSearchEntry(
+          'performance-settings',
+          'diagnostics',
+          'Prestazioni dei messaggi',
+          'tempi latenza campioni confronto diagnostica',
+        ),
         const SettingsSearchEntry(
           'basic-logging-switch',
           'diagnostics',

@@ -745,7 +745,16 @@ pub(super) fn can_write(group: &StoredGroup) -> CoreResult<bool> {
 }
 
 pub(super) fn enforce(group: &StoredGroup, actor: &str, text: &str, media: bool) -> CoreResult<()> {
-    enforce_with(group, actor, text, media, false)
+    enforce_with(group, actor, text, media, false, None)
+}
+
+pub(super) fn enforce_pending_media(
+    group: &StoredGroup,
+    actor: &str,
+    text: &str,
+    message_id: &str,
+) -> CoreResult<()> {
+    enforce_with(group, actor, text, true, false, Some(message_id))
 }
 
 pub(super) fn enforce_inbound(
@@ -754,7 +763,7 @@ pub(super) fn enforce_inbound(
     text: &str,
     media: bool,
 ) -> CoreResult<()> {
-    enforce_with(group, actor, text, media, true)
+    enforce_with(group, actor, text, media, true, None)
 }
 
 fn enforce_with(
@@ -763,6 +772,7 @@ fn enforce_with(
     text: &str,
     media: bool,
     inbound: bool,
+    exclude_message: Option<&str>,
 ) -> CoreResult<()> {
     if group.management.closed || group.management.removed {
         return Err(CoreError::GroupClosed);
@@ -803,6 +813,7 @@ fn enforce_with(
         .rev()
         .filter(|message| {
             message.conversation_id == group.id
+                && exclude_message != Some(message.id.as_str())
                 && (message.author_id == actor || (actor == local && message.is_outgoing))
         })
         .take(12)
@@ -2075,6 +2086,7 @@ fn apply_local_effects(
             attachment_name: None,
             attachment_base64: None,
             attachment_pointer: None,
+            pending_upload: None,
         };
         append_message_event(
             &path,

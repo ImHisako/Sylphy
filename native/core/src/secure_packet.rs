@@ -517,6 +517,62 @@ mod tests {
 
     #[cfg(feature = "signal-ratchet")]
     #[test]
+    fn a_later_message_decrypts_before_the_first_message_in_a_new_session() {
+        use super::*;
+        let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "sylphy-missing-first-{}-{}",
+            std::process::id(),
+            current_time_ms().unwrap()
+        ));
+        let alice = directory.join("alice").to_string_lossy().into_owned();
+        let bob = directory.join("bob").to_string_lossy().into_owned();
+        identity::ensure_identity(&bob, "test-bob-vault", None, None).unwrap();
+        let device = PublishedDevice {
+            bundle: identity::active_identity()
+                .unwrap()
+                .public_bundle(ratchet_adapter::public_pre_key_bundle().unwrap())
+                .unwrap(),
+            route_blob: vec![1],
+        };
+        identity::ensure_identity(&alice, "test-alice-vault", None, None).unwrap();
+        let (delayed, _) =
+            seal_for_device_with_route(&device, "First message", vec![17; 16], vec![2]).unwrap();
+        let (later, _) =
+            seal_for_device_with_route(&device, "Later message", vec![18; 16], vec![2]).unwrap();
+        identity::activate_from_storage(&bob, "test-bob-vault").unwrap();
+        crate::messaging_adapter::configure_storage(&bob).unwrap();
+        // The first ciphertext is still on the sender. A fresh session must
+        // accept the later packet without depending on that earlier delivery.
+        crate::messaging_adapter::receive_for_test(&later).unwrap();
+        let conversations = crate::messaging_adapter::list_conversations().unwrap();
+        let id = conversations["conversations"][0]["id"].as_str().unwrap();
+        let messages = crate::messaging_adapter::list_messages(id, None, None, None).unwrap();
+        assert_eq!(messages["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(messages["messages"][0]["body"], "Later message");
+        // Persist the skipped key, restart, then recover the first packet and
+        // deduplicate the later packet without losing either message.
+        identity::activate_from_storage(&bob, "test-bob-vault").unwrap();
+        crate::messaging_adapter::configure_storage(&bob).unwrap();
+        crate::messaging_adapter::receive_for_test(&delayed).unwrap();
+        crate::messaging_adapter::receive_for_test(&later).unwrap();
+        let messages = crate::messaging_adapter::list_messages(id, None, None, None).unwrap();
+        let bodies = messages["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["body"].as_str().unwrap())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            bodies,
+            std::collections::HashSet::from(["First message", "Later message"])
+        );
+        assert_eq!(messages["messages"].as_array().unwrap().len(), 2);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(feature = "signal-ratchet")]
+    #[test]
     fn hybrid_offline_message_survives_restart_and_duplicate_delivery() {
         use super::*;
         let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
