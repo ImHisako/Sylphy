@@ -11,6 +11,7 @@ import 'secure_messaging_bridge.dart';
 class SylphyMessagingBridge
     implements
         SecureMessagingBridge,
+        ConversationNotificationBridge,
         AttachmentRetrievalBridge,
         AttachmentContentBridge,
         InboxWakeupNotifications,
@@ -612,6 +613,23 @@ class SylphyMessagingBridge
   }
 
   @override
+  Future<void> setConversationMuted(
+    String conversationId, {
+    required bool muted,
+  }) async {
+    await _waitUntilCoreIsAvailable();
+    final core = _core;
+    if (core is! NativeConversationNotificationApi) {
+      throw const SecureMessagingException('feature_unavailable');
+    }
+    _requireSuccess(
+      await (core as NativeConversationNotificationApi)
+          .setConversationMutedInBackground(conversationId, muted: muted),
+    );
+    _invalidateConversations();
+  }
+
+  @override
   Future<void> deleteConversation(String conversationId) async {
     await _waitUntilCoreIsAvailable();
     final core = _core;
@@ -739,6 +757,7 @@ Conversation _parseConversation(Object? value) {
       isUtc: true,
     ).toLocal(),
     unreadCount: _requiredInt(value, 'unread_count'),
+    isMuted: value['is_muted'] == true,
     isOnline: value['is_online'] == true,
     isGroup: value['is_group'] == true,
     type: _parseConversationType(

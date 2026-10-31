@@ -103,7 +103,9 @@ class _SafeAttachmentImageState extends State<SafeAttachmentImage> {
   @override
   void didUpdateWidget(SafeAttachmentImage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!identical(widget.bytes, oldWidget.bytes) ||
+    // Native refreshes recreate buffers even when the encoded photo is
+    // unchanged. Keep its decoded image instead of flashing the fallback.
+    if (!listEquals(widget.bytes, oldWidget.bytes) ||
         widget.expanded != oldWidget.expanded ||
         widget.previewEdge != oldWidget.previewEdge) {
       _image?.dispose();

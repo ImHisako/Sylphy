@@ -88,7 +88,7 @@ pub extern "system" fn Java_com_sylphy_MessagingService_syncInbound(
     crate::messaging_adapter::sync_inbound_messages()
         .ok()
         .and_then(|value| {
-            let count = value.get("persisted")?.as_u64()?.min(0x3fffffff) as jint;
+            let count = value.get("notification_count")?.as_u64()?.min(0x3fffffff) as jint;
             Some(
                 count
                     | if value

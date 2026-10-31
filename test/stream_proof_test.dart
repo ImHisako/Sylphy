@@ -242,6 +242,7 @@ void main() {
               privacySettings: settings,
               profile: UserProfile(displayName: 'Test'),
               onAccountImported: (_) {},
+              onEditProfile: () {},
             ),
           ),
         );

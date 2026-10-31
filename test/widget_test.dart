@@ -17,6 +17,154 @@ import 'package:sylphy/main.dart';
 import 'package:sylphy/features/messenger/message_text.dart';
 
 void main() {
+  for (final width in [390.0, 1280.0]) {
+    testWidgets('long press mutes and unmutes a chat at width $width', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(Size(width, 844));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final bridge = _TestMessagingBridge();
+      await tester.pumpWidget(
+        SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+      );
+      await tester.pumpAndSettle();
+      final tile = find.byKey(const ValueKey('conversation-tile-test-contact'));
+      await tester.longPress(tile);
+      await tester.pumpAndSettle();
+      expect(find.text('Silenzia chat'), findsOneWidget);
+      expect(find.text('Cancella chat'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('toggle-conversation-mute')));
+      await tester.pumpAndSettle();
+      expect(bridge.conversation.isMuted, isTrue);
+      expect(find.byTooltip('Notifiche silenziate'), findsOneWidget);
+      bridge.injectIncoming('Ricevuto senza avvisi');
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+      expect(bridge.conversation.isMuted, isTrue);
+      expect(bridge.conversation.unreadCount, 1);
+      await tester.longPress(tile);
+      await tester.pumpAndSettle();
+      expect(find.text('Riattiva notifiche'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('toggle-conversation-mute')));
+      await tester.pumpAndSettle();
+      expect(bridge.conversation.isMuted, isFalse);
+      expect(find.byTooltip('Notifiche silenziate'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets(
+      'long press deletion can be cancelled then confirmed at width $width',
+      (tester) async {
+        await tester.binding.setSurfaceSize(Size(width, 844));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final bridge = _TestMessagingBridge();
+        await tester.pumpWidget(
+          SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+        );
+        await tester.pumpAndSettle();
+        final tile = find.byKey(
+          const ValueKey('conversation-tile-test-contact'),
+        );
+        for (final confirmed in [false, true]) {
+          await tester.longPress(tile);
+          await tester.pumpAndSettle();
+          await tester.tap(
+            find.byKey(const ValueKey('delete-conversation-action')),
+          );
+          await tester.pumpAndSettle();
+          expect(bridge.deleted, isFalse);
+          expect(find.text('Cancellare la chat?'), findsOneWidget);
+          await tester.tap(
+            confirmed
+                ? find.byKey(const ValueKey('confirm-delete-conversation'))
+                : find.text('Annulla'),
+          );
+          await tester.pumpAndSettle();
+          expect(bridge.deleted, confirmed);
+        }
+        expect(tile, findsNothing);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+
+    testWidgets(
+      'long press actions also work in the group conversation rail at width $width',
+      (tester) async {
+        await tester.binding.setSurfaceSize(Size(width, 844));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final bridge = _ChannelTestBridge();
+        await tester.pumpWidget(
+          SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+        );
+        await tester.pumpAndSettle();
+        if (width < 900) {
+          await tester.tap(
+            find.byKey(const ValueKey('conversation-tile-test-contact')),
+          );
+          await tester.pumpAndSettle();
+        }
+        final avatar = find.byKey(
+          const ValueKey('conversation-rail-test-contact'),
+        );
+        await tester.longPress(avatar);
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('toggle-conversation-mute')),
+        );
+        await tester.pumpAndSettle();
+        expect(bridge.conversation.isMuted, isTrue);
+        await tester.longPress(avatar);
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('delete-conversation-action')),
+        );
+        await tester.pumpAndSettle();
+        expect(find.textContaining('Uscirai da'), findsOneWidget);
+        await tester.tap(
+          find.byKey(const ValueKey('confirm-delete-conversation')),
+        );
+        await tester.pumpAndSettle();
+        expect(bridge.deleted, isTrue);
+        expect(find.byKey(const ValueKey('conversation-rail')), findsNothing);
+        expect(find.text('Nessuna conversazione sicura'), findsOneWidget);
+        await tester.pumpWidget(const SizedBox());
+        bridge.inboxChanges.dispose();
+      },
+    );
+  }
+
+  testWidgets('failed mute and delete actions keep the chat available', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final bridge = _TestMessagingBridge()..failConversationActions = true;
+    await tester.pumpWidget(
+      SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+    );
+    await tester.pumpAndSettle();
+    final tile = find.byKey(const ValueKey('conversation-tile-test-contact'));
+    await tester.longPress(tile);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('toggle-conversation-mute')));
+    await tester.pumpAndSettle();
+    expect(bridge.conversation.isMuted, isFalse);
+    expect(
+      find.textContaining('Impossibile aggiornare le notifiche'),
+      findsOneWidget,
+    );
+    await tester.longPress(tile);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('delete-conversation-action')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('confirm-delete-conversation')));
+    await tester.pumpAndSettle();
+    expect(bridge.deleted, isFalse);
+    expect(tile, findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets(
     'native wakeups refresh a visible chat before the periodic timer',
     (tester) async {
@@ -411,6 +559,7 @@ void main() {
         'pink',
         'amoled',
         'white',
+        'halloween',
       ]) {
         await tester.runAsync(
           () => privacy.update(privacy.value.copyWith(themeName: name)),
@@ -435,7 +584,9 @@ void main() {
           greaterThan(4.5),
         );
         expect(tester.takeException(), isNull);
-        if (const bool.fromEnvironment('SAVE_THEME_PREVIEWS')) {
+        if (const bool.fromEnvironment('SAVE_THEME_PREVIEWS') ||
+            (name == 'halloween' &&
+                const bool.fromEnvironment('SAVE_HALLOWEEN_PREVIEW'))) {
           final boundary =
               boundaryKey.currentContext!.findRenderObject()!
                   as RenderRepaintBoundary;
@@ -445,7 +596,9 @@ void main() {
               format: ui.ImageByteFormat.png,
             );
             await File(
-              'diagnostics/theme-$name.png',
+              const bool.fromEnvironment('SAVE_THEME_PREVIEWS')
+                  ? 'diagnostics/theme-$name.png'
+                  : 'build/theme-halloween.png',
             ).writeAsBytes(bytes!.buffer.asUint8List());
             image.dispose();
           });
@@ -1600,7 +1753,10 @@ class _RetrievalTestBridge extends _TestMessagingBridge
 }
 
 class _TestMessagingBridge
-    implements SecureMessagingBridge, InboxRefreshingBridge {
+    implements
+        SecureMessagingBridge,
+        InboxRefreshingBridge,
+        ConversationNotificationBridge {
   _TestMessagingBridge({
     bool isGroup = false,
     bool initiallyVerified = true,
@@ -1623,6 +1779,7 @@ class _TestMessagingBridge
 
   Conversation _conversation;
   bool deleted = false;
+  bool failConversationActions = false;
   final List<ChatMessage> _messages = [];
   final Completer<void>? sendGate;
   final Completer<void>? markReadGate;
@@ -1703,8 +1860,23 @@ class _TestMessagingBridge
 
   @override
   Future<void> deleteConversation(String conversationId) async {
+    if (failConversationActions) {
+      throw const SecureMessagingException('storage_failed');
+    }
     _messages.clear();
     deleted = true;
+  }
+
+  @override
+  Future<void> setConversationMuted(
+    String conversationId, {
+    required bool muted,
+  }) async {
+    if (failConversationActions) {
+      throw const SecureMessagingException('storage_failed');
+    }
+    _conversation = _conversation.copyWith(isMuted: muted);
+    _inboxRevision++;
   }
 
   @override

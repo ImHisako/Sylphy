@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/identity/identity_service.dart';
 import '../../core/privacy/privacy_settings.dart';
+import 'settings_search.dart';
 
 class IdentityRotationSettings extends StatefulWidget {
   const IdentityRotationSettings({
@@ -127,14 +128,17 @@ class _IdentityRotationSettingsState extends State<IdentityRotationSettings> {
                 'ID SYLPHY',
                 style: TextStyle(fontWeight: FontWeight.bold),
               ),
-              ListTile(
-                key: const ValueKey('identity-rotation-interval'),
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.update),
-                title: const Text('Cambio automatico dell’ID'),
-                subtitle: Text(interval),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: busy ? null : _chooseInterval,
+              SettingsSearchTarget(
+                id: 'identity-rotation-interval',
+                child: ListTile(
+                  key: const ValueKey('identity-rotation-interval'),
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.update),
+                  title: const Text('Cambio automatico dell’ID'),
+                  subtitle: Text(interval),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: busy ? null : _chooseInterval,
+                ),
               ),
               Text(nextText),
               const SizedBox(height: 8),
@@ -142,20 +146,23 @@ class _IdentityRotationSettingsState extends State<IdentityRotationSettings> {
                 'Cambia il codice da condividere e conserva account, chat e contatti. A app chiusa o bloccata il cambio viene eseguito alla riapertura, con rete disponibile.',
               ),
               const SizedBox(height: 12),
-              FilledButton.icon(
-                key: const ValueKey('rotate-identity-now'),
-                onPressed: !identity.canRotate || busy ? null : _rotateNow,
-                icon: busy
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.refresh),
-                label: Text(
-                  identity.rotationInProgress
-                      ? 'Cambio ID in corso…'
-                      : 'Cambia ID adesso',
+              SettingsSearchTarget(
+                id: 'rotate-identity-now',
+                child: FilledButton.icon(
+                  key: const ValueKey('rotate-identity-now'),
+                  onPressed: !identity.canRotate || busy ? null : _rotateNow,
+                  icon: busy
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.refresh),
+                  label: Text(
+                    identity.rotationInProgress
+                        ? 'Cambio ID in corso…'
+                        : 'Cambia ID adesso',
+                  ),
                 ),
               ),
               if (identity.revocationPending)

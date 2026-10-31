@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'settings_search.dart';
 import 'package:flutter/services.dart';
 
 /// Android owns sound and vibration settings for the existing message channel.
@@ -101,19 +102,22 @@ class _AndroidNotificationSettingsState
     return Column(
       children: [
         if (_busy) const LinearProgressIndicator(),
-        SwitchListTile(
-          key: const ValueKey('message-notifications'),
-          secondary: const Icon(Icons.notifications_outlined),
-          title: const Text('Notifiche dei messaggi'),
-          subtitle: const Text(
-            'Avvisi per nuovi messaggi e messaggi fissati, anche in background. '
-            'Disattivarli non interrompe la ricezione dei messaggi.',
+        SettingsSearchTarget(
+          id: 'message-notifications',
+          child: SwitchListTile(
+            key: const ValueKey('message-notifications'),
+            secondary: const Icon(Icons.notifications_outlined),
+            title: const Text('Notifiche dei messaggi'),
+            subtitle: const Text(
+              'Avvisi per nuovi messaggi e messaggi fissati, anche in background. '
+              'Disattivarli non interrompe la ricezione dei messaggi.',
+            ),
+            value: _settings?['enabled'] == true,
+            onChanged: ready
+                ? (value) =>
+                      _run(method: 'setNotificationsEnabled', arguments: value)
+                : null,
           ),
-          value: _settings?['enabled'] == true,
-          onChanged: ready
-              ? (value) =>
-                    _run(method: 'setNotificationsEnabled', arguments: value)
-              : null,
         ),
         if (blockedByAndroid)
           ListTile(
@@ -132,41 +136,54 @@ class _AndroidNotificationSettingsState
                   ),
           ),
         const Divider(height: 1),
-        ListTile(
-          key: const ValueKey('notification-sound'),
-          leading: const Icon(Icons.volume_up_outlined),
-          title: const Text('Suono delle notifiche'),
-          subtitle: Text(_channelStatus('sound_enabled', feminine: false)),
-          trailing: const Icon(Icons.open_in_new_rounded),
-          onTap: ready
-              ? () => _run(method: 'openNotificationSettings', arguments: true)
-              : null,
-        ),
-        const Divider(height: 1),
-        ListTile(
-          key: const ValueKey('notification-vibration'),
-          leading: const Icon(Icons.vibration_rounded),
-          title: const Text('Vibrazione delle notifiche'),
-          subtitle: Text(_channelStatus('vibration_enabled', feminine: true)),
-          trailing: const Icon(Icons.open_in_new_rounded),
-          onTap: ready
-              ? () => _run(method: 'openNotificationSettings', arguments: true)
-              : null,
-        ),
-        const Divider(height: 1),
-        ListTile(
-          key: const ValueKey('android-notification-settings'),
-          leading: const Icon(Icons.settings_outlined),
-          title: const Text('Impostazioni notifiche Android'),
-          subtitle: const Text(
-            'Autorizzazioni, schermata di blocco e altre opzioni. '
-            'Suono e vibrazione rispettano il silenzioso e Non disturbare del telefono.',
+        SettingsSearchTarget(
+          id: 'notification-sound',
+          child: ListTile(
+            key: const ValueKey('notification-sound'),
+            leading: const Icon(Icons.volume_up_outlined),
+            title: const Text('Suono delle notifiche'),
+            subtitle: Text(_channelStatus('sound_enabled', feminine: false)),
+            trailing: const Icon(Icons.open_in_new_rounded),
+            onTap: ready
+                ? () =>
+                      _run(method: 'openNotificationSettings', arguments: true)
+                : null,
           ),
-          trailing: const Icon(Icons.open_in_new_rounded),
-          onTap: _busy
-              ? null
-              : () =>
-                    _run(method: 'openNotificationSettings', arguments: false),
+        ),
+        const Divider(height: 1),
+        SettingsSearchTarget(
+          id: 'notification-vibration',
+          child: ListTile(
+            key: const ValueKey('notification-vibration'),
+            leading: const Icon(Icons.vibration_rounded),
+            title: const Text('Vibrazione delle notifiche'),
+            subtitle: Text(_channelStatus('vibration_enabled', feminine: true)),
+            trailing: const Icon(Icons.open_in_new_rounded),
+            onTap: ready
+                ? () =>
+                      _run(method: 'openNotificationSettings', arguments: true)
+                : null,
+          ),
+        ),
+        const Divider(height: 1),
+        SettingsSearchTarget(
+          id: 'android-notification-settings',
+          child: ListTile(
+            key: const ValueKey('android-notification-settings'),
+            leading: const Icon(Icons.settings_outlined),
+            title: const Text('Impostazioni notifiche Android'),
+            subtitle: const Text(
+              'Autorizzazioni, schermata di blocco e altre opzioni. '
+              'Suono e vibrazione rispettano il silenzioso e Non disturbare del telefono.',
+            ),
+            trailing: const Icon(Icons.open_in_new_rounded),
+            onTap: _busy
+                ? null
+                : () => _run(
+                    method: 'openNotificationSettings',
+                    arguments: false,
+                  ),
+          ),
         ),
         if (_error != null)
           ListTile(

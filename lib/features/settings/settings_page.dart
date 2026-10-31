@@ -13,6 +13,7 @@ import 'account_transfer_page.dart';
 import 'android_notification_settings.dart';
 import 'app_security_widgets.dart';
 import 'identity_rotation_settings.dart';
+import 'settings_search.dart';
 import '../../core/identity/identity_service.dart';
 import '../updates/update_host.dart';
 
@@ -23,6 +24,7 @@ class SettingsPage extends StatefulWidget {
     required this.privacySettings,
     required this.profile,
     required this.onAccountImported,
+    required this.onEditProfile,
     this.nativeCore,
     this.identityService,
   });
@@ -33,6 +35,7 @@ class SettingsPage extends StatefulWidget {
   final PrivacySettingsController privacySettings;
   final UserProfile profile;
   final ValueChanged<UserProfile> onAccountImported;
+  final VoidCallback onEditProfile;
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -44,6 +47,25 @@ class _SettingsPageState extends State<SettingsPage> {
   String? _selectedSection;
   String _query = '';
   final _search = TextEditingController();
+  final _searchAnchors = <String, GlobalKey>{};
+  String? _selectedSetting;
+
+  void _openSection(String sectionId, {String? settingId}) {
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _selectedSection = sectionId;
+      _selectedSetting = settingId;
+    });
+    if (settingId != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _selectedSetting != settingId) return;
+        final target = _searchAnchors[settingId]?.currentContext;
+        if (target != null) {
+          Scrollable.ensureVisible(target, alignment: 0.15);
+        }
+      });
+    }
+  }
 
   @override
   void dispose() {
@@ -140,6 +162,8 @@ class _SettingsPageState extends State<SettingsPage> {
     builder: (context, _) {
       final snapshot = widget.veilidService.snapshot;
       final privacy = widget.privacySettings.value;
+      final security = AppSecurityScope.maybeOf(context);
+      final updates = AppUpdateScope.maybeOf(context);
       final sections = <_SettingsSection>[
         _SettingsSection(
           id: 'account',
@@ -150,27 +174,34 @@ class _SettingsPageState extends State<SettingsPage> {
             _SettingsCard(
               child: Column(
                 children: [
-                  ListTile(
-                    key: const ValueKey('export-account'),
-                    leading: const Icon(Icons.add_to_home_screen_rounded),
-                    title: const Text('Collega un altro dispositivo'),
-                    subtitle: const Text(
-                      'File cifrato, condivisione o QR sulla rete locale.',
+                  SettingsSearchTarget(
+                    id: 'export-account',
+                    child: ListTile(
+                      key: const ValueKey('export-account'),
+                      leading: const Icon(Icons.add_to_home_screen_rounded),
+                      title: const Text('Collega un altro dispositivo'),
+                      subtitle: const Text(
+                        'File cifrato, condivisione o QR sulla rete locale.',
+                      ),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () =>
+                          _openAccountTransfer(AccountTransferMode.send),
                     ),
-                    trailing: const Icon(Icons.chevron_right),
-                    onTap: () => _openAccountTransfer(AccountTransferMode.send),
                   ),
                   const Divider(height: 1),
-                  ListTile(
-                    key: const ValueKey('import-account'),
-                    leading: const Icon(Icons.restore_rounded),
-                    title: const Text('Usa un account esistente'),
-                    subtitle: const Text(
-                      'Scegli il backup e ripristina identità, contatti e cronologia.',
+                  SettingsSearchTarget(
+                    id: 'import-account',
+                    child: ListTile(
+                      key: const ValueKey('import-account'),
+                      leading: const Icon(Icons.restore_rounded),
+                      title: const Text('Usa un account esistente'),
+                      subtitle: const Text(
+                        'Scegli il backup e ripristina identità, contatti e cronologia.',
+                      ),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () =>
+                          _openAccountTransfer(AccountTransferMode.receive),
                     ),
-                    trailing: const Icon(Icons.chevron_right),
-                    onTap: () =>
-                        _openAccountTransfer(AccountTransferMode.receive),
                   ),
                 ],
               ),
@@ -206,22 +237,25 @@ class _SettingsPageState extends State<SettingsPage> {
             ],
             if (_isAndroidPlatform || supportsStreamProof) ...[
               _SettingsCard(
-                child: SwitchListTile(
-                  key: const ValueKey('allow-screenshots'),
-                  secondary: const Icon(Icons.screenshot_outlined),
-                  title: const Text('Consenti screenshot dell’app'),
-                  subtitle: Text(
-                    _isAndroidPlatform
-                        ? 'Consente screenshot e registrazioni mentre l’app è sbloccata. Le anteprime in background restano protette.'
-                        : 'Disattiva lo Stream proof per consentire screenshot e condivisioni dello schermo.',
-                  ),
-                  value: _isAndroidPlatform
-                      ? privacy.allowScreenshots
-                      : !privacy.streamProof,
-                  onChanged: (value) => widget.privacySettings.update(
-                    _isAndroidPlatform
-                        ? privacy.copyWith(allowScreenshots: value)
-                        : privacy.copyWith(streamProof: !value),
+                child: SettingsSearchTarget(
+                  id: 'allow-screenshots',
+                  child: SwitchListTile(
+                    key: const ValueKey('allow-screenshots'),
+                    secondary: const Icon(Icons.screenshot_outlined),
+                    title: const Text('Consenti screenshot dell’app'),
+                    subtitle: Text(
+                      _isAndroidPlatform
+                          ? 'Consente screenshot e registrazioni mentre l’app è sbloccata. Le anteprime in background restano protette.'
+                          : 'Disattiva lo Stream proof per consentire screenshot e condivisioni dello schermo.',
+                    ),
+                    value: _isAndroidPlatform
+                        ? privacy.allowScreenshots
+                        : !privacy.streamProof,
+                    onChanged: (value) => widget.privacySettings.update(
+                      _isAndroidPlatform
+                          ? privacy.copyWith(allowScreenshots: value)
+                          : privacy.copyWith(streamProof: !value),
+                    ),
                   ),
                 ),
               ),
@@ -232,29 +266,35 @@ class _SettingsPageState extends State<SettingsPage> {
             _SettingsCard(
               child: Column(
                 children: [
-                  SwitchListTile(
-                    key: ValueKey('share-display-name'),
-                    secondary: Icon(Icons.badge_outlined),
-                    title: Text('Mostra il nome profilo'),
-                    subtitle: Text(
-                      'Consenti ai contatti di vedere il nome che hai scelto.',
-                    ),
-                    value: privacy.shareDisplayName,
-                    onChanged: (value) => widget.privacySettings.update(
-                      privacy.copyWith(shareDisplayName: value),
+                  SettingsSearchTarget(
+                    id: 'share-display-name',
+                    child: SwitchListTile(
+                      key: ValueKey('share-display-name'),
+                      secondary: Icon(Icons.badge_outlined),
+                      title: Text('Mostra il nome profilo'),
+                      subtitle: Text(
+                        'Consenti ai contatti di vedere il nome che hai scelto.',
+                      ),
+                      value: privacy.shareDisplayName,
+                      onChanged: (value) => widget.privacySettings.update(
+                        privacy.copyWith(shareDisplayName: value),
+                      ),
                     ),
                   ),
                   Divider(height: 1),
-                  SwitchListTile(
-                    key: ValueKey('share-profile-photo'),
-                    secondary: Icon(Icons.account_circle_outlined),
-                    title: Text('Mostra la foto profilo'),
-                    subtitle: Text(
-                      'Condividi la foto solo con i contatti Sylphy.',
-                    ),
-                    value: privacy.shareProfilePhoto,
-                    onChanged: (value) => widget.privacySettings.update(
-                      privacy.copyWith(shareProfilePhoto: value),
+                  SettingsSearchTarget(
+                    id: 'share-profile-photo',
+                    child: SwitchListTile(
+                      key: ValueKey('share-profile-photo'),
+                      secondary: Icon(Icons.account_circle_outlined),
+                      title: Text('Mostra la foto profilo'),
+                      subtitle: Text(
+                        'Condividi la foto solo con i contatti Sylphy.',
+                      ),
+                      value: privacy.shareProfilePhoto,
+                      onChanged: (value) => widget.privacySettings.update(
+                        privacy.copyWith(shareProfilePhoto: value),
+                      ),
                     ),
                   ),
                 ],
@@ -266,18 +306,21 @@ class _SettingsPageState extends State<SettingsPage> {
             _SettingsCard(
               child: Column(
                 children: [
-                  SwitchListTile(
-                    key: ValueKey('show-read-receipts'),
-                    secondary: Icon(Icons.visibility_outlined),
-                    title: Text('Mostra spunte ricevute'),
-                    subtitle: Text(
-                      'Permette agli altri di vedere quando leggi i loro messaggi.',
-                    ),
-                    value: privacy.sendReadReceipts,
-                    onChanged: (value) => widget.privacySettings.update(
-                      privacy.copyWith(
-                        sendReadReceipts: value,
-                        showReadReceipts: true,
+                  SettingsSearchTarget(
+                    id: 'show-read-receipts',
+                    child: SwitchListTile(
+                      key: ValueKey('show-read-receipts'),
+                      secondary: Icon(Icons.visibility_outlined),
+                      title: Text('Mostra spunte ricevute'),
+                      subtitle: Text(
+                        'Permette agli altri di vedere quando leggi i loro messaggi.',
+                      ),
+                      value: privacy.sendReadReceipts,
+                      onChanged: (value) => widget.privacySettings.update(
+                        privacy.copyWith(
+                          sendReadReceipts: value,
+                          showReadReceipts: true,
+                        ),
                       ),
                     ),
                   ),
@@ -288,15 +331,18 @@ class _SettingsPageState extends State<SettingsPage> {
             _SectionTitle('CONTATTI E RICHIESTE'),
             SizedBox(height: 8),
             _SettingsCard(
-              child: SwitchListTile(
-                secondary: Icon(Icons.person_search_outlined),
-                title: Text('Richieste da sconosciuti'),
-                subtitle: Text(
-                  'Accetta nuove richieste soltanto quando è attivo.',
-                ),
-                value: privacy.allowUnknownContacts,
-                onChanged: (value) => widget.privacySettings.update(
-                  privacy.copyWith(allowUnknownContacts: value),
+              child: SettingsSearchTarget(
+                id: 'unknown-contacts',
+                child: SwitchListTile(
+                  secondary: Icon(Icons.person_search_outlined),
+                  title: Text('Richieste da sconosciuti'),
+                  subtitle: Text(
+                    'Accetta nuove richieste soltanto quando è attivo.',
+                  ),
+                  value: privacy.allowUnknownContacts,
+                  onChanged: (value) => widget.privacySettings.update(
+                    privacy.copyWith(allowUnknownContacts: value),
+                  ),
                 ),
               ),
             ),
@@ -317,58 +363,75 @@ class _SettingsPageState extends State<SettingsPage> {
                 children: [
                   Padding(
                     padding: EdgeInsets.fromLTRB(16, 20, 16, 16),
-                    child: DropdownButtonFormField<String>(
-                      key: ValueKey('app-theme'),
-                      initialValue:
-                          [
-                            'sylphy',
-                            'black',
-                            'cyan',
-                            'pink',
-                            'amoled',
-                            'white',
-                          ].contains(privacy.themeName)
-                          ? privacy.themeName
-                          : 'sylphy',
-                      decoration: InputDecoration(
-                        labelText: 'Tema di Sylphy',
-                        floatingLabelBehavior: FloatingLabelBehavior.always,
+                    child: SettingsSearchTarget(
+                      id: 'app-theme',
+                      child: DropdownButtonFormField<String>(
+                        key: ValueKey('app-theme'),
+                        initialValue:
+                            [
+                              'sylphy',
+                              'black',
+                              'cyan',
+                              'pink',
+                              'amoled',
+                              'white',
+                              'halloween',
+                            ].contains(privacy.themeName)
+                            ? privacy.themeName
+                            : 'sylphy',
+                        decoration: InputDecoration(
+                          labelText: 'Tema di Sylphy',
+                          floatingLabelBehavior: FloatingLabelBehavior.always,
+                        ),
+                        isExpanded: true,
+                        items: [
+                          DropdownMenuItem(
+                            value: 'sylphy',
+                            child: Text('Sylphy'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'black',
+                            child: Text('Black'),
+                          ),
+                          DropdownMenuItem(value: 'cyan', child: Text('Cyan')),
+                          DropdownMenuItem(value: 'pink', child: Text('Pink')),
+                          DropdownMenuItem(
+                            value: 'amoled',
+                            child: Text('AMOLED'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'white',
+                            child: Text('White'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'halloween',
+                            child: Text('Halloween'),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value != null) {
+                            widget.privacySettings.update(
+                              privacy.copyWith(themeName: value),
+                            );
+                          }
+                        },
                       ),
-                      isExpanded: true,
-                      items: [
-                        DropdownMenuItem(
-                          value: 'sylphy',
-                          child: Text('Sylphy'),
-                        ),
-                        DropdownMenuItem(value: 'black', child: Text('Black')),
-                        DropdownMenuItem(value: 'cyan', child: Text('Cyan')),
-                        DropdownMenuItem(value: 'pink', child: Text('Pink')),
-                        DropdownMenuItem(
-                          value: 'amoled',
-                          child: Text('AMOLED'),
-                        ),
-                        DropdownMenuItem(value: 'white', child: Text('White')),
-                      ],
-                      onChanged: (value) {
-                        if (value != null) {
-                          widget.privacySettings.update(
-                            privacy.copyWith(themeName: value),
-                          );
-                        }
-                      },
                     ),
                   ),
                   if (_isAndroidPlatform)
-                    SwitchListTile(
-                      key: ValueKey('incognito-keyboard'),
-                      secondary: Icon(Icons.keyboard_outlined),
-                      title: Text('Tastiera in incognito'),
-                      subtitle: Text(
-                        'Chiede a Gboard e alle tastiere compatibili di non memorizzare ciò che scrivi in chat.',
-                      ),
-                      value: privacy.incognitoKeyboard,
-                      onChanged: (value) => widget.privacySettings.update(
-                        privacy.copyWith(incognitoKeyboard: value),
+                    SettingsSearchTarget(
+                      id: 'incognito-keyboard',
+                      child: SwitchListTile(
+                        key: ValueKey('incognito-keyboard'),
+                        secondary: Icon(Icons.keyboard_outlined),
+                        title: Text('Tastiera in incognito'),
+                        subtitle: Text(
+                          'Chiede a Gboard e alle tastiere compatibili di non memorizzare ciò che scrivi in chat.',
+                        ),
+                        value: privacy.incognitoKeyboard,
+                        onChanged: (value) => widget.privacySettings.update(
+                          privacy.copyWith(incognitoKeyboard: value),
+                        ),
                       ),
                     ),
                 ],
@@ -378,12 +441,15 @@ class _SettingsPageState extends State<SettingsPage> {
             _SectionTitle('ACCESSIBILITÀ'),
             SizedBox(height: 8),
             _SettingsCard(
-              child: SwitchListTile(
-                secondary: Icon(Icons.motion_photos_off_outlined),
-                title: Text('Riduci animazioni'),
-                value: privacy.reduceMotion,
-                onChanged: (value) => widget.privacySettings.update(
-                  privacy.copyWith(reduceMotion: value),
+              child: SettingsSearchTarget(
+                id: 'reduce-motion',
+                child: SwitchListTile(
+                  secondary: Icon(Icons.motion_photos_off_outlined),
+                  title: Text('Riduci animazioni'),
+                  value: privacy.reduceMotion,
+                  onChanged: (value) => widget.privacySettings.update(
+                    privacy.copyWith(reduceMotion: value),
+                  ),
                 ),
               ),
             ),
@@ -397,18 +463,21 @@ class _SettingsPageState extends State<SettingsPage> {
             icon: Icons.screenshot_monitor_outlined,
             children: [
               _SettingsCard(
-                child: SwitchListTile(
-                  key: ValueKey('stream-proof'),
-                  secondary: Icon(Icons.screenshot_monitor_outlined),
-                  title: Text('Stream proof'),
-                  subtitle: Text(
-                    'Esclude Sylphy dalle catture e dalle condivisioni compatibili, '
-                    'lasciandolo visibile a te. Richiede Windows 10 versione 2004 o successiva. '
-                    'Verifica l’anteprima del programma di condivisione.',
-                  ),
-                  value: privacy.streamProof,
-                  onChanged: (value) => widget.privacySettings.update(
-                    privacy.copyWith(streamProof: value),
+                child: SettingsSearchTarget(
+                  id: 'stream-proof',
+                  child: SwitchListTile(
+                    key: ValueKey('stream-proof'),
+                    secondary: Icon(Icons.screenshot_monitor_outlined),
+                    title: Text('Stream proof'),
+                    subtitle: Text(
+                      'Esclude Sylphy dalle catture e dalle condivisioni compatibili, '
+                      'lasciandolo visibile a te. Richiede Windows 10 versione 2004 o successiva. '
+                      'Verifica l’anteprima del programma di condivisione.',
+                    ),
+                    value: privacy.streamProof,
+                    onChanged: (value) => widget.privacySettings.update(
+                      privacy.copyWith(streamProof: value),
+                    ),
                   ),
                 ),
               ),
@@ -449,46 +518,55 @@ class _SettingsPageState extends State<SettingsPage> {
             _SettingsCard(
               child: Column(
                 children: [
-                  SwitchListTile(
-                    key: const ValueKey('basic-logging-switch'),
-                    secondary: const Icon(Icons.receipt_long_outlined),
-                    title: const Text('Logging di base'),
-                    subtitle: const Text(
-                      'Registra eventi ed errori diagnostici dell’app. Disattivalo per sospendere anche il logging dettagliato.',
+                  SettingsSearchTarget(
+                    id: 'basic-logging-switch',
+                    child: SwitchListTile(
+                      key: const ValueKey('basic-logging-switch'),
+                      secondary: const Icon(Icons.receipt_long_outlined),
+                      title: const Text('Logging di base'),
+                      subtitle: const Text(
+                        'Registra eventi ed errori diagnostici dell’app. Disattivalo per sospendere anche il logging dettagliato.',
+                      ),
+                      value: AppLog.instance.loggingEnabled,
+                      onChanged: AppLog.instance.setLoggingEnabled,
                     ),
-                    value: AppLog.instance.loggingEnabled,
-                    onChanged: AppLog.instance.setLoggingEnabled,
                   ),
                   const Divider(height: 1),
-                  SwitchListTile(
-                    key: ValueKey('developer-logging-switch'),
-                    secondary: Icon(Icons.bug_report_outlined),
-                    title: Text('Logging dettagliato'),
-                    subtitle: Text(
-                      'Registra lifecycle, navigazione, azioni UI e chiamate al core. Testi dei messaggi, password e chiavi sono sempre esclusi.',
+                  SettingsSearchTarget(
+                    id: 'developer-logging-switch',
+                    child: SwitchListTile(
+                      key: ValueKey('developer-logging-switch'),
+                      secondary: Icon(Icons.bug_report_outlined),
+                      title: Text('Logging dettagliato'),
+                      subtitle: Text(
+                        'Registra lifecycle, navigazione, azioni UI e chiamate al core. Testi dei messaggi, password e chiavi sono sempre esclusi.',
+                      ),
+                      value:
+                          AppLog.instance.loggingEnabled &&
+                          AppLog.instance.verboseEnabled,
+                      onChanged: AppLog.instance.loggingEnabled
+                          ? AppLog.instance.setVerboseEnabled
+                          : null,
                     ),
-                    value:
-                        AppLog.instance.loggingEnabled &&
-                        AppLog.instance.verboseEnabled,
-                    onChanged: AppLog.instance.loggingEnabled
-                        ? AppLog.instance.setVerboseEnabled
-                        : null,
                   ),
                   Divider(height: 1),
-                  ListTile(
-                    leading: Icon(Icons.health_and_safety_outlined),
-                    title: Text('Esegui diagnostica'),
-                    subtitle: _diagnosticResult == null
-                        ? Text('Controlla core nativo, bootstrap e Veilid.')
-                        : Text(_diagnosticResult!),
-                    trailing: _diagnosticRunning
-                        ? SizedBox(
-                            width: 22,
-                            height: 22,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : Icon(Icons.chevron_right_rounded),
-                    onTap: _diagnosticRunning ? null : _runDiagnostics,
+                  SettingsSearchTarget(
+                    id: 'run-diagnostics',
+                    child: ListTile(
+                      leading: Icon(Icons.health_and_safety_outlined),
+                      title: Text('Esegui diagnostica'),
+                      subtitle: _diagnosticResult == null
+                          ? Text('Controlla core nativo, bootstrap e Veilid.')
+                          : Text(_diagnosticResult!),
+                      trailing: _diagnosticRunning
+                          ? SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : Icon(Icons.chevron_right_rounded),
+                      onTap: _diagnosticRunning ? null : _runDiagnostics,
+                    ),
                   ),
                 ],
               ),
@@ -505,15 +583,21 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
                 ),
                 Spacer(),
-                IconButton(
-                  tooltip: 'Copia log',
-                  onPressed: _copyLogs,
-                  icon: Icon(Icons.copy_all_outlined),
+                SettingsSearchTarget(
+                  id: 'copy-logs',
+                  child: IconButton(
+                    tooltip: 'Copia log',
+                    onPressed: _copyLogs,
+                    icon: Icon(Icons.copy_all_outlined),
+                  ),
                 ),
-                IconButton(
-                  tooltip: 'Cancella log',
-                  onPressed: AppLog.instance.clear,
-                  icon: Icon(Icons.delete_sweep_outlined),
+                SettingsSearchTarget(
+                  id: 'clear-logs',
+                  child: IconButton(
+                    tooltip: 'Cancella log',
+                    onPressed: AppLog.instance.clear,
+                    icon: Icon(Icons.delete_sweep_outlined),
+                  ),
                 ),
               ],
             ),
@@ -531,14 +615,215 @@ class _SettingsPageState extends State<SettingsPage> {
           ],
         ),
       ];
+      final entries = <SettingsSearchEntry>[
+        const SettingsSearchEntry(
+          'export-account',
+          'account',
+          'Collega un altro dispositivo',
+          'backup esporta trasferimento file cifrato condivisione qr computer telefono account',
+        ),
+        const SettingsSearchEntry(
+          'import-account',
+          'account',
+          'Usa un account esistente',
+          'importa ripristina backup identita contatti cronologia trasferimento',
+        ),
+        if (security != null) ...[
+          const SettingsSearchEntry(
+            'passphrase-encryption',
+            'security',
+            'Cifratura dei dati con passphrase',
+            'password protezione dati locali sicurezza',
+          ),
+          const SettingsSearchEntry(
+            'close-memory-cleanup',
+            'security',
+            'Pulizia RAM alla chiusura sempre attiva',
+            'memoria cache chiavi sessioni',
+          ),
+          if (security.enabled) ...[
+            const SettingsSearchEntry(
+              'automatic-lock-timeout',
+              'security',
+              'Blocco per inattività',
+              'automatico tempo secondi minuti sicurezza',
+            ),
+            const SettingsSearchEntry(
+              'automatic-lock-background',
+              'security',
+              'Blocca in background',
+              'automatico app finestra sicurezza',
+            ),
+            if (_isAndroidPlatform)
+              const SettingsSearchEntry(
+                'automatic-lock-screen-off',
+                'security',
+                'Blocca allo spegnimento dello schermo',
+                'automatico telefono sicurezza',
+              ),
+            const SettingsSearchEntry(
+              'wipe-and-lock',
+              'security',
+              'Pulisci RAM e blocca',
+              'memoria buffer cache chiavi sessioni sicurezza',
+            ),
+          ],
+        ],
+        if (widget.identityService != null) ...[
+          const SettingsSearchEntry(
+            'identity-rotation-interval',
+            'privacy',
+            'Cambio automatico dell’ID',
+            'identita sylphy intervallo rotazione ore giorni',
+          ),
+          const SettingsSearchEntry(
+            'rotate-identity-now',
+            'privacy',
+            'Cambia ID adesso',
+            'identita sylphy manuale rotazione codice',
+          ),
+        ],
+        if (_isAndroidPlatform || supportsStreamProof)
+          const SettingsSearchEntry(
+            'allow-screenshots',
+            'privacy',
+            'Consenti screenshot dell’app',
+            'catture registrazione schermo',
+          ),
+        const SettingsSearchEntry(
+          'share-display-name',
+          'privacy',
+          'Mostra il nome profilo',
+          'privacy condividi contatti',
+        ),
+        const SettingsSearchEntry(
+          'share-profile-photo',
+          'privacy',
+          'Mostra la foto profilo',
+          'privacy condividi immagine avatar contatti',
+        ),
+        const SettingsSearchEntry(
+          'show-read-receipts',
+          'privacy',
+          'Mostra spunte ricevute',
+          'messaggi conferme lettura letto ricevute',
+        ),
+        const SettingsSearchEntry(
+          'unknown-contacts',
+          'privacy',
+          'Richieste da sconosciuti',
+          'contatti privacy accetta nuove richieste',
+        ),
+        const SettingsSearchEntry(
+          'app-theme',
+          'appearance',
+          'Tema di Sylphy',
+          'aspetto colori black cyan pink amoled white halloween pipistrelli arancione viola scuro chiaro',
+        ),
+        if (_isAndroidPlatform)
+          const SettingsSearchEntry(
+            'incognito-keyboard',
+            'appearance',
+            'Tastiera in incognito',
+            'gboard scrittura memorizzare apprendimento',
+          ),
+        const SettingsSearchEntry(
+          'reduce-motion',
+          'appearance',
+          'Riduci animazioni',
+          'accessibilita movimento aspetto',
+        ),
+        if (supportsStreamProof)
+          const SettingsSearchEntry(
+            'stream-proof',
+            'screen',
+            'Stream proof',
+            'condivisione schermo windows catture screenshot protezione',
+          ),
+        if (_isAndroidPlatform) ...[
+          const SettingsSearchEntry(
+            'message-notifications',
+            'notifications',
+            'Notifiche dei messaggi',
+            'avvisi background fissati attiva disattiva silenzia',
+          ),
+          const SettingsSearchEntry(
+            'notification-sound',
+            'notifications',
+            'Suono delle notifiche',
+            'audio suoneria volume',
+          ),
+          const SettingsSearchEntry(
+            'notification-vibration',
+            'notifications',
+            'Vibrazione delle notifiche',
+            'vibra avvisi telefono',
+          ),
+          const SettingsSearchEntry(
+            'android-notification-settings',
+            'notifications',
+            'Impostazioni notifiche Android',
+            'permessi autorizzazioni schermata blocco silenzioso non disturbare',
+          ),
+        ],
+        if (updates?.supported == true) ...[
+          const SettingsSearchEntry(
+            'automatic-updates',
+            'updates',
+            'Aggiornamenti automatici',
+            'release github controllo avvio',
+          ),
+          const SettingsSearchEntry(
+            'check-app-updates',
+            'updates',
+            'Controlla aggiornamenti',
+            'versione release github scarica installa disponibile',
+          ),
+        ],
+        const SettingsSearchEntry(
+          'basic-logging-switch',
+          'diagnostics',
+          'Logging di base',
+          'diagnostica log eventi errori',
+        ),
+        const SettingsSearchEntry(
+          'developer-logging-switch',
+          'diagnostics',
+          'Logging dettagliato',
+          'diagnostica log developer options lifecycle navigazione',
+        ),
+        const SettingsSearchEntry(
+          'run-diagnostics',
+          'diagnostics',
+          'Esegui diagnostica',
+          'core nativo bootstrap rete veilid controlli',
+        ),
+        const SettingsSearchEntry(
+          'copy-logs',
+          'diagnostics',
+          'Copia log',
+          'diagnostica esporta appunti',
+        ),
+        const SettingsSearchEntry(
+          'clear-logs',
+          'diagnostics',
+          'Cancella log',
+          'diagnostica elimina pulisci',
+        ),
+      ];
+      final searching = _query.trim().isNotEmpty;
+      final matches = searching
+          ? entries.where((entry) => entry.matches(_query)).toList()
+          : <SettingsSearchEntry>[];
       final selected = sections
           .where((section) => section.id == _selectedSection)
           .firstOrNull;
       final visible = sections
           .where(
-            (section) => '${section.title} ${section.detail}'
-                .toLowerCase()
-                .contains(_query.toLowerCase()),
+            (section) => matchesSettingsSearch(
+              '${section.title} ${section.detail}',
+              _query,
+            ),
           )
           .toList();
       return PopScope(
@@ -559,15 +844,27 @@ class _SettingsPageState extends State<SettingsPage> {
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 800),
               child: selected != null
-                  ? ListView(
-                      key: ValueKey('settings-content-${selected.id}'),
-                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
-                      children: selected.children,
+                  ? SettingsSearchScope(
+                      anchors: _searchAnchors,
+                      selectedId: _selectedSetting,
+                      child: SingleChildScrollView(
+                        key: ValueKey('settings-content-${selected.id}'),
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: selected.children,
+                        ),
+                      ),
                     )
                   : ListView(
                       key: const ValueKey('settings-index'),
                       padding: const EdgeInsets.all(16),
                       children: [
+                        _SettingsProfileHeader(
+                          profile: widget.profile,
+                          onEdit: widget.onEditProfile,
+                        ),
+                        const SizedBox(height: 24),
                         const _SectionTitle('RETE E CONNESSIONE'),
                         const SizedBox(height: 8),
                         _SettingsCard(
@@ -590,18 +887,68 @@ class _SettingsPageState extends State<SettingsPage> {
                         TextField(
                           key: const ValueKey('settings-search'),
                           controller: _search,
-                          decoration: const InputDecoration(
+                          decoration: InputDecoration(
                             prefixIcon: Icon(Icons.search),
                             labelText: 'Cerca nelle impostazioni',
+                            suffixIcon: _query.isEmpty
+                                ? null
+                                : IconButton(
+                                    tooltip: 'Cancella ricerca',
+                                    onPressed: () {
+                                      _search.clear();
+                                      setState(() => _query = '');
+                                    },
+                                    icon: const Icon(Icons.close),
+                                  ),
                           ),
                           onChanged: (value) => setState(() => _query = value),
                         ),
                         const SizedBox(height: 16),
-                        if (visible.isEmpty)
+                        if (searching && matches.isNotEmpty) ...[
+                          const _SectionTitle('IMPOSTAZIONI TROVATE'),
+                          const SizedBox(height: 8),
+                          for (final entry in matches)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 10),
+                              child: _SettingsCard(
+                                child: ListTile(
+                                  key: ValueKey('settings-result-${entry.id}'),
+                                  leading: Icon(
+                                    sections
+                                        .firstWhere(
+                                          (section) =>
+                                              section.id == entry.sectionId,
+                                        )
+                                        .icon,
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.primary,
+                                  ),
+                                  title: Text(entry.title),
+                                  subtitle: Text(
+                                    sections
+                                        .firstWhere(
+                                          (section) =>
+                                              section.id == entry.sectionId,
+                                        )
+                                        .title,
+                                  ),
+                                  trailing: const Icon(
+                                    Icons.chevron_right_rounded,
+                                  ),
+                                  onTap: () => _openSection(
+                                    entry.sectionId,
+                                    settingId: entry.id,
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
+                        if (visible.isEmpty && matches.isEmpty)
                           const Padding(
                             padding: EdgeInsets.all(24),
                             child: Text(
-                              'Nessuna sezione corrispondente. Prova un’altra parola.',
+                              'Nessuna impostazione trovata. Prova un’altra parola.',
                             ),
                           ),
                         for (final section in visible)
@@ -619,10 +966,7 @@ class _SettingsPageState extends State<SettingsPage> {
                                 trailing: const Icon(
                                   Icons.chevron_right_rounded,
                                 ),
-                                onTap: () {
-                                  FocusScope.of(context).unfocus();
-                                  setState(() => _selectedSection = section.id);
-                                },
+                                onTap: () => _openSection(section.id),
                               ),
                             ),
                           ),
@@ -649,6 +993,87 @@ class _SettingsSection {
   final String detail;
   final IconData icon;
   final List<Widget> children;
+}
+
+class _SettingsProfileHeader extends StatelessWidget {
+  const _SettingsProfileHeader({required this.profile, required this.onEdit});
+
+  final UserProfile profile;
+  final VoidCallback onEdit;
+
+  @override
+  Widget build(BuildContext context) => _SettingsCard(
+    child: InkWell(
+      key: const ValueKey('settings-profile'),
+      onTap: onEdit,
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    profile.displayName,
+                    key: const ValueKey('settings-profile-name'),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text('Modifica nome e foto'),
+                ],
+              ),
+            ),
+            const SizedBox(width: 16),
+            Tooltip(
+              message: 'Modifica foto profilo',
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  CircleAvatar(
+                    key: const ValueKey('settings-profile-avatar'),
+                    radius: 30,
+                    backgroundColor: Theme.of(
+                      context,
+                    ).colorScheme.primaryContainer,
+                    backgroundImage: profile.photoBytes == null
+                        ? null
+                        : MemoryImage(profile.photoBytes!),
+                    child: profile.photoBytes == null
+                        ? Text(
+                            profile.initials,
+                            style: const TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          )
+                        : null,
+                  ),
+                  Positioned(
+                    right: -3,
+                    bottom: -3,
+                    child: CircleAvatar(
+                      radius: 12,
+                      backgroundColor: Theme.of(context).colorScheme.primary,
+                      child: Icon(
+                        Icons.photo_camera_outlined,
+                        size: 14,
+                        color: Theme.of(context).colorScheme.onPrimary,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 class _SettingsCard extends StatelessWidget {

@@ -8,6 +8,10 @@ in [settings-and-account-transfer.md](settings-and-account-transfer.md).
 - Il titolo della chat privata apre il profilo del contatto. Su desktop ampio
   il pannello dei dettagli si chiude con la X e si riapre dal titolo o dal pulsante
   del profilo; sulle finestre più strette i dettagli si aprono in un foglio.
+- Le foto dei contatti già decodificate restano visibili durante i refresh,
+  anche quando il bridge ricrea i buffer con gli stessi byte. Una foto diversa
+  viene decodificata con i limiti esistenti; rimozioni e contenuti non validi
+  continuano a mostrare il fallback, senza conservare la foto precedente.
 - I messaggi fissati mostrano una puntina nella bolla e restano ricercabili.
 - “Mostra spunte ricevute” controlla `send_read_receipts`: disattivandolo gli altri
   non ricevono conferme di lettura. Le proprie spunte di consegna restano visibili.
@@ -15,8 +19,13 @@ in [settings-and-account-transfer.md](settings-and-account-transfer.md).
 - `incognito_keyboard` imposta `enableIMEPersonalizedLearning: false` nel campo
   dei messaggi. Gboard e altre tastiere compatibili possono rispettare questa
   richiesta; la preferenza non forza il comportamento di tastiere esterne.
-- `theme_name` seleziona Sylphy, Black, Cyan, Pink, AMOLED o White. Tema e preferenza
+- `theme_name` seleziona Sylphy, Black, Cyan, Pink, AMOLED, White o Halloween. Tema e preferenza
   della tastiera sono salvati nel record cifrato delle impostazioni.
+- Halloween (`halloween`) usa superfici scure tendenti al viola, accenti arancioni
+  e uno sfondo uniforme con cinque pipistrelli discreti. Il disegno è locale,
+  statico e adattabile alle dimensioni dello schermo; non intercetta gesti né
+  aggiunge animazioni. È visibile anche nelle chat, con bolle e controlli in primo
+  piano. Cercare “Halloween” o “pipistrelli” nelle impostazioni porta al tema.
 - Le notifiche Android in primo piano hanno un tag per conversazione e vengono
   cancellate dopo la lettura. La notifica riepilogativa del servizio viene rimossa
   quando non rimangono messaggi non letti; la notifica del servizio resta attiva.

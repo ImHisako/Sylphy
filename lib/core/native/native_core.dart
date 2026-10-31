@@ -125,6 +125,13 @@ abstract interface class NativeActivityEventsApi {
   Stream<void> get activityEvents;
 }
 
+abstract interface class NativeConversationNotificationApi {
+  Future<NativeCoreResponse> setConversationMutedInBackground(
+    String conversationId, {
+    required bool muted,
+  });
+}
+
 abstract interface class NativeAttachmentDataApi {
   Future<NativeCoreResponse> readAttachmentInBackground(
     String conversationId,
@@ -152,6 +159,7 @@ class NativeCoreClient
         NativeCoreGroupApi,
         NativeCoreMessagePageApi,
         NativeActivityEventsApi,
+        NativeConversationNotificationApi,
         NativeAttachmentDataApi,
         NativeAccountTransferApi {
   NativeCoreClient._(this._call, this._freeString, this.abiVersion);
@@ -413,6 +421,16 @@ class NativeCoreClient
     ...Map<String, Object>.from(request),
     if (request['command'] == 'search_messages') 'command': 'read_search',
   });
+
+  @override
+  Future<NativeCoreResponse> setConversationMutedInBackground(
+    String conversationId, {
+    required bool muted,
+  }) => _callInBackground({
+    'command': 'set_conversation_muted',
+    'conversation_id': conversationId,
+    'muted': muted,
+  }, priority: true);
 
   @override
   Future<NativeCoreResponse> readAttachmentInBackground(

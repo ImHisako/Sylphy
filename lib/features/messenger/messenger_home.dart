@@ -14,6 +14,7 @@ import '../../core/native/native_core.dart';
 import '../../core/identity/identity_service.dart';
 import '../../core/profile/user_profile.dart';
 import '../../core/privacy/privacy_settings.dart';
+import '../../core/privacy/halloween_background.dart';
 import '../../core/platform/message_notifications.dart';
 import '../../core/platform/attachment_downloads.dart';
 import '../../core/veilid/veilid_service.dart';
@@ -295,11 +296,13 @@ class _MessengerHomeState extends State<MessengerHome>
     if (!force && signature == _conversationSignature) return;
     final hasNewMessage = conversations.any(
       (conversation) =>
+          !conversation.isMuted &&
           !MessageNotifications.isConversationVisible(conversation.id) &&
           conversation.unreadCount > (_unreadCounts[conversation.id] ?? 0),
     );
     final newPin = conversations.any(
       (conversation) =>
+          !conversation.isMuted &&
           !MessageNotifications.isConversationVisible(conversation.id) &&
           conversation.pinnedMessageIds.any(
             (id) => !_conversations
@@ -314,7 +317,8 @@ class _MessengerHomeState extends State<MessengerHome>
               .where((old) => old.id == conversation.id)
               .any((old) => old.pinnedMessageIds.contains(id)),
         );
-        if (!MessageNotifications.isConversationVisible(conversation.id) &&
+        if (!conversation.isMuted &&
+            !MessageNotifications.isConversationVisible(conversation.id) &&
             (conversation.unreadCount > (_unreadCounts[conversation.id] ?? 0) ||
                 pin)) {
           unawaited(
@@ -329,7 +333,8 @@ class _MessengerHomeState extends State<MessengerHome>
     unawaited(
       const MessageNotifications().clearSummaryIfRead(
         hasUnreadMessages: conversations.any(
-          (conversation) => conversation.unreadCount > 0,
+          (conversation) =>
+              !conversation.isMuted && conversation.unreadCount > 0,
         ),
       ),
     );
@@ -558,6 +563,10 @@ class _MessengerHomeState extends State<MessengerHome>
           privacySettings: widget.privacySettings,
           profile: widget.profile,
           onAccountImported: widget.onAccountImported,
+          onEditProfile: () {
+            Navigator.of(context).pop();
+            widget.onEditProfile();
+          },
         ),
       ),
     );
@@ -696,6 +705,12 @@ class _DesktopMessenger extends StatelessWidget {
                       conversations: conversations,
                       activeConversationId: activeConversation?.id,
                       onSelected: onConversationSelected,
+                      onActions: (conversation) => _showConversationActions(
+                        context,
+                        bridge,
+                        conversation,
+                        onChanged,
+                      ),
                     )
                   : _ConversationSidebar(
                       veilidSnapshot: veilidService.snapshot,
@@ -703,6 +718,12 @@ class _DesktopMessenger extends StatelessWidget {
                       activeConversationId: activeConversation?.id,
                       onConversationSelected: onConversationSelected,
                       onAddContact: onAddContact,
+                      onActions: (conversation) => _showConversationActions(
+                        context,
+                        bridge,
+                        conversation,
+                        onChanged,
+                      ),
                     ),
             ),
             VerticalDivider(width: 1),
@@ -988,11 +1009,13 @@ class _ConversationRail extends StatelessWidget {
     required this.conversations,
     required this.activeConversationId,
     required this.onSelected,
+    required this.onActions,
   });
 
   final List<Conversation> conversations;
   final String? activeConversationId;
   final Future<void> Function(String) onSelected;
+  final ValueChanged<Conversation> onActions;
 
   @override
   Widget build(BuildContext context) => Material(
@@ -1007,12 +1030,16 @@ class _ConversationRail extends StatelessWidget {
         return Tooltip(
           message: conversation.name,
           child: Semantics(
-            label: conversation.name,
+            label: conversation.isMuted
+                ? '${conversation.name}, notifiche silenziate'
+                : conversation.name,
             selected: selected,
             button: true,
             child: InkWell(
               key: ValueKey('conversation-rail-${conversation.id}'),
               onTap: () => onSelected(conversation.id),
+              onLongPress: () => onActions(conversation),
+              onSecondaryTap: () => onActions(conversation),
               child: Container(
                 padding: EdgeInsets.symmetric(vertical: 10),
                 decoration: BoxDecoration(
@@ -1038,9 +1065,29 @@ class _ConversationRail extends StatelessWidget {
                           ? '99+'
                           : '${conversation.unreadCount}',
                     ),
-                    child: _ContactAvatar(
-                      conversation: conversation,
-                      radius: 23,
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        _ContactAvatar(conversation: conversation, radius: 23),
+                        if (conversation.isMuted)
+                          Positioned(
+                            right: -4,
+                            bottom: -4,
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                color: Theme.of(context).colorScheme.surface,
+                                shape: BoxShape.circle,
+                              ),
+                              child: Padding(
+                                padding: EdgeInsets.all(3),
+                                child: Icon(
+                                  Icons.notifications_off_outlined,
+                                  size: 14,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
                   ),
                 ),
@@ -1060,6 +1107,7 @@ class _ConversationSidebar extends StatefulWidget {
     required this.activeConversationId,
     required this.onConversationSelected,
     required this.onAddContact,
+    required this.onActions,
   });
 
   final List<Conversation> conversations;
@@ -1067,6 +1115,7 @@ class _ConversationSidebar extends StatefulWidget {
   final String? activeConversationId;
   final Future<void> Function(String conversationId) onConversationSelected;
   final VoidCallback onAddContact;
+  final ValueChanged<Conversation> onActions;
 
   @override
   State<_ConversationSidebar> createState() => _ConversationSidebarState();
@@ -1152,6 +1201,7 @@ class _ConversationSidebarState extends State<_ConversationSidebar> {
                       final conversation = conversations[index];
                       return _ConversationTile(
                         conversation: conversation,
+                        onLongPress: () => widget.onActions(conversation),
                         isSelected:
                             conversation.id == widget.activeConversationId,
                         onTap: () =>
@@ -1281,6 +1331,12 @@ class _MobileConversationList extends StatelessWidget {
             final conversation = conversations[index - 2];
             return _ConversationTile(
               conversation: conversation,
+              onLongPress: () => _showConversationActions(
+                context,
+                bridge,
+                conversation,
+                onChanged,
+              ),
               onTap: () {
                 unawaited(onConversationSelected(conversation.id));
                 Navigator.of(context)
@@ -1444,6 +1500,17 @@ class _MobileChatScreenState extends State<_MobileChatScreen> {
         conversationRail: _ConversationRail(
           conversations: widget.conversations,
           activeConversationId: conversation.id,
+          onActions: (selected) async {
+            final deleted = await _showConversationActions(
+              context,
+              bridge,
+              selected,
+              onChanged,
+            );
+            if (deleted && selected.id == conversation.id && context.mounted) {
+              Navigator.of(context).pop();
+            }
+          },
           onSelected: (id) async {
             if (id == conversation.id) {
               _chatPaneKey.currentState?._returnToChannels();
@@ -2803,64 +2870,67 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
             ],
           ),
         ),
-        child: Column(
-          children: [
-            if (widget.showHeader)
-              _ChatHeader(
-                conversation: widget.conversation,
-                bridge: widget.bridge,
-                onChanged: widget.onChanged,
-                onOpenProfile: widget.onToggleDetails,
-                onOpenGroup: widget.conversation.isGroup && _management != null
-                    ? _manageGroup
-                    : null,
-              ),
-            Expanded(
-              child: _supportsChannels && !_channelsLoaded
-                  ? Center(
-                      child: _channelLoadFailed
-                          ? TextButton.icon(
-                              onPressed: _loadChannels,
-                              icon: Icon(Icons.refresh_rounded),
-                              label: Text('Riprova a caricare i canali'),
-                            )
-                          : CircularProgressIndicator(),
-                    )
-                  : !_hasChannelList
-                  ? messagePane
-                  : widget.showHeader
-                  ? Row(
-                      children: [
-                        SizedBox(width: 280, child: _buildChannelList()),
-                        VerticalDivider(width: 1),
-                        Expanded(
-                          child: _channelSelected
-                              ? messagePane
-                              : Center(
-                                  child: Padding(
-                                    padding: EdgeInsets.all(24),
-                                    child: Text(
-                                      'Seleziona un canale per iniziare a messaggiare',
-                                      textAlign: TextAlign.center,
+        child: HalloweenBackground(
+          child: Column(
+            children: [
+              if (widget.showHeader)
+                _ChatHeader(
+                  conversation: widget.conversation,
+                  bridge: widget.bridge,
+                  onChanged: widget.onChanged,
+                  onOpenProfile: widget.onToggleDetails,
+                  onOpenGroup:
+                      widget.conversation.isGroup && _management != null
+                      ? _manageGroup
+                      : null,
+                ),
+              Expanded(
+                child: _supportsChannels && !_channelsLoaded
+                    ? Center(
+                        child: _channelLoadFailed
+                            ? TextButton.icon(
+                                onPressed: _loadChannels,
+                                icon: Icon(Icons.refresh_rounded),
+                                label: Text('Riprova a caricare i canali'),
+                              )
+                            : CircularProgressIndicator(),
+                      )
+                    : !_hasChannelList
+                    ? messagePane
+                    : widget.showHeader
+                    ? Row(
+                        children: [
+                          SizedBox(width: 280, child: _buildChannelList()),
+                          VerticalDivider(width: 1),
+                          Expanded(
+                            child: _channelSelected
+                                ? messagePane
+                                : Center(
+                                    child: Padding(
+                                      padding: EdgeInsets.all(24),
+                                      child: Text(
+                                        'Seleziona un canale per iniziare a messaggiare',
+                                        textAlign: TextAlign.center,
+                                      ),
                                     ),
                                   ),
-                                ),
-                        ),
-                      ],
-                    )
-                  : _channelSelected
-                  ? messagePane
-                  : Row(
-                      children: [
-                        if (widget.conversationRail != null) ...[
-                          SizedBox(width: 76, child: widget.conversationRail),
-                          VerticalDivider(width: 1),
+                          ),
                         ],
-                        Expanded(child: _buildChannelList()),
-                      ],
-                    ),
-            ),
-          ],
+                      )
+                    : _channelSelected
+                    ? messagePane
+                    : Row(
+                        children: [
+                          if (widget.conversationRail != null) ...[
+                            SizedBox(width: 76, child: widget.conversationRail),
+                            VerticalDivider(width: 1),
+                          ],
+                          Expanded(child: _buildChannelList()),
+                        ],
+                      ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -3560,11 +3630,13 @@ class _ConversationTile extends StatelessWidget {
   const _ConversationTile({
     required this.conversation,
     required this.onTap,
+    required this.onLongPress,
     this.isSelected = false,
   });
 
   final Conversation conversation;
   final VoidCallback onTap;
+  final VoidCallback onLongPress;
   final bool isSelected;
 
   @override
@@ -3576,7 +3648,10 @@ class _ConversationTile extends StatelessWidget {
       color: backgroundColor,
       borderRadius: BorderRadius.circular(16),
       child: InkWell(
+        key: ValueKey('conversation-tile-${conversation.id}'),
         onTap: onTap,
+        onLongPress: onLongPress,
+        onSecondaryTap: onLongPress,
         borderRadius: BorderRadius.circular(16),
         child: Padding(
           padding: EdgeInsets.all(11),
@@ -3602,6 +3677,17 @@ class _ConversationTile extends StatelessWidget {
                           ),
                         ),
                         SizedBox(width: 8),
+                        if (conversation.isMuted) ...[
+                          Tooltip(
+                            message: 'Notifiche silenziate',
+                            child: Icon(
+                              Icons.notifications_off_outlined,
+                              size: 16,
+                              color: AppPalette.color(0xFF9299A5),
+                            ),
+                          ),
+                          SizedBox(width: 6),
+                        ],
                         Text(
                           _relativeTime(conversation.lastActivity),
                           style: TextStyle(
@@ -5060,6 +5146,95 @@ Future<void> _showSecuritySheet(
   );
 }
 
+enum _ConversationAction { mute, delete }
+
+Future<bool> _showConversationActions(
+  BuildContext context,
+  SecureMessagingBridge bridge,
+  Conversation conversation,
+  VoidCallback onChanged,
+) async {
+  final action = await showModalBottomSheet<_ConversationAction>(
+    context: context,
+    showDragHandle: true,
+    builder: (sheetContext) => SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: EdgeInsets.fromLTRB(24, 0, 24, 12),
+            child: Text(
+              conversation.name,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(sheetContext).textTheme.titleMedium,
+            ),
+          ),
+          if (bridge is ConversationNotificationBridge)
+            ListTile(
+              key: ValueKey('toggle-conversation-mute'),
+              leading: Icon(
+                conversation.isMuted
+                    ? Icons.notifications_active_outlined
+                    : Icons.notifications_off_outlined,
+              ),
+              title: Text(
+                conversation.isMuted ? 'Riattiva notifiche' : 'Silenzia chat',
+              ),
+              onTap: () =>
+                  Navigator.of(sheetContext).pop(_ConversationAction.mute),
+            ),
+          ListTile(
+            key: ValueKey('delete-conversation-action'),
+            leading: Icon(
+              Icons.delete_outline_rounded,
+              color: Theme.of(sheetContext).colorScheme.error,
+            ),
+            title: Text(
+              'Cancella chat',
+              style: TextStyle(color: Theme.of(sheetContext).colorScheme.error),
+            ),
+            onTap: () =>
+                Navigator.of(sheetContext).pop(_ConversationAction.delete),
+          ),
+          SizedBox(height: 8),
+        ],
+      ),
+    ),
+  );
+  if (action == null || !context.mounted) return false;
+  if (action == _ConversationAction.delete) {
+    final deleted = await _confirmDeleteConversation(
+      context,
+      bridge,
+      conversation,
+    );
+    if (deleted) onChanged();
+    return deleted;
+  }
+  try {
+    await (bridge as ConversationNotificationBridge).setConversationMuted(
+      conversation.id,
+      muted: !conversation.isMuted,
+    );
+    if (!conversation.isMuted) {
+      await const MessageNotifications().clearConversation(conversation.id);
+    }
+    onChanged();
+  } on Object {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Impossibile aggiornare le notifiche della chat. Riprova.',
+          ),
+        ),
+      );
+    }
+  }
+  return false;
+}
+
 Future<bool> _confirmDeleteConversation(
   BuildContext context,
   SecureMessagingBridge bridge,
@@ -5092,11 +5267,12 @@ Future<bool> _confirmDeleteConversation(
   }
   try {
     await bridge.deleteConversation(conversation.id);
+    await const MessageNotifications().clearConversation(conversation.id);
     return true;
-  } on SecureMessagingException catch (error) {
+  } on Object {
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Cancellazione non riuscita (${error.code}).')),
+        SnackBar(content: Text('Cancellazione non riuscita. Riprova.')),
       );
     }
     return false;
@@ -5144,7 +5320,7 @@ String _signatureForConversations(
 ) => conversations
     .map(
       (item) =>
-          '${item.id}|${item.name}|${item.initials}|${item.accentValue}|${Object.hashAll(item.avatarBytes ?? <int>[])}|${item.description}|${item.fingerprint}|${item.isAdmin}|${item.lastActivity.microsecondsSinceEpoch}|${item.lastMessage}|${item.unreadCount}|${item.safety.name}|${item.isOnline}|${item.type.name}|${item.memberCount}|${item.canSendMessages}|${item.groupRevision}|${item.pinnedMessageIds.join(",")}',
+          '${item.id}|${item.name}|${item.initials}|${item.accentValue}|${Object.hashAll(item.avatarBytes ?? <int>[])}|${item.description}|${item.fingerprint}|${item.isAdmin}|${item.lastActivity.microsecondsSinceEpoch}|${item.lastMessage}|${item.unreadCount}|${item.isMuted}|${item.safety.name}|${item.isOnline}|${item.type.name}|${item.memberCount}|${item.canSendMessages}|${item.groupRevision}|${item.pinnedMessageIds.join(",")}',
     )
     .join('\n');
 

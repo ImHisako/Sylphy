@@ -2,8 +2,21 @@
 
 ## Navigazione
 
-Le impostazioni mostrano lo stato della rete e il comando di riconnessione sopra
-l’indice ricercabile. Le pagine sono dedicate ad account e dispositivi, sicurezza
+Le impostazioni mostrano il nome del profilo a sinistra e la foto circolare a
+destra, sopra lo stato della rete. Toccare la foto o la scheda apre la modifica
+esistente di nome e immagine; salvare aggiorna il profilo locale e quello
+condiviso secondo le preferenze di privacy. Senza foto vengono mostrate le
+iniziali. Annullare la modifica conserva il profilo precedente.
+
+Lo stato della rete e il comando di riconnessione precedono l’indice ricercabile.
+La ricerca trova le singole impostazioni per titolo e parole correlate, ignora
+maiuscole, accenti e ordine delle parole e rispetta le funzionalità disponibili
+sulla piattaforma. Toccare un risultato apre la categoria e porta il controllo
+corrispondente in vista, evidenziandolo senza modificarne il valore. Indietro
+conserva la ricerca; il pulsante di cancellazione ripristina l’indice completo.
+Le categorie restano ricercabili insieme alle singole voci.
+
+Le pagine sono dedicate ad account e dispositivi, sicurezza
 locale, privacy del profilo, aspetto, aggiornamenti e diagnostica. Privacy del
 profilo raccoglie anche messaggi e spunte e contatti e richieste; Aspetto include
 le opzioni di accessibilità insieme a tema e tastiera. Le sezioni

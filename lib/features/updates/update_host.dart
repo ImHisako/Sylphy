@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import '../settings/settings_search.dart';
 
 import '../../core/updates/app_updates.dart';
 
@@ -246,45 +247,51 @@ class UpdateSettings extends StatelessWidget {
     return Card(
       child: Column(
         children: [
-          SwitchListTile(
-            title: const Text('Aggiornamenti automatici'),
-            subtitle: const Text(
-              'Controlla le release su GitHub all’avvio e ogni 6 ore. Download e installazione richiedono conferma.',
+          SettingsSearchTarget(
+            id: 'automatic-updates',
+            child: SwitchListTile(
+              title: const Text('Aggiornamenti automatici'),
+              subtitle: const Text(
+                'Controlla le release su GitHub all’avvio e ogni 6 ore. Download e installazione richiedono conferma.',
+              ),
+              value: controller.automatic,
+              onChanged: controller.current == null
+                  ? null
+                  : controller.setAutomatic,
             ),
-            value: controller.automatic,
-            onChanged: controller.current == null
-                ? null
-                : controller.setAutomatic,
           ),
-          ListTile(
-            key: const ValueKey('check-app-updates'),
-            leading: const Icon(Icons.system_update_alt_rounded),
-            title: Text(
-              controller.available == null
-                  ? 'Controlla aggiornamenti'
-                  : 'Apri aggiornamento disponibile',
+          SettingsSearchTarget(
+            id: 'check-app-updates',
+            child: ListTile(
+              key: const ValueKey('check-app-updates'),
+              leading: const Icon(Icons.system_update_alt_rounded),
+              title: Text(
+                controller.available == null
+                    ? 'Controlla aggiornamenti'
+                    : 'Apri aggiornamento disponibile',
+              ),
+              subtitle: Text(
+                controller.message ??
+                    (controller.current == null
+                        ? 'Release GitHub ufficiali'
+                        : 'Versione ${controller.current!.version} (${controller.current!.build})'),
+              ),
+              trailing: controller.busy
+                  ? const SizedBox.square(
+                      dimension: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.chevron_right),
+              onTap: controller.busy
+                  ? null
+                  : () {
+                      if (controller.available != null) {
+                        controller.showAvailable();
+                      } else {
+                        unawaited(controller.check(manual: true));
+                      }
+                    },
             ),
-            subtitle: Text(
-              controller.message ??
-                  (controller.current == null
-                      ? 'Release GitHub ufficiali'
-                      : 'Versione ${controller.current!.version} (${controller.current!.build})'),
-            ),
-            trailing: controller.busy
-                ? const SizedBox.square(
-                    dimension: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.chevron_right),
-            onTap: controller.busy
-                ? null
-                : () {
-                    if (controller.available != null) {
-                      controller.showAvailable();
-                    } else {
-                      unawaited(controller.check(manual: true));
-                    }
-                  },
           ),
         ],
       ),

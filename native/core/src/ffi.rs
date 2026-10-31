@@ -176,6 +176,10 @@ enum CoreRequest {
     DeleteConversation {
         conversation_id: String,
     },
+    SetConversationMuted {
+        conversation_id: String,
+        muted: bool,
+    },
     SetContactVerified {
         conversation_id: String,
         verified: bool,
@@ -709,6 +713,14 @@ fn dispatch_request(request: CoreRequest) -> Result<CoreResponse, CoreError> {
             ok: true,
             code: "ok",
             data: messaging_adapter::delete_conversation(&conversation_id)?,
+        }),
+        CoreRequest::SetConversationMuted {
+            conversation_id,
+            muted,
+        } => Ok(CoreResponse {
+            ok: true,
+            code: "ok",
+            data: messaging_adapter::set_conversation_muted(&conversation_id, muted)?,
         }),
         CoreRequest::SetContactVerified {
             conversation_id,

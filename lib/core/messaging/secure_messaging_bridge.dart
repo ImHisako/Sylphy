@@ -43,6 +43,14 @@ abstract interface class InboxRefreshingBridge {
   Future<int> refreshInbox();
 }
 
+/// Notification preferences are local to this device and survive restarts.
+abstract interface class ConversationNotificationBridge {
+  Future<void> setConversationMuted(
+    String conversationId, {
+    required bool muted,
+  });
+}
+
 abstract interface class AttachmentRetrievalBridge {
   Future<void> requestAttachment(
     String conversationId,

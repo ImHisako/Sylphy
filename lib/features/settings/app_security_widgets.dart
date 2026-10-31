@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../core/privacy/app_security.dart';
+import 'settings_search.dart';
 
 class AppSecurityScope extends InheritedNotifier<AppSecurityController> {
   const AppSecurityScope({
@@ -386,96 +387,114 @@ class AppSecuritySettings extends StatelessWidget {
     return Card(
       child: Column(
         children: [
-          ListTile(
-            key: const ValueKey('passphrase-encryption'),
-            leading: const Icon(Icons.enhanced_encryption_outlined),
-            title: const Text('Cifratura dei dati con passphrase'),
-            subtitle: Text(
-              controller.enabled
-                  ? 'Attiva · tocca per disattivare la passphrase.'
-                  : 'Aggiungi una passphrase alla cifratura locale esistente.',
+          SettingsSearchTarget(
+            id: 'passphrase-encryption',
+            child: ListTile(
+              key: const ValueKey('passphrase-encryption'),
+              leading: const Icon(Icons.enhanced_encryption_outlined),
+              title: const Text('Cifratura dei dati con passphrase'),
+              subtitle: Text(
+                controller.enabled
+                    ? 'Attiva · tocca per disattivare la passphrase.'
+                    : 'Aggiungi una passphrase alla cifratura locale esistente.',
+              ),
+              trailing: controller.busy
+                  ? const SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: CircularProgressIndicator(),
+                    )
+                  : Icon(
+                      controller.enabled
+                          ? Icons.check_circle_outline
+                          : Icons.chevron_right,
+                    ),
+              onTap: controller.busy
+                  ? null
+                  : () => controller.enabled
+                        ? _disable(context, controller)
+                        : _enable(context, controller),
             ),
-            trailing: controller.busy
-                ? const SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: CircularProgressIndicator(),
-                  )
-                : Icon(
-                    controller.enabled
-                        ? Icons.check_circle_outline
-                        : Icons.chevron_right,
-                  ),
-            onTap: controller.busy
-                ? null
-                : () => controller.enabled
-                      ? _disable(context, controller)
-                      : _enable(context, controller),
           ),
           if (controller.enabled) ...[
             const Divider(height: 1),
             Padding(
               padding: const EdgeInsets.all(16),
-              child: DropdownButtonFormField<int>(
-                key: const ValueKey('automatic-lock-timeout'),
-                initialValue: controller.inactivitySeconds,
-                decoration: const InputDecoration(
-                  labelText: 'Blocco per inattività',
+              child: SettingsSearchTarget(
+                id: 'automatic-lock-timeout',
+                child: DropdownButtonFormField<int>(
+                  key: const ValueKey('automatic-lock-timeout'),
+                  initialValue: controller.inactivitySeconds,
+                  decoration: const InputDecoration(
+                    labelText: 'Blocco per inattività',
+                  ),
+                  items: const [
+                    DropdownMenuItem(value: 30, child: Text('30 secondi')),
+                    DropdownMenuItem(value: 60, child: Text('1 minuto')),
+                    DropdownMenuItem(value: 300, child: Text('5 minuti')),
+                    DropdownMenuItem(value: 900, child: Text('15 minuti')),
+                    DropdownMenuItem(value: 0, child: Text('Disattivato')),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) {
+                      _policy(context, controller.updatePolicy(seconds: value));
+                    }
+                  },
                 ),
-                items: const [
-                  DropdownMenuItem(value: 30, child: Text('30 secondi')),
-                  DropdownMenuItem(value: 60, child: Text('1 minuto')),
-                  DropdownMenuItem(value: 300, child: Text('5 minuti')),
-                  DropdownMenuItem(value: 900, child: Text('15 minuti')),
-                  DropdownMenuItem(value: 0, child: Text('Disattivato')),
-                ],
-                onChanged: (value) {
-                  if (value != null) {
-                    _policy(context, controller.updatePolicy(seconds: value));
-                  }
-                },
               ),
             ),
-            SwitchListTile(
-              key: const ValueKey('automatic-lock-background'),
-              title: const Text('Blocca in background'),
-              subtitle: const Text(
-                'Blocca quando passi a un’altra app o riduci la finestra.',
-              ),
-              value: controller.lockOnBackground,
-              onChanged: (value) => _policy(
-                context,
-                controller.updatePolicy(onBackground: value),
+            SettingsSearchTarget(
+              id: 'automatic-lock-background',
+              child: SwitchListTile(
+                key: const ValueKey('automatic-lock-background'),
+                title: const Text('Blocca in background'),
+                subtitle: const Text(
+                  'Blocca quando passi a un’altra app o riduci la finestra.',
+                ),
+                value: controller.lockOnBackground,
+                onChanged: (value) => _policy(
+                  context,
+                  controller.updatePolicy(onBackground: value),
+                ),
               ),
             ),
             if (Theme.of(context).platform == TargetPlatform.android)
-              SwitchListTile(
-                key: const ValueKey('automatic-lock-screen-off'),
-                title: const Text('Blocca allo spegnimento dello schermo'),
+              SettingsSearchTarget(
+                id: 'automatic-lock-screen-off',
+                child: SwitchListTile(
+                  key: const ValueKey('automatic-lock-screen-off'),
+                  title: const Text('Blocca allo spegnimento dello schermo'),
+                  subtitle: const Text(
+                    'Attivo anche con il blocco in background disattivato.',
+                  ),
+                  value: controller.lockOnScreenOff,
+                  onChanged: (value) => _policy(
+                    context,
+                    controller.updatePolicy(onScreenOff: value),
+                  ),
+                ),
+              ),
+            SettingsSearchTarget(
+              id: 'wipe-and-lock',
+              child: ListTile(
+                key: const ValueKey('wipe-and-lock'),
+                leading: const Icon(Icons.cleaning_services_outlined),
+                title: const Text('Pulisci RAM e blocca'),
                 subtitle: const Text(
-                  'Attivo anche con il blocco in background disattivato.',
+                  'Azzera i buffer nativi di chiavi e sessioni e rimuove le cache visibili. Pulizia best effort: il sistema può conservare copie in memoria.',
                 ),
-                value: controller.lockOnScreenOff,
-                onChanged: (value) => _policy(
-                  context,
-                  controller.updatePolicy(onScreenOff: value),
-                ),
+                onTap: controller.lock,
               ),
-            ListTile(
-              key: const ValueKey('wipe-and-lock'),
-              leading: const Icon(Icons.cleaning_services_outlined),
-              title: const Text('Pulisci RAM e blocca'),
-              subtitle: const Text(
-                'Azzera i buffer nativi di chiavi e sessioni e rimuove le cache visibili. Pulizia best effort: il sistema può conservare copie in memoria.',
-              ),
-              onTap: controller.lock,
             ),
           ],
-          const ListTile(
-            leading: Icon(Icons.memory_outlined),
-            title: Text('Pulizia RAM alla chiusura sempre attiva'),
-            subtitle: Text(
-              'Alla chiusura Sylphy rimuove chiavi, sessioni e cache dalla memoria, anche senza passphrase. La pulizia è best effort.',
+          const SettingsSearchTarget(
+            id: 'close-memory-cleanup',
+            child: ListTile(
+              leading: Icon(Icons.memory_outlined),
+              title: Text('Pulizia RAM alla chiusura sempre attiva'),
+              subtitle: Text(
+                'Alla chiusura Sylphy rimuove chiavi, sessioni e cache dalla memoria, anche senza passphrase. La pulizia è best effort.',
+              ),
             ),
           ),
         ],

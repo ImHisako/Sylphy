@@ -12,6 +12,43 @@ import 'package:sylphy/core/profile/user_profile.dart';
 import 'package:sylphy/main.dart';
 
 void main() {
+  test(
+    'mute changes refresh cached summaries only after native persistence',
+    () async {
+      final core = _NotificationCore();
+      final bridge = SylphyMessagingBridge(core: core);
+      expect((await bridge.refreshConversations()).single.isMuted, isFalse);
+      final pending = bridge.setConversationMuted('chat', muted: true);
+      await Future<void>.delayed(Duration.zero);
+      expect(bridge.cachedConversations!.single.isMuted, isFalse);
+      core.pending!.complete(
+        const NativeCoreResponse(ok: true, code: 'ok', data: {}),
+      );
+      await pending;
+      expect((await bridge.refreshConversations()).single.isMuted, isTrue);
+      core.fail = true;
+      await expectLater(
+        bridge.setConversationMuted('chat', muted: false),
+        throwsA(isA<SecureMessagingException>()),
+      );
+      expect((await bridge.refreshConversations()).single.isMuted, isTrue);
+      core.fail = false;
+      core.pending = null;
+      await bridge.setConversationMuted('chat', muted: false);
+      expect((await bridge.refreshConversations()).single.isMuted, isFalse);
+    },
+  );
+
+  test('older native summaries default to notifications enabled', () async {
+    final core = _NotificationCore()..omitPreference = true;
+    expect(
+      (await SylphyMessagingBridge(
+        core: core,
+      ).refreshConversations()).single.isMuted,
+      isFalse,
+    );
+  });
+
   testWidgets('disposing the app wipes caller-owned attachment buffers', (
     tester,
   ) async {
@@ -444,6 +481,52 @@ class _AttachmentCore extends _FakeNativeCore
           ),
         );
   }
+}
+
+class _NotificationCore extends _FakeNativeCore
+    implements NativeConversationNotificationApi {
+  bool muted = false;
+  bool fail = false;
+  bool omitPreference = false;
+  Completer<NativeCoreResponse>? pending = Completer<NativeCoreResponse>();
+
+  @override
+  Future<NativeCoreResponse> setConversationMutedInBackground(
+    String conversationId, {
+    required bool muted,
+  }) async {
+    expect(conversationId, 'chat');
+    final response = fail
+        ? const NativeCoreResponse(ok: false, code: 'internal', data: {})
+        : await (pending?.future ??
+              Future.value(
+                const NativeCoreResponse(ok: true, code: 'ok', data: {}),
+              ));
+    if (response.ok) this.muted = muted;
+    return response;
+  }
+
+  @override
+  NativeCoreResponse listConversations() => NativeCoreResponse(
+    ok: true,
+    code: 'ok',
+    data: {
+      'conversations': [
+        {
+          'id': 'chat',
+          'name': 'Chat',
+          'initials': 'C',
+          'accent_value': 0xFFA5E5D3,
+          'last_message': 'Conversazione pronta',
+          'last_activity_ms': 1,
+          'unread_count': 0,
+          'safety': 'verified',
+          'fingerprint': 'TEST',
+          if (!omitPreference) 'is_muted': muted,
+        },
+      ],
+    },
+  );
 }
 
 class _FakeNativeCore implements NativeCoreApi {

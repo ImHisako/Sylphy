@@ -89,6 +89,7 @@ class Conversation {
     required this.safety,
     required this.fingerprint,
     this.unreadCount = 0,
+    this.isMuted = false,
     this.isOnline = false,
     this.isGroup = false,
     this.type = ConversationType.direct,
@@ -108,6 +109,7 @@ class Conversation {
   final String lastMessage;
   final DateTime lastActivity;
   final int unreadCount;
+  final bool isMuted;
   final bool isOnline;
   final bool isGroup;
   final ConversationType type;
@@ -125,6 +127,7 @@ class Conversation {
     String? lastMessage,
     DateTime? lastActivity,
     int? unreadCount,
+    bool? isMuted,
     bool? isOnline,
     ContactSafety? safety,
   }) {
@@ -136,6 +139,7 @@ class Conversation {
       lastMessage: lastMessage ?? this.lastMessage,
       lastActivity: lastActivity ?? this.lastActivity,
       unreadCount: unreadCount ?? this.unreadCount,
+      isMuted: isMuted ?? this.isMuted,
       isOnline: isOnline ?? this.isOnline,
       isGroup: isGroup,
       type: type,

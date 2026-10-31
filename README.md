@@ -24,6 +24,10 @@ server holding accounts, contacts and conversations.
 
 - Signed Sylphy identities shared through an ID or a `sylphy:` invitation.
 - Peer-to-peer contacts with names, profile pictures and verifiable fingerprints.
+- Long press a chat (or right click on desktop) to mute its notifications, turn
+  them back on or delete the conversation after confirmation. Muting survives
+  restarts and also applies to Android background alerts; messages still arrive.
+  See [conversation actions](specs/conversation-actions.md).
 - Groups with additional channels open an ordered channel list before showing
   messages: General first, followed by channels in creation order. Desktop keeps
   conversations in a compact avatar column on the left, channels beside it and

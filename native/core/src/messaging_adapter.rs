@@ -32,6 +32,7 @@ pub mod groups;
 #[cfg(test)]
 mod latency_tests;
 mod message_ids;
+mod notifications;
 mod outgoing_transaction;
 mod receipts;
 mod search;
@@ -324,6 +325,8 @@ struct ContactStore {
     attachment_lease_path: Option<PathBuf>,
     device_sync_outbox_path: Option<PathBuf>,
     groups_path: Option<PathBuf>,
+    notification_preferences_path: Option<PathBuf>,
+    muted_conversations: HashSet<String>,
     contacts: Vec<StoredContact>,
     groups: Vec<StoredGroup>,
     messages: Vec<StoredMessage>,
@@ -499,6 +502,8 @@ pub fn configure_storage(storage_directory: &str) -> CoreResult<()> {
     let device_sync_outbox = load_device_sync_outbox(&device_sync_outbox_path)?;
     let groups_path = directory.join(GROUP_STORE_FILE);
     let groups = load_groups(&groups_path)?;
+    let notification_preferences_path = directory.join("conversation-notifications-v1.vault");
+    let muted_conversations = notifications::load(&notification_preferences_path)?;
     let mut store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     store.generation = store.generation.wrapping_add(1);
     attachments::reset();
@@ -509,6 +514,8 @@ pub fn configure_storage(storage_directory: &str) -> CoreResult<()> {
     store.attachment_lease_path = Some(attachment_lease_path);
     store.device_sync_outbox_path = Some(device_sync_outbox_path);
     store.groups_path = Some(groups_path);
+    store.notification_preferences_path = Some(notification_preferences_path);
+    store.muted_conversations = muted_conversations;
     store.contacts = contacts;
     store.groups = groups;
     store.messages.clear();
@@ -785,6 +792,7 @@ pub(crate) fn read_conversations(allow_load: bool) -> CoreResult<Value> {
                 ),
                 "last_activity_ms": last.map(message_order_ms).unwrap_or(contact.added_at_ms),
                 "unread_count": unread,
+                "is_muted": store.muted_conversations.contains(&contact.id),
                 "is_online": false,
                 "is_group": false,
                 "conversation_type": "direct",
@@ -810,6 +818,7 @@ pub(crate) fn read_conversations(allow_load: bool) -> CoreResult<Value> {
             "last_message": last.map(|message| message_preview(message, &store)).unwrap_or_else(|| "Gruppo creato".to_owned()),
             "last_activity_ms": last.map(message_order_ms).unwrap_or(group.created_at_ms),
             "unread_count": unread,
+            "is_muted": store.muted_conversations.contains(&group.id),
             "is_online": false,
             "is_group": true,
             "conversation_type": group.mode,
@@ -1900,6 +1909,10 @@ pub fn set_contact_verified(conversation_id: &str, verified: bool) -> CoreResult
     }))
 }
 
+pub fn set_conversation_muted(conversation_id: &str, muted: bool) -> CoreResult<Value> {
+    notifications::set_muted(conversation_id, muted)
+}
+
 pub fn sync_inbound_messages() -> CoreResult<Value> {
     attachments::poll()?;
     let Ok(_sync_guard) = SYNC_LOCK.try_lock() else {
@@ -1907,7 +1920,9 @@ pub fn sync_inbound_messages() -> CoreResult<Value> {
             .lock()
             .map_err(|_| CoreError::Internal)?
             .revision;
-        return Ok(json!({"persisted": 0, "discarded": 0, "revision": revision}));
+        return Ok(
+            json!({"persisted": 0, "discarded": 0, "revision": revision, "notification_count": 0, "pin_notification": false}),
+        );
     };
     // Loading/decrypting a large vault can be expensive. This command is
     // always invoked on the Dart background executor, so warm it here before
@@ -1917,6 +1932,10 @@ pub fn sync_inbound_messages() -> CoreResult<Value> {
         ensure_messages_loaded(&mut store)?;
     }
     refresh_contact_directory();
+    let incoming_before = {
+        let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
+        notifications::incoming_ids(&store)
+    };
     let pinned_before = contact_store()
         .lock()
         .map_err(|_| CoreError::Internal)?
@@ -1963,15 +1982,17 @@ pub fn sync_inbound_messages() -> CoreResult<Value> {
     flush_device_sync_outbox();
     let store = contact_store().lock().map_err(|_| CoreError::Internal)?;
     let revision = store.revision;
+    let notification_count = notifications::count_new(&store, &incoming_before);
     let pin_notification = store.groups.iter().any(|group| {
-        group
-            .management
-            .pinned
-            .iter()
-            .any(|id| !pinned_before.contains(&(group.id.clone(), id.clone())))
+        !store.muted_conversations.contains(&group.id)
+            && group
+                .management
+                .pinned
+                .iter()
+                .any(|id| !pinned_before.contains(&(group.id.clone(), id.clone())))
     });
     Ok(
-        json!({"persisted": persisted, "discarded": discarded, "revision": revision, "storage_full": storage_full, "pin_notification": pin_notification}),
+        json!({"persisted": persisted, "discarded": discarded, "revision": revision, "storage_full": storage_full, "notification_count": notification_count, "pin_notification": pin_notification}),
     )
 }
 

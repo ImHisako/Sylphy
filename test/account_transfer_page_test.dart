@@ -286,6 +286,9 @@ void main() {
         'account',
       );
       await tester.pumpAndSettle();
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('settings-section-account')),
+      );
       await tester.tap(find.byKey(const ValueKey('settings-section-account')));
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('export-account')), findsOneWidget);
