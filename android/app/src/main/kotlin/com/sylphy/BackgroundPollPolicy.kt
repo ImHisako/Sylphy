@@ -14,10 +14,14 @@ internal class NetworkTransitionState {
     private var online = false
     private var validated = false
     private var revision = 0L
+    private var recoveryRequested = false
+
+    fun requestRecovery() { recoveryRequested = true }
 
     fun update(network: Any?, online: Boolean, validated: Boolean = false): Long? {
-        if (initialized && this.network == network && this.online == online &&
+        if (!recoveryRequested && initialized && this.network == network && this.online == online &&
             this.validated == validated) return null
+        recoveryRequested = false
         initialized = true
         this.network = network
         this.online = online

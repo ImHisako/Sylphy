@@ -1,5 +1,16 @@
 # Correzioni di affidabilità — settembre 2026
 
+## Ripresa della connessione Android — 3 novembre 2026
+
+Quando l’activity torna visibile, anche se il servizio ha mantenuto vivo il nodo,
+Android richiede un nuovo controllo della connessione. Il controllo usa la rete
+attuale e rinnova l’attachment anche quando rete e capability non sono cambiate:
+socket sospesi durante la chiusura non devono restare considerati utilizzabili.
+Il recupero nativo rinnova la route pubblicata e riattiva i tentativi dell’outbox.
+Le richieste ravvicinate vengono accorpate; una pausa transitoria senza `onStop`
+non riavvia il collegamento. I test coprono riaperture ripetute sulla stessa rete,
+retry superati, riapertura offline e VPN senza validazione Android.
+
 ## Correzioni del 27 ottobre 2026
 
 Il commit delle sessioni Signal scrive prima un journal cifrato

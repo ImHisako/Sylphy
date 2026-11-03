@@ -19,6 +19,7 @@ internal object NetworkRecovery {
     private external fun networkChanged(available: Boolean): Int
     private var started = false
     private lateinit var worker: Handler
+    @Volatile private var evaluateNetwork: Runnable? = null
     private val transitions = NetworkTransitionState()
     @Volatile var available: Boolean = true
         private set
@@ -72,11 +73,23 @@ internal object NetworkRecovery {
                 addAction(Intent.ACTION_SCREEN_ON)
             }, ContextCompat.RECEIVER_NOT_EXPORTED)
             started = true
+            evaluateNetwork = evaluate
             changed()
         } catch (error: RuntimeException) {
             try { connectivity.unregisterNetworkCallback(callback) } catch (_: RuntimeException) { }
             thread.quitSafely()
             AppDiagnostics.w("Sylphy", "Network observer unavailable", error)
+        }
+    }
+
+    fun requestRecovery() {
+        val evaluate = evaluateNetwork ?: return
+        worker.post {
+            // Android can suspend sockets without changing Network or its
+            // capabilities. A reopened activity must renew that attachment too.
+            transitions.requestRecovery()
+            worker.removeCallbacks(evaluate)
+            worker.postDelayed(evaluate, 500)
         }
     }
 

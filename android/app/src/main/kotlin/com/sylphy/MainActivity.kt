@@ -77,6 +77,13 @@ class MainActivity : FlutterActivity() {
     private var pendingSaveResult: MethodChannel.Result? = null
     private var pendingSaveBytes: ByteArray? = null
 
+    override fun onStart() {
+        super.onStart()
+        // Covers a new activity sharing the service's native node as well as
+        // returning to an existing task. Transient pauses do not reset the node.
+        NetworkRecovery.requestRecovery()
+    }
+
     override fun onResume() {
         super.onResume()
         captureForeground = true
