@@ -22,6 +22,7 @@ import 'core/platform/message_notifications.dart';
 import 'core/platform/stream_proof_host.dart';
 import 'core/veilid/veilid_service.dart';
 import 'features/messenger/messenger_home.dart';
+import 'features/messenger/composer_session.dart';
 import 'features/onboarding/profile_onboarding.dart';
 import 'core/updates/app_updates.dart';
 import 'features/updates/update_host.dart';
@@ -99,6 +100,7 @@ class SylphyApp extends StatefulWidget {
 class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   final _navigatorKey = GlobalKey<NavigatorState>();
   final _accountTransferRecovery = AccountTransferRecovery();
+  final _composerSession = ComposerSession();
   bool _transferRecoveryScheduled = false;
   late final SecureMessagingBridge _bridge;
   late final VeilidService _veilidService;
@@ -203,6 +205,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
     _lastSecurityLocked = locked;
     if (locked) {
       _localGeneration++;
+      _composerSession.clear();
       _identityRepublishTimer?.cancel();
       _identityRepublishTimer = null;
       _routeRefreshTimer?.cancel();
@@ -489,6 +492,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
   void _accountImported(UserProfile profile) {
     if (!mounted || !_localDataAccessible) return;
     _localGeneration++;
+    _composerSession.clear();
     if (_bridge is SylphyMessagingBridge) {
       _bridge.clearCachesAfterAccountImport();
     }
@@ -552,6 +556,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _composerSession.dispose();
     _accountTransferRecovery.removeListener(_resumePendingAccountTransfer);
     _accountTransferRecovery.dispose();
     _appSecurity?.removeListener(_onSecurityChanged);
@@ -768,6 +773,7 @@ class _SylphyAppState extends State<SylphyApp> with WidgetsBindingObserver {
           : AnimatedBuilder(
               animation: Listenable.merge([_veilidService, _identityService]),
               builder: (context, _) => MessengerHome(
+                composerSession: _composerSession,
                 bridge: _bridge,
                 nativeCore: widget.nativeCore,
                 veilidService: _veilidService,

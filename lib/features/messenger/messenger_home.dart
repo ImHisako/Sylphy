@@ -27,10 +27,12 @@ import 'group_management_page.dart';
 import 'message_text.dart';
 import 'safe_attachment_image.dart';
 import 'lazy_attachment_image.dart';
+import 'composer_session.dart';
 
 class MessengerHome extends StatefulWidget {
   const MessengerHome({
     super.key,
+    required this.composerSession,
     required this.bridge,
     required this.veilidService,
     required this.profile,
@@ -44,6 +46,7 @@ class MessengerHome extends StatefulWidget {
   });
 
   final SecureMessagingBridge bridge;
+  final ComposerSession composerSession;
   final NativeCoreApi? nativeCore;
   final VeilidService veilidService;
   final UserProfile profile;
@@ -199,6 +202,7 @@ class _MessengerHomeState extends State<MessengerHome>
       }
       return;
     }
+    widget.composerSession.retainConversations(conversations.map((c) => c.id));
     setState(() {
       _conversations = conversations;
       _conversationUpdates.value = conversations;
@@ -357,6 +361,7 @@ class _MessengerHomeState extends State<MessengerHome>
         SnackBar(content: Text('Un messaggio è stato fissato in un gruppo.')),
       );
     }
+    widget.composerSession.retainConversations(conversations.map((c) => c.id));
     setState(() {
       _conversations = conversations;
       _conversationUpdates.value = conversations;
@@ -606,6 +611,7 @@ class _MessengerHomeState extends State<MessengerHome>
             : conversations.first;
         if (constraints.maxWidth >= 900) {
           return _DesktopMessenger(
+            composerSession: widget.composerSession,
             selectionRevision: _conversationSelectionRevision,
             bridge: widget.bridge,
             nativeCore: widget.nativeCore,
@@ -627,6 +633,7 @@ class _MessengerHomeState extends State<MessengerHome>
           );
         }
         return _MobileConversationList(
+          composerSession: widget.composerSession,
           conversationUpdates: _conversationUpdates,
           bridge: widget.bridge,
           nativeCore: widget.nativeCore,
@@ -648,6 +655,7 @@ class _MessengerHomeState extends State<MessengerHome>
 
 class _DesktopMessenger extends StatelessWidget {
   const _DesktopMessenger({
+    required this.composerSession,
     required this.selectionRevision,
     required this.bridge,
     required this.nativeCore,
@@ -667,6 +675,7 @@ class _DesktopMessenger extends StatelessWidget {
     required this.onToggleDetails,
   });
 
+  final ComposerSession composerSession;
   final SecureMessagingBridge bridge;
   final int selectionRevision;
   final NativeCoreApi? nativeCore;
@@ -748,6 +757,7 @@ class _DesktopMessenger extends StatelessWidget {
                       hasNativeCore: nativeCore != null,
                     )
                   : _ChatPane(
+                      composerSession: composerSession,
                       selectionRevision: selectionRevision,
                       bridge: bridge,
                       conversation: activeConversation!,
@@ -1236,6 +1246,7 @@ class _ConversationSidebarState extends State<_ConversationSidebar> {
 
 class _MobileConversationList extends StatelessWidget {
   const _MobileConversationList({
+    required this.composerSession,
     required this.conversationUpdates,
     required this.bridge,
     required this.nativeCore,
@@ -1251,6 +1262,7 @@ class _MobileConversationList extends StatelessWidget {
     required this.privacySettings,
   });
 
+  final ComposerSession composerSession;
   final SecureMessagingBridge bridge;
   final ValueListenable<List<Conversation>> conversationUpdates;
   final NativeCoreApi? nativeCore;
@@ -1361,6 +1373,7 @@ class _MobileConversationList extends StatelessWidget {
                               valueListenable: conversationUpdates,
                               builder: (context, currentConversations, _) =>
                                   _MobileChatScreen(
+                                    composerSession: composerSession,
                                     bridge: bridge,
                                     conversation: conversation,
                                     conversations: currentConversations,
@@ -1406,6 +1419,7 @@ class _MobileConversationList extends StatelessWidget {
 
 class _MobileChatScreen extends StatefulWidget {
   const _MobileChatScreen({
+    required this.composerSession,
     required this.bridge,
     required this.conversation,
     required this.onChanged,
@@ -1414,6 +1428,7 @@ class _MobileChatScreen extends StatefulWidget {
     required this.onConversationSelected,
   });
 
+  final ComposerSession composerSession;
   final SecureMessagingBridge bridge;
   final Conversation conversation;
   final VoidCallback onChanged;
@@ -1507,6 +1522,7 @@ class _MobileChatScreenState extends State<_MobileChatScreen> {
       ),
       body: _ChatPane(
         key: _chatPaneKey,
+        composerSession: widget.composerSession,
         bridge: bridge,
         conversation: conversation,
         onChanged: onChanged,
@@ -1543,6 +1559,7 @@ class _MobileChatScreenState extends State<_MobileChatScreen> {
 class _ChatPane extends StatefulWidget {
   const _ChatPane({
     super.key,
+    required this.composerSession,
     required this.bridge,
     required this.conversation,
     required this.onChanged,
@@ -1553,6 +1570,7 @@ class _ChatPane extends StatefulWidget {
     required this.privacySettings,
   });
 
+  final ComposerSession composerSession;
   final SecureMessagingBridge bridge;
   final Conversation conversation;
   final VoidCallback onChanged;
@@ -1576,8 +1594,53 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
   bool _channelLoadFailed = false;
   int _channelLoadGeneration = 0;
   final _channelListController = ScrollController();
-  final Map<String?, String> _channelDrafts = {};
+  late ComposerDestination _composerDestination;
+  bool _restoringComposer = false;
+  int _composerSessionGeneration = 0;
+  int _storedRevision = 0;
   Map<String, dynamic>? _groupDetails;
+
+  void _saveComposerDraft() {
+    if (_restoringComposer) return;
+    widget.composerSession.saveDraft(
+      _composerDestination,
+      ComposerDraft(value: _composerController.value, replyTo: _replyTo),
+    );
+  }
+
+  void _restoreComposerDraft(ComposerDestination destination) {
+    _restoringComposer = true;
+    _composerDestination = destination;
+    final draft = widget.composerSession.draftFor(destination);
+    _replyTo = draft.replyTo;
+    _composerController.value = draft.value;
+    _restoringComposer = false;
+  }
+
+  void _hideComposer() {
+    _restoringComposer = true;
+    _replyTo = null;
+    _composerController.clear();
+    _restoringComposer = false;
+  }
+
+  void _onComposerSessionChanged() {
+    if (!mounted) return;
+    final session = widget.composerSession;
+    if (_composerSessionGeneration != session.generation) {
+      _composerSessionGeneration = session.generation;
+      _restoreComposerDraft(_composerDestination);
+    }
+    if (_storedRevision != session.storedRevision) {
+      _storedRevision = session.storedRevision;
+      if (widget.bridge is CachedMessagingBridge) {
+        unawaited(_reloadMessagesAsync(force: true));
+      } else {
+        _reloadMessages(force: true);
+      }
+    }
+    setState(() {});
+  }
 
   bool get _supportsChannels =>
       widget.conversation.isGroup &&
@@ -1611,6 +1674,7 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
           generation != _channelLoadGeneration) {
         return;
       }
+      final wasShowingMessages = _isShowingMessages;
       setState(() {
         // A channel added while General is open must not discard its draft or
         // interrupt the conversation. New group visits still start at the list.
@@ -1619,13 +1683,16 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
         _channels = (details['channels'] as List? ?? []).cast<Map>();
         if (_channelId != null &&
             !_channels.any((channel) => channel['id'] == _channelId)) {
+          _saveComposerDraft();
           _channelId = null;
           _channelSelected = false;
-          _composerController.clear();
-          _replyTo = null;
+          _restoreComposerDraft((conversationId: id, channelId: null));
         }
         _channelsLoaded = true;
         _channelLoadFailed = false;
+        if (!wasShowingMessages && _isShowingMessages) {
+          _restoreComposerDraft((conversationId: id, channelId: _channelId));
+        }
       });
       if (_isShowingMessages) unawaited(_markConversationReadSafely());
     } on Object catch (error) {
@@ -1648,13 +1715,13 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
 
   void _selectChannel(String? id) {
     setState(() {
-      if (_isShowingMessages) {
-        _channelDrafts[_channelId] = _composerController.text;
-      }
+      if (_isShowingMessages) _saveComposerDraft();
       _channelId = id;
       _channelSelected = true;
-      _composerController.text = _channelDrafts[id] ?? '';
-      _replyTo = null;
+      _restoreComposerDraft((
+        conversationId: widget.conversation.id,
+        channelId: id,
+      ));
       _lastAcknowledgedIncomingId = null;
     });
     unawaited(_markConversationReadSafely());
@@ -1665,9 +1732,8 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
     if (!_hasChannelList || !_channelSelected) return;
     FocusManager.instance.primaryFocus?.unfocus();
     setState(() {
-      _channelDrafts[_channelId] = _composerController.text;
-      _composerController.clear();
-      _replyTo = null;
+      _saveComposerDraft();
+      _hideComposer();
       _channelSelected = false;
       _lastAcknowledgedIncomingId = null;
     });
@@ -1725,6 +1791,7 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
           isOutgoing: result['is_outgoing'] == true,
         ),
       );
+      _saveComposerDraft();
     }
   }
 
@@ -1964,6 +2031,7 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
       }
       if (action == 'reply') {
         setState(() => _replyTo = message);
+        _saveComposerDraft();
         return;
       }
       if (action == 'delete') {
@@ -2045,7 +2113,6 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
   String _messageSignature = '';
   String? _latestMessageId;
   bool _isSendingAttachment = false;
-  final List<ChatMessage> _optimisticMessages = [];
   String? _lastAcknowledgedIncomingId;
   int _lastInboxRevision = 0;
   bool _isRefreshingMessages = false;
@@ -2079,6 +2146,14 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    _composerSessionGeneration = widget.composerSession.generation;
+    _storedRevision = widget.composerSession.storedRevision;
+    _restoreComposerDraft((
+      conversationId: widget.conversation.id,
+      channelId: null,
+    ));
+    _composerController.addListener(_saveComposerDraft);
+    widget.composerSession.addListener(_onComposerSessionChanged);
     WidgetsBinding.instance.addObserver(this);
     MessageNotifications.trackConversation(
       this,
@@ -2140,6 +2215,12 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
   @override
   void didUpdateWidget(covariant _ChatPane oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.composerSession != widget.composerSession) {
+      oldWidget.composerSession.removeListener(_onComposerSessionChanged);
+      widget.composerSession.addListener(_onComposerSessionChanged);
+      _composerSessionGeneration = widget.composerSession.generation;
+      _storedRevision = widget.composerSession.storedRevision;
+    }
     if (oldWidget.conversation.id == widget.conversation.id &&
         oldWidget.selectionRevision != widget.selectionRevision) {
       _returnToChannels();
@@ -2153,20 +2234,21 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
       _configureInboxUpdates();
     }
     if (oldWidget.conversation.id != widget.conversation.id ||
-        oldWidget.bridge != widget.bridge) {
+        oldWidget.bridge != widget.bridge ||
+        oldWidget.composerSession != widget.composerSession) {
       _messageLoadGeneration++;
       _conversationGeneration++;
       _channels = [];
       _channelsLoaded = false;
       _channelSelected = false;
       _channelLoadFailed = false;
-      _channelDrafts.clear();
       _groupDetails = null;
       _channelId = null;
       unawaited(_loadChannels());
-      _composerController.clear();
-      _replyTo = null;
-      _optimisticMessages.clear();
+      _restoreComposerDraft((
+        conversationId: widget.conversation.id,
+        channelId: null,
+      ));
       _lastAcknowledgedIncomingId = null;
       _isLoadingOlder = false;
       final bridge = widget.bridge;
@@ -2225,6 +2307,8 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     MessageNotifications.untrackConversation(this);
+    widget.composerSession.removeListener(_onComposerSessionChanged);
+    _composerController.removeListener(_saveComposerDraft);
     _channelListController.dispose();
     _messageTimer?.cancel();
     _inboxChanges?.removeListener(_onInboxRevisionChanged);
@@ -2391,48 +2475,83 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
   Future<void> _sendMessage() async {
     if (!_canSendMessages) return;
     final text = _composerController.text.trim();
-    if (text.isEmpty) {
-      return;
-    }
-    final conversationId = widget.conversation.id;
+    if (text.isEmpty) return;
     final reply = _replyTo;
-    final channelId = _channelId;
     setState(() => _replyTo = null);
     _composerController.clear();
-    final optimistic = ChatMessage(
-      id: 'pending-${DateTime.now().microsecondsSinceEpoch}',
-      authorId: 'me',
-      body: text,
-      replyTo: reply?.id,
-      channelId: channelId,
-      sentAt: DateTime.now(),
-      isOutgoing: true,
-      deliveryState: DeliveryState.queued,
+    final pending = widget.composerSession.beginSend(
+      _composerDestination,
+      text,
+      reply,
     );
-    setState(() => _optimisticMessages.add(optimistic));
     _scheduleScrollToBottom();
+    await _dispatchText(pending);
+  }
+
+  Future<void> _retryText(LocalTextMessage pending) async {
+    if (!_canSendMessages || !widget.composerSession.retry(pending)) return;
+    await _dispatchText(pending);
+  }
+
+  void _editFailedText(LocalTextMessage pending) {
+    if (!pending.failed ||
+        pending.destination != _composerDestination ||
+        !widget.composerSession.contains(pending)) {
+      return;
+    }
+    if (_composerController.text.isNotEmpty || _replyTo != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Completa o svuota la bozza attuale prima di modificare questo messaggio.',
+          ),
+        ),
+      );
+      return;
+    }
+    setState(() => _replyTo = pending.replyTo);
+    _composerController.value = TextEditingValue(
+      text: pending.message.body,
+      selection: TextSelection.collapsed(offset: pending.message.body.length),
+    );
+    widget.composerSession.remove(pending);
+  }
+
+  Future<void> _dispatchText(LocalTextMessage pending) async {
+    // Capture the destination and adapter before yielding: the user can leave
+    // this route, switch channels, or lock/import an account during the call.
+    final session = widget.composerSession;
+    final bridge = widget.bridge;
+    final onChanged = widget.onChanged;
+    final conversationId = pending.destination.conversationId;
+    final channelId = pending.destination.channelId;
+    final text = pending.message.body;
+    final reply = pending.replyTo;
     AppLog.instance.record(
       category: 'messenger',
       action: 'send_requested',
       verbose: true,
     );
     try {
-      if (channelId != null && widget.bridge is GroupChannelBridge) {
-        await (widget.bridge as GroupChannelBridge).sendChannelText(
+      if (channelId != null && bridge is GroupChannelBridge) {
+        await (bridge as GroupChannelBridge).sendChannelText(
           conversationId,
           channelId,
           text,
           replyTo: reply?.id,
         );
-      } else if (reply != null && _management != null) {
-        await _management!.sendReply(conversationId, text, reply.id);
-      } else {
-        await widget.bridge.sendText(
-          conversationId: conversationId,
-          plaintext: text,
+      } else if (reply != null && bridge is GroupManagementBridge) {
+        await (bridge as GroupManagementBridge).sendReply(
+          conversationId,
+          text,
+          reply.id,
         );
+      } else {
+        await bridge.sendText(conversationId: conversationId, plaintext: text);
       }
     } on Object catch (error) {
+      if (!session.contains(pending)) return;
+      session.fail(pending);
       final code = error is SecureMessagingException
           ? error.code
           : 'native_call_failed';
@@ -2443,16 +2562,10 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
         result: code,
         force: true,
       );
-      if (mounted) {
-        setState(() => _optimisticMessages.remove(optimistic));
-        if (widget.conversation.id == conversationId &&
-            _composerController.text.isEmpty) {
-          _composerController.text = text;
-          setState(() => _replyTo = reply);
-          _composerController.selection = TextSelection.collapsed(
-            offset: _composerController.text.length,
-          );
-        }
+      if (mounted &&
+          identical(widget.composerSession, session) &&
+          _composerDestination == pending.destination &&
+          _isShowingMessages) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(switch (code) {
@@ -2473,21 +2586,9 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
       }
       return;
     }
-    if (!mounted) {
-      return;
-    }
-    if (widget.conversation.id == conversationId) {
-      final bridge = widget.bridge;
-      if (bridge is CachedMessagingBridge) {
-        await _reloadMessagesAsync(force: true);
-      } else {
-        _reloadMessages(force: true);
-      }
-    }
-    if (mounted) {
-      setState(() => _optimisticMessages.remove(optimistic));
-    }
-    widget.onChanged();
+    if (!session.contains(pending)) return;
+    session.remove(pending, stored: true);
+    onChanged();
     AppLog.instance.record(
       category: 'messenger',
       action: 'send_completed',
@@ -2662,7 +2763,9 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
     final visibleMessages =
         [
             ..._messages,
-            ..._optimisticMessages,
+            ...widget.composerSession
+                .messagesFor(widget.conversation.id)
+                .map((item) => item.message),
           ].where((message) => message.channelId == _channelId).toList()
           ..sort((left, right) {
             final order = left.orderAt.compareTo(right.orderAt);
@@ -2730,6 +2833,9 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
                     if (index < visibleMessages.length) {
                       final message =
                           visibleMessages[visibleMessages.length - 1 - index];
+                      final local = widget.composerSession.messageFor(
+                        message.id,
+                      );
                       final previousIndex = visibleMessages.length - 2 - index;
                       final startsDay =
                           previousIndex < 0 ||
@@ -2764,10 +2870,23 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
                               ),
                             ),
                           GestureDetector(
-                            onLongPress: () => _messageActions(message),
-                            onSecondaryTap: () => _messageActions(message),
+                            onLongPress: local == null
+                                ? () => _messageActions(message)
+                                : null,
+                            onSecondaryTap: local == null
+                                ? () => _messageActions(message)
+                                : null,
                             child: _MessageBubble(
                               message: message,
+                              sendFailed: local?.failed ?? false,
+                              onRetrySend:
+                                  local?.failed == true && _canSendMessages
+                                  ? () => _retryText(local!)
+                                  : null,
+                              onEditSend:
+                                  local?.failed == true && _canSendMessages
+                                  ? () => _editFailedText(local!)
+                                  : null,
                               onLoadAttachment: () => readMessageAttachment(
                                 widget.bridge,
                                 widget.conversation.id,
@@ -2844,7 +2963,10 @@ class _ChatPaneState extends State<_ChatPane> with WidgetsBindingObserver {
             ),
             trailing: IconButton(
               tooltip: 'Annulla risposta',
-              onPressed: () => setState(() => _replyTo = null),
+              onPressed: () {
+                setState(() => _replyTo = null);
+                _saveComposerDraft();
+              },
               icon: Icon(Icons.close),
             ),
           ),
@@ -3786,9 +3908,15 @@ class _MessageBubble extends StatelessWidget {
     this.actionPending = false,
     this.onRetrieveAttachment,
     this.onLoadAttachment,
+    this.sendFailed = false,
+    this.onRetrySend,
+    this.onEditSend,
   });
 
   final ChatMessage message;
+  final bool sendFailed;
+  final VoidCallback? onRetrySend;
+  final VoidCallback? onEditSend;
   final bool showAuthor;
   final bool isPinned;
   final bool actionPending;
@@ -4059,6 +4187,27 @@ class _MessageBubble extends StatelessWidget {
                     : 'Da scaricare',
                 style: TextStyle(color: foreground, fontSize: 11),
               ),
+            if (sendFailed) ...[
+              Text(
+                'Invio non riuscito. Il messaggio è conservato qui.',
+                style: TextStyle(color: foreground, fontSize: 11),
+              ),
+              Wrap(
+                spacing: 8,
+                children: [
+                  TextButton(
+                    key: ValueKey('retry-${message.id}'),
+                    onPressed: onRetrySend,
+                    child: const Text('Riprova'),
+                  ),
+                  TextButton(
+                    key: ValueKey('edit-${message.id}'),
+                    onPressed: onEditSend,
+                    child: const Text('Modifica'),
+                  ),
+                ],
+              ),
+            ],
             if (message.deliveryState == DeliveryState.notRestored) ...[
               Text(
                 'Da reinviare: invio assente nel vecchio backup.',
@@ -4101,16 +4250,20 @@ class _MessageBubble extends StatelessWidget {
                 if (outgoing && showReceipt) ...[
                   SizedBox(width: 4),
                   Tooltip(
-                    message: message.deliveryState.label,
+                    message: sendFailed
+                        ? 'Invio non riuscito'
+                        : message.deliveryState.label,
                     child: Icon(
-                      switch (message.deliveryState) {
-                        DeliveryState.queued => Icons.schedule_rounded,
-                        DeliveryState.notRestored =>
-                          Icons.error_outline_rounded,
-                        DeliveryState.sent => Icons.done_rounded,
-                        DeliveryState.delivered ||
-                        DeliveryState.read => Icons.done_all_rounded,
-                      },
+                      sendFailed
+                          ? Icons.error_outline_rounded
+                          : switch (message.deliveryState) {
+                              DeliveryState.queued => Icons.schedule_rounded,
+                              DeliveryState.notRestored =>
+                                Icons.error_outline_rounded,
+                              DeliveryState.sent => Icons.done_rounded,
+                              DeliveryState.delivered ||
+                              DeliveryState.read => Icons.done_all_rounded,
+                            },
                       size: 14,
                       color: message.deliveryState == DeliveryState.read
                           ? AppPalette.color(0xFF2F6FED)

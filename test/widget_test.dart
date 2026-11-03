@@ -18,6 +18,275 @@ import 'package:sylphy/features/messenger/message_text.dart';
 
 void main() {
   for (final width in [390.0, 1280.0]) {
+    testWidgets('drafts survive chat changes and route reopening at $width', (
+      tester,
+    ) async {
+      final bridge = _ChannelTestBridge(includePrivate: true);
+      await _openRecoveryChat(tester, bridge, width);
+      final composer = find.byKey(const ValueKey('message-composer'));
+      await tester.enterText(composer, 'Bozza del canale');
+      final controller = tester.widget<TextField>(composer).controller!;
+      controller.selection = const TextSelection(
+        baseOffset: 3,
+        extentOffset: 8,
+      );
+      await tester.tap(find.byKey(const ValueKey('back-to-channels')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('group-channel-general')));
+      await tester.pumpAndSettle();
+      await tester.enterText(composer, 'Bozza generale');
+      await tester.tap(find.byKey(const ValueKey('back-to-channels')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('conversation-rail-private-contact')),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextField>(composer).controller!.text, isEmpty);
+      await tester.enterText(composer, 'Bozza privata');
+      if (width < 900) {
+        await tester.pageBack();
+        await tester.pumpAndSettle();
+      }
+      await tester.tap(find.text('Contatto di test'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('group-channel-development')));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextField>(composer).controller!.text,
+        'Bozza del canale',
+      );
+      expect(
+        tester.widget<TextField>(composer).controller!.selection,
+        const TextSelection(baseOffset: 3, extentOffset: 8),
+      );
+      await tester.tap(find.byKey(const ValueKey('back-to-channels')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('group-channel-general')));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextField>(composer).controller!.text,
+        'Bozza generale',
+      );
+      await tester.tap(find.byKey(const ValueKey('back-to-channels')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('conversation-rail-private-contact')),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextField>(composer).controller!.text,
+        'Bozza privata',
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+      bridge.inboxChanges.dispose();
+    });
+
+    testWidgets(
+      'failed sends preserve new drafts and retry the original channel at $width',
+      (tester) async {
+        final bridge = _ControlledTextBridge();
+        await _openRecoveryChat(tester, bridge, width);
+        final composer = find.byKey(const ValueKey('message-composer'));
+        await tester.enterText(composer, 'Messaggio da recuperare');
+        await tester.tap(find.byKey(const ValueKey('send-message')));
+        await tester.pump();
+        await tester.enterText(composer, 'Nuova bozza sviluppo');
+        await tester.tap(find.byKey(const ValueKey('back-to-channels')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('group-channel-general')));
+        await tester.pumpAndSettle();
+        await tester.enterText(composer, 'Bozza di un altro canale');
+        bridge.sends[0].gate.completeError(
+          const SecureMessagingException('storage_failed'),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<TextField>(composer).controller!.text,
+          'Bozza di un altro canale',
+        );
+        expect(_chatText('Messaggio da recuperare'), findsNothing);
+        await tester.tap(find.byKey(const ValueKey('back-to-channels')));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('group-channel-development')),
+        );
+        await tester.pumpAndSettle();
+        expect(_chatText('Messaggio da recuperare'), findsOneWidget);
+        expect(
+          tester.widget<TextField>(composer).controller!.text,
+          'Nuova bozza sviluppo',
+        );
+        await tester.tap(find.widgetWithText(TextButton, 'Modifica'));
+        await tester.pumpAndSettle();
+        expect(_chatText('Messaggio da recuperare'), findsOneWidget);
+        expect(
+          tester.widget<TextField>(composer).controller!.text,
+          'Nuova bozza sviluppo',
+        );
+        // Even repeated taps before rebuilding must start just one retry.
+        await tester.tap(find.widgetWithText(TextButton, 'Riprova'));
+        await tester.tap(find.widgetWithText(TextButton, 'Riprova'));
+        await tester.pump();
+        expect(bridge.sends, hasLength(2));
+        for (final send in bridge.sends) {
+          expect(send.conversationId, 'test-contact');
+          expect(send.channelId, 'development');
+          expect(send.text, 'Messaggio da recuperare');
+        }
+        bridge.sends[1].gate.complete();
+        await tester.pumpAndSettle();
+        expect(_chatText('Messaggio da recuperare'), findsOneWidget);
+        expect(find.widgetWithText(TextButton, 'Riprova'), findsNothing);
+        expect(
+          tester.widget<TextField>(composer).controller!.text,
+          'Nuova bozza sviluppo',
+        );
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+        bridge.inboxChanges.dispose();
+      },
+    );
+  }
+
+  for (final fail in [false, true]) {
+    testWidgets(
+      'send completion after leaving a mobile route (failure: $fail)',
+      (tester) async {
+        final bridge = _ControlledTextBridge();
+        await _openRecoveryChat(tester, bridge, 390);
+        final composer = find.byKey(const ValueKey('message-composer'));
+        await tester.enterText(composer, 'Invio dalla pagina chiusa');
+        await tester.tap(find.byKey(const ValueKey('send-message')));
+        await tester.pump();
+        await tester.enterText(composer, 'Bozza prima di uscire');
+        await tester.tap(find.byKey(const ValueKey('back-to-channels')));
+        await tester.pumpAndSettle();
+        await tester.pageBack();
+        await tester.pumpAndSettle();
+        if (fail) {
+          bridge.sends.single.gate.completeError(
+            const SecureMessagingException('storage_failed'),
+          );
+        } else {
+          bridge.sends.single.gate.complete();
+        }
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Contatto di test'));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('group-channel-development')),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Invio dalla pagina chiusa'), findsOneWidget);
+        expect(
+          tester.widget<TextField>(composer).controller!.text,
+          'Bozza prima di uscire',
+        );
+        expect(
+          find.widgetWithText(TextButton, 'Riprova'),
+          fail ? findsOneWidget : findsNothing,
+        );
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+        bridge.inboxChanges.dispose();
+      },
+    );
+  }
+
+  testWidgets('editing a failed reply preserves its original reply target', (
+    tester,
+  ) async {
+    final bridge = _ControlledTextBridge();
+    await _openRecoveryChat(tester, bridge, 1280);
+    final composer = find.byKey(const ValueKey('message-composer'));
+    await tester.longPress(_chatText('Messaggio sviluppo'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Rispondi'));
+    await tester.pumpAndSettle();
+    await tester.enterText(composer, 'Risposta da correggere');
+    await tester.tap(find.byKey(const ValueKey('back-to-channels')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('group-channel-general')));
+    await tester.pumpAndSettle();
+    expect(find.text('Risposta a un messaggio'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('back-to-channels')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('group-channel-development')));
+    await tester.pumpAndSettle();
+    expect(find.text('Risposta a un messaggio'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(composer).controller!.text,
+      'Risposta da correggere',
+    );
+    await tester.tap(find.byKey(const ValueKey('send-message')));
+    await tester.pump();
+    bridge.sends.single.gate.completeError(
+      const SecureMessagingException('storage_failed'),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, 'Modifica'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TextField>(composer).controller!.text,
+      'Risposta da correggere',
+    );
+    expect(find.text('Risposta a un messaggio'), findsOneWidget);
+    expect(find.widgetWithText(TextButton, 'Riprova'), findsNothing);
+    // Let the error snackbar leave the area above the send button.
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    await tester.enterText(composer, 'Risposta corretta');
+    await tester.tap(find.byKey(const ValueKey('send-message')));
+    await tester.pump();
+    expect(bridge.sends, hasLength(2));
+    expect(bridge.sends.last.replyTo, 'channel-message');
+    expect(bridge.sends.last.channelId, 'development');
+    bridge.sends.last.gate.complete();
+    await tester.pumpAndSettle();
+    expect(_chatText('Risposta corretta'), findsOneWidget);
+    expect(_chatText('Risposta da correggere'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+    bridge.inboxChanges.dispose();
+  });
+
+  testWidgets(
+    'removing the active channel restores the General draft and destination',
+    (tester) async {
+      final bridge = _ControlledTextBridge();
+      await _openRecoveryChat(tester, bridge, 1280);
+      final composer = find.byKey(const ValueKey('message-composer'));
+      await tester.enterText(composer, 'Bozza del canale rimosso');
+      await tester.tap(find.byKey(const ValueKey('back-to-channels')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('group-channel-general')));
+      await tester.pumpAndSettle();
+      await tester.enterText(composer, 'Bozza di Generale');
+      await tester.tap(find.byKey(const ValueKey('back-to-channels')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('group-channel-development')));
+      await tester.pumpAndSettle();
+      final details = await bridge.details.future;
+      details['channels'] = [];
+      bridge.inboxChanges.value++;
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextField>(composer).controller!.text,
+        'Bozza di Generale',
+      );
+      await tester.tap(find.byKey(const ValueKey('send-message')));
+      await tester.pump();
+      expect(bridge.sends.single.channelId, isNull);
+      expect(bridge.sends.single.text, 'Bozza di Generale');
+      bridge.sends.single.gate.complete();
+      await tester.pumpAndSettle();
+      expect(_chatText('Bozza di Generale'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+      bridge.inboxChanges.dispose();
+    },
+  );
+
+  for (final width in [390.0, 1280.0]) {
     testWidgets('long press mutes and unmutes a chat at width $width', (
       tester,
     ) async {
@@ -1508,6 +1777,94 @@ void main() {
 
 _MemoryProfileStore _completedProfileStore() =>
     _MemoryProfileStore(const UserProfile(displayName: 'Profilo Test'));
+
+Finder _chatText(String text) => find.descendant(
+  of: find.byKey(const ValueKey('chat-message-list')),
+  matching: find.text(text),
+);
+
+Future<void> _openRecoveryChat(
+  WidgetTester tester,
+  _ChannelTestBridge bridge,
+  double width,
+) async {
+  await tester.binding.setSurfaceSize(Size(width, 844));
+  addTearDown(() => tester.binding.setSurfaceSize(null));
+  await tester.pumpWidget(
+    SylphyApp(bridge: bridge, profileStore: _completedProfileStore()),
+  );
+  await tester.pumpAndSettle();
+  if (width < 900) {
+    await tester.tap(find.text('Contatto di test'));
+    await tester.pumpAndSettle();
+  }
+  await tester.tap(find.byKey(const ValueKey('group-channel-development')));
+  await tester.pumpAndSettle();
+}
+
+class _ControlledTextBridge extends _ChannelTestBridge {
+  final sends =
+      <
+        ({
+          String conversationId,
+          String? channelId,
+          String text,
+          String? replyTo,
+          Completer<void> gate,
+        })
+      >[];
+
+  Future<void> _send(
+    String conversationId,
+    String? channelId,
+    String text,
+    String? replyTo,
+  ) async {
+    final gate = Completer<void>();
+    final id = 'stored-${sends.length}';
+    sends.add((
+      conversationId: conversationId,
+      channelId: channelId,
+      text: text,
+      replyTo: replyTo,
+      gate: gate,
+    ));
+    await gate.future;
+    _messages.add(
+      ChatMessage(
+        id: id,
+        authorId: 'me',
+        body: text,
+        replyTo: replyTo,
+        channelId: channelId,
+        sentAt: DateTime.now(),
+        isOutgoing: true,
+      ),
+    );
+    _inboxRevision++;
+  }
+
+  @override
+  Future<void> sendText({
+    required String conversationId,
+    required String plaintext,
+  }) => _send(conversationId, null, plaintext, null);
+
+  @override
+  Future<void> sendReply(
+    String conversationId,
+    String plaintext,
+    String replyTo,
+  ) => _send(conversationId, null, plaintext, replyTo);
+
+  @override
+  Future<void> sendChannelText(
+    String conversationId,
+    String channelId,
+    String text, {
+    String? replyTo,
+  }) => _send(conversationId, channelId, text, replyTo);
+}
 
 class _MemoryProfileStore implements UserProfileStore {
   _MemoryProfileStore([this.profile]);

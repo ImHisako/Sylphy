@@ -60,7 +60,32 @@ L'implementazione di produzione di `SecureMessagingBridge` deve essere un adapte
 
 `NativeCoreClient` carica opzionalmente l'ABI C v21 del core Rust su Windows, Linux e Android. Un isolate persistente serve la coda delle transazioni, un secondo le letture locali e un terzo attende risvegli senza contenuti dal core. Messaggi e allegati hanno priorità rispetto al refresh periodico. Le pagine trasferiscono i metadati degli allegati; i byte vengono richiesti solo da anteprime visibili e azioni esplicite, con buffer azzerati al termine dell’uso e al blocco. `VeilidService` avvia il nodo nello storage applicativo persistente, ritenta startup e attachment falliti e distingue feature assente, bootstrap Android, protected/local store, configurazione e rete senza esporre dettagli interni.
 
-`main.dart` non seleziona alcun bridge dimostrativo. Senza core usa `UnavailableMessagingBridge`, che restituisce un inbox vuoto e rifiuta import e invio; con il core usa `SylphyMessagingBridge`, che accetta soltanto read model nativi validi. Il refresh scambia prima una revisione numerica e rilegge conversazioni o messaggi soltanto quando il core segnala una mutazione, eliminando il polling della cronologia completa ogni 700 ms. L'invio appare subito nella conversazione come elemento ottimistico; un errore lo rimuove e ripristina il testo nel composer. I fake restano confinati ai test widget.
+`main.dart` non seleziona alcun bridge dimostrativo. Senza core usa `UnavailableMessagingBridge`, che restituisce un inbox vuoto e rifiuta import e invio; con il core usa `SylphyMessagingBridge`, che accetta soltanto read model nativi validi. Il refresh scambia prima una revisione numerica e rilegge conversazioni o messaggi soltanto quando il core segnala una mutazione, eliminando il polling della cronologia completa ogni 700 ms. L'invio appare subito nella conversazione come elemento ottimistico. I fake restano confinati ai test widget.
+
+## Bozze e recupero degli invii
+
+`ComposerSession` appartiene alla sessione sbloccata dell'account e conserva in
+memoria una bozza per coppia conversazione/canale, compreso Generale. Testo,
+selezione e messaggio a cui si risponde sopravvivono al cambio chat, al ritorno
+alla lista dei canali, alla chiusura della pagina mobile e ai cambi di layout.
+Le bozze non sono scritte su disco e non sopravvivono al riavvio dell'app.
+Blocco, chiusura e importazione di un account eliminano questi dati; la
+cancellazione di una conversazione elimina le sue bozze e gli invii locali.
+
+Un errore prima della registrazione nell'outbox lascia il testo nella chat
+originale con lo stato «Invio non riuscito» e le azioni «Riprova» e «Modifica».
+Il composer resta disponibile e una nuova bozza non viene sovrascritta.
+«Riprova» usa conversazione, canale e riferimento di risposta originali, con
+un solo tentativo in corso per elemento. «Modifica» riporta il testo e la
+risposta nel composer solo se questo è vuoto; altrimenti richiede di completare
+o svuotare la bozza attuale. Questi elementi restano disponibili anche se
+l'errore arriva dopo aver lasciato la pagina. I risultati tardivi dopo blocco,
+importazione o cancellazione non ricreano dati della sessione precedente.
+
+Il recupero riguarda gli errori restituiti dal bridge prima della conferma di
+salvataggio. Dopo il salvataggio nell'outbox cifrato rimane responsabile dei retry
+il worker nativo già esistente, anche dopo un riavvio. Il protocollo e l'ABI non
+cambiano.
 
 ## Consegna e ripresa della connessione
 
