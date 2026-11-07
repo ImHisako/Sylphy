@@ -28,11 +28,12 @@ struct Fixture {
     next_message: Vec<u8>,
 }
 
-fn previous_fixtures() -> [Fixture; 3] {
+fn previous_fixtures() -> [Fixture; 4] {
     [
         ("v0.102.1", include_str!("fixtures/libsignal-v0.102.1.json")),
         ("v0.105.0", include_str!("fixtures/libsignal-v0.105.0.json")),
         ("v0.105.1", include_str!("fixtures/libsignal-v0.105.1.json")),
+        ("v0.106.0", include_str!("fixtures/libsignal-v0.106.0.json")),
     ]
     .map(|(version, document)| {
         let fixture: Fixture = serde_json::from_str(document).unwrap();
@@ -282,7 +283,7 @@ fn generate_previous_version_fixture() {
         std::env::var("SYLPHY_GENERATE_FIXTURE_VERSION").unwrap_or_else(|_| "v0.102.1".to_owned());
     assert!(matches!(
         version.as_str(),
-        "v0.102.1" | "v0.105.0" | "v0.105.1"
+        "v0.102.1" | "v0.105.0" | "v0.105.1" | "v0.106.0"
     ));
     let provider = format!("signalapp/libsignal@{version}");
     assert_eq!(

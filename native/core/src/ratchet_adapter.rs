@@ -17,7 +17,7 @@ pub fn capability_status() -> RatchetCapabilityStatus {
     RatchetCapabilityStatus {
         compiled: cfg!(feature = "signal-ratchet"),
         provider: if cfg!(feature = "signal-ratchet") {
-            "signalapp/libsignal@v0.106.0"
+            "signalapp/libsignal@v0.106.2"
         } else {
             "not-compiled"
         },
@@ -525,11 +525,12 @@ mod signal {
         Ok(true)
     }
 
-    pub fn encrypt(
+    pub(super) fn encrypt<T>(
         peer_identity: &[u8],
         remote: &SignalPreKeyBundle,
         plaintext: &[u8],
-    ) -> CoreResult<Vec<u8>> {
+        finish: impl FnOnce(Vec<u8>) -> CoreResult<T>,
+    ) -> CoreResult<T> {
         if peer_identity.len() != 32 || plaintext.is_empty() || plaintext.len() > 16 * 1024 {
             return Err(CoreError::LimitExceeded);
         }
@@ -586,6 +587,9 @@ mod signal {
             )))?;
             let wire = WireMessage::from_ciphertext(&ciphertext)?;
             let encoded = serde_json::to_vec(&wire).map_err(|_| CoreError::Internal)?;
+            // A packet that cannot fit the transport must not consume a
+            // sending-chain step or create a session on disk.
+            let result = finish(encoded)?;
             let identity_changed = before
                 .global
                 .as_ref()
@@ -595,7 +599,7 @@ mod signal {
                     .as_ref()
                     .map(|global| &global.identity.known_keys);
             persist_transaction(&mut runtime, &address, !usable_session || identity_changed)?;
-            Ok(encoded)
+            Ok(result)
         })();
         if result.is_err() {
             *runtime = before;
@@ -1025,7 +1029,7 @@ mod signal {
                 .identity_public_key()
                 .unwrap();
             let alice_bundle = public_pre_key_bundle().unwrap();
-            let first = encrypt(&bob_identity, &bob_bundle, b"before archive").unwrap();
+            let first = encrypt(&bob_identity, &bob_bundle, b"before archive", Ok).unwrap();
             let address = peer_address(&bob_identity, bob_bundle.device_id).unwrap();
             let key = address_key(&address);
             let old_session_id = {
@@ -1048,7 +1052,7 @@ mod signal {
             pending.commit().unwrap();
             identity::activate_from_storage(&alice_root, PASSWORD).unwrap();
             // This record still exists on disk, but its only session is archived.
-            let second = encrypt(&bob_identity, &bob_bundle, b"after archive").unwrap();
+            let second = encrypt(&bob_identity, &bob_bundle, b"after archive", Ok).unwrap();
             {
                 let runtime = store().lock().unwrap();
                 let record =
@@ -1062,7 +1066,7 @@ mod signal {
                 decrypt(&alice_identity, alice_bundle.device_id, &second).unwrap();
             assert_eq!(body, b"after archive");
             pending.commit().unwrap();
-            let reply = encrypt(&alice_identity, &alice_bundle, b"reply").unwrap();
+            let reply = encrypt(&alice_identity, &alice_bundle, b"reply", Ok).unwrap();
             identity::activate_from_storage(&alice_root, PASSWORD).unwrap();
             let (body, pending) = decrypt(&bob_identity, bob_bundle.device_id, &reply).unwrap();
             assert_eq!(body, b"reply");
@@ -1074,7 +1078,7 @@ mod signal {
             }
             // v0.106.0 saves the peer identity on every encryption, including
             // when no new session is needed. That trust state must be durable.
-            encrypt(&bob_identity, &bob_bundle, b"existing active session").unwrap();
+            encrypt(&bob_identity, &bob_bundle, b"existing active session", Ok).unwrap();
             identity::activate_from_storage(&alice_root, PASSWORD).unwrap();
             public_pre_key_bundle().unwrap();
             assert!(
@@ -1251,21 +1255,31 @@ pub fn public_pre_key_bundle() -> CoreResult<Option<SignalPreKeyBundle>> {
     Ok(None)
 }
 
-#[cfg(feature = "signal-ratchet")]
 pub fn encrypt_message(
     peer_identity: &[u8],
     remote: &SignalPreKeyBundle,
     plaintext: &[u8],
 ) -> CoreResult<Vec<u8>> {
-    signal::encrypt(peer_identity, remote, plaintext)
+    encrypt_message_with(peer_identity, remote, plaintext, Ok)
+}
+
+#[cfg(feature = "signal-ratchet")]
+pub(crate) fn encrypt_message_with<T>(
+    peer_identity: &[u8],
+    remote: &SignalPreKeyBundle,
+    plaintext: &[u8],
+    finish: impl FnOnce(Vec<u8>) -> CoreResult<T>,
+) -> CoreResult<T> {
+    signal::encrypt(peer_identity, remote, plaintext, finish)
 }
 
 #[cfg(not(feature = "signal-ratchet"))]
-pub fn encrypt_message(
+pub(crate) fn encrypt_message_with<T>(
     _peer_identity: &[u8],
     _remote: &SignalPreKeyBundle,
     _plaintext: &[u8],
-) -> CoreResult<Vec<u8>> {
+    _finish: impl FnOnce(Vec<u8>) -> CoreResult<T>,
+) -> CoreResult<T> {
     Err(CoreError::FeatureUnavailable)
 }
 

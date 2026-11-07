@@ -853,7 +853,8 @@ class _SettingsPageState extends State<SettingsPage> {
                     onPressed: () => setState(() => _selectedSection = null),
                   ),
           ),
-          body: Center(
+          body: Align(
+            alignment: Alignment.topCenter,
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 800),
               child: selected != null

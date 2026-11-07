@@ -23,7 +23,7 @@ hkdf = "0.12.4"
 hmac = "0.12.1"
 futures-executor = { version = "0.3.31", optional = true }
 futures-util = { version = "0.3.31", optional = true }
-libsignal-protocol = { git = "https://github.com/signalapp/libsignal.git", rev = "fc90b90fa2b9c37822fa47ba0e0dcdf387a0c071", optional = true }
+libsignal-protocol = { git = "https://github.com/signalapp/libsignal.git", rev = "850942581c06fa65c0323fd52029afa02fa1a1ba", optional = true }
 ml-kem = { version = "0.3.2", features = ["getrandom", "zeroize"] }
 rand = { version = "0.9.2", optional = true }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
@@ -32,8 +32,8 @@ serde_json = "1.0.134"
 sha2 = "0.10.8"
 subtle = "2.6.1"
 thiserror = "2.0.11"
-tokio = { version = "1.43.0", features = ["rt-multi-thread", "sync", "time"], optional = true }
-veilid-core = { version = "0.5.7", optional = true }
+tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "sync", "time"], optional = true }
+veilid-core = { version = "0.5.8", optional = true }
 x25519-dalek = { version = "2.0.1", features = ["getrandom", "static_secrets"] }
 zeroize = "1.8.1"
 

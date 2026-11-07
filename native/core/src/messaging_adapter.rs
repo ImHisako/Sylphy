@@ -1152,6 +1152,7 @@ fn update_group_endpoints(
     store: &mut ContactStore,
     id: &str,
     published: &PublishedIdentity,
+    authoritative: bool,
 ) -> CoreResult<()> {
     published.validate()?;
     if contact_id(&published.bundle.identity_ed25519) != id {
@@ -1172,7 +1173,11 @@ fn update_group_endpoints(
         if member.identity.bundle.expires_at_ms > published.bundle.expires_at_ms {
             continue;
         }
-        if serde_json::to_vec(&member.identity).ok() != serde_json::to_vec(published).ok() {
+        // A message advertises only the sending device. Keep the signed
+        // directory until a fresh directory lookup supplies its replacement.
+        if (authoritative || member.identity.devices.is_empty() || !published.devices.is_empty())
+            && serde_json::to_vec(&member.identity).ok() != serde_json::to_vec(published).ok()
+        {
             member.identity = published.clone();
             changed = true;
         }
@@ -1218,7 +1223,7 @@ fn current_group(id: &str) -> CoreResult<Option<StoredGroup>> {
         })
         .collect::<Vec<_>>();
     for (id, identity) in contacts {
-        update_group_endpoints(&mut store, &id, &identity)?;
+        update_group_endpoints(&mut store, &id, &identity, false)?;
     }
     Ok(store.groups.iter().find(|group| group.id == id).cloned())
 }
@@ -1734,30 +1739,10 @@ pub fn delete_conversation(conversation_id: &str) -> CoreResult<Value> {
             .unwrap();
         groups::prepare_leave(group)?;
         let departure = group.clone();
-        let message_path = store
-            .message_path
-            .clone()
-            .ok_or(CoreError::FeatureUnavailable)?;
-        ensure_messages_loaded(&mut store)?;
-        cancel_pending_conversation(&mut store, conversation_id)?;
-        let messages = store
-            .messages
-            .iter()
-            .filter(|message| message.conversation_id != conversation_id)
-            .cloned()
-            .collect::<Vec<_>>();
+        delete_conversation_history(&mut store, conversation_id)?;
         persist_groups(&path, &updated)?;
-        append_message_event(
-            &message_path,
-            &MessageEvent::DeleteConversation {
-                conversation_id: conversation_id.to_owned(),
-            },
-        )?;
         store.groups = updated;
-        store.messages = messages;
-        store.message_event_count += 1;
         store.revision = store.revision.wrapping_add(1);
-        compact_message_log_if_needed(&mut store)?;
         drop(store);
         queue_device_sync(&DeviceSyncEvent::UpsertGroup { group: departure });
         return Ok(json!({"conversation_id": conversation_id, "deleted": true}));
@@ -1773,31 +1758,46 @@ pub fn delete_conversation(conversation_id: &str) -> CoreResult<Value> {
         return Err(CoreError::InvalidInput);
     }
     let contact_path = store.path.clone().ok_or(CoreError::FeatureUnavailable)?;
+    delete_conversation_history(&mut store, conversation_id)?;
+    persist_contacts(&contact_path, &updated)?;
+    store.contacts = updated;
+    store.revision = store.revision.wrapping_add(1);
+    Ok(json!({"conversation_id": conversation_id, "deleted": true}))
+}
+
+fn delete_conversation_history(store: &mut ContactStore, conversation_id: &str) -> CoreResult<()> {
     let message_path = store
         .message_path
         .clone()
         .ok_or(CoreError::FeatureUnavailable)?;
-    ensure_messages_loaded(&mut store)?;
-    cancel_pending_conversation(&mut store, conversation_id)?;
-    let messages = store
+    ensure_messages_loaded(store)?;
+    cancel_pending_conversation(store, conversation_id)?;
+    if !store
         .messages
         .iter()
-        .filter(|message| message.conversation_id != conversation_id)
-        .cloned()
-        .collect::<Vec<_>>();
-    persist_contacts(&contact_path, &updated)?;
+        .any(|message| message.conversation_id == conversation_id)
+    {
+        return Ok(());
+    }
+    // Keep the conversation reachable for a retry if clearing its history
+    // fails. A later contact/group write failure leaves an empty conversation.
     append_message_event(
         &message_path,
         &MessageEvent::DeleteConversation {
             conversation_id: conversation_id.to_owned(),
         },
     )?;
-    store.contacts = updated;
-    store.messages = messages;
+    store.messages.retain_mut(|message| {
+        if message.conversation_id != conversation_id {
+            return true;
+        }
+        wipe_message_memory(message);
+        false
+    });
     store.message_event_count += 1;
     store.revision = store.revision.wrapping_add(1);
-    compact_message_log_if_needed(&mut store)?;
-    Ok(json!({"conversation_id": conversation_id, "deleted": true}))
+    let _ = compact_message_log_if_needed(store);
+    Ok(())
 }
 
 fn cancel_pending_conversation(store: &mut ContactStore, conversation_id: &str) -> CoreResult<()> {
@@ -2076,7 +2076,7 @@ fn refresh_contact_directory() {
                         }
                     }
                 }
-                let _ = update_group_endpoints(&mut store, &id, &published);
+                let _ = update_group_endpoints(&mut store, &id, &published, true);
             }
             Err(TryRecvError::Empty) => return,
             _ => {}
@@ -2394,9 +2394,15 @@ fn persist_inbound_payload_with(
     }
     let is_group = store.groups.iter().any(|group| group.id == conversation_id);
     if is_group {
-        update_group_endpoints(&mut store, &id, &opened.sender)?;
+        update_group_endpoints(&mut store, &id, &opened.sender, false)?;
     } else if let Some(contact) = store.contacts.iter_mut().find(|contact| contact.id == id) {
-        update_contact_identity(contact, opened.sender.clone())?;
+        if contact
+            .published_identity
+            .as_ref()
+            .is_none_or(|current| current.devices.is_empty())
+        {
+            update_contact_identity(contact, opened.sender.clone())?;
+        }
     } else if allows_unknown_contacts()? {
         if store.contacts.len() >= MAX_CONTACTS {
             return Err(CoreError::StorageFull);
@@ -4632,7 +4638,7 @@ mod tests {
                 members: vec![member.clone()],
                 management: groups::Management::default(),
             }];
-            update_group_endpoints(&mut store, &member.id, &updated).unwrap();
+            update_group_endpoints(&mut store, &member.id, &updated, false).unwrap();
         }
         configure_storage(&local_root.to_string_lossy()).unwrap();
         // An older address-book route with equal prekey expiry must not undo it.

@@ -97,6 +97,135 @@ fn activate(root: &str) {
 
 #[test]
 #[cfg(feature = "signal-ratchet")]
+fn oversized_packet_does_not_commit_the_sending_ratchet() {
+    let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+    let root = std::env::temp_dir().join(format!("sylphy-packet-size-{}", groups::new_id()));
+    let sender_path = root.join("sender");
+    let receiver_path = root.join("receiver");
+    let target = endpoint(&receiver_path.to_string_lossy())
+        .delivery_devices()
+        .unwrap()
+        .remove(0);
+    endpoint(&sender_path.to_string_lossy());
+    let sessions = sender_path.join("messaging/signal-sessions-v2");
+    let session_count = || fs::read_dir(&sessions).unwrap().count();
+    assert!(matches!(
+        secure_packet::seal_for_test(&target, &"a".repeat(12 * 1024)),
+        Err(CoreError::LimitExceeded)
+    ));
+    assert_eq!(session_count(), 0);
+    let (packet, _) = secure_packet::seal_for_test(&target, "fits the transport").unwrap();
+    assert_eq!(session_count(), 1);
+    activate(&receiver_path.to_string_lossy());
+    assert_eq!(
+        secure_packet::open(&packet).unwrap().plaintext,
+        "fits the transport"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(feature = "signal-ratchet")]
+fn received_message_preserves_the_contacts_signed_device_directory() {
+    let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+    let root = std::env::temp_dir().join(format!("sylphy-peer-devices-{}", groups::new_id()));
+    let sender_path = root.join("sender").to_string_lossy().into_owned();
+    let receiver_path = root.join("receiver").to_string_lossy().into_owned();
+    let target = endpoint(&receiver_path)
+        .delivery_devices()
+        .unwrap()
+        .remove(0);
+    let sender = endpoint(&sender_path);
+    let identity = identity::active_identity().unwrap();
+    let mut other_device = sender.bundle.signal_pre_key.clone().unwrap();
+    other_device.device_id = if other_device.device_id == 1 { 2 } else { 1 };
+    let directory = PublishedIdentity::merged_for_current_device(
+        &identity.signing_key().unwrap(),
+        Some(&sender),
+        identity.public_bundle(Some(other_device)).unwrap(),
+        vec![2; 512],
+        Default::default(),
+        None,
+    )
+    .unwrap();
+    let id = contact_id(&sender.bundle.identity_ed25519);
+    let (payload, _) = secure_packet::seal_for_test(&target, "from one device").unwrap();
+    activate(&receiver_path);
+    contact_store()
+        .lock()
+        .unwrap()
+        .contacts
+        .push(StoredContact {
+            id: id.clone(),
+            display_name: "Sender".into(),
+            fingerprint: fingerprint(&sender.bundle.identity_ed25519),
+            added_at_ms: current_time_ms().unwrap(),
+            bundle: directory.bundle.clone(),
+            published_identity: Some(directory),
+            verified: true,
+            invitation_code: None,
+            previous_bundles: Vec::new(),
+        });
+
+    assert!(persist_inbound_payload(&payload).unwrap());
+    activate(&receiver_path);
+    let recipient = refreshed_recipient_with(&id, |_| panic!("directory is current")).unwrap();
+    assert_eq!(recipient.delivery_devices().unwrap().len(), 2);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(feature = "signal-ratchet")]
+fn failed_history_delete_keeps_the_conversation_available_for_retry() {
+    let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
+    let root = std::env::temp_dir().join(format!("sylphy-delete-retry-{}", groups::new_id()));
+    let sender_path = root.join("sender").to_string_lossy().into_owned();
+    let receiver_path = root.join("receiver").to_string_lossy().into_owned();
+    let target = endpoint(&receiver_path)
+        .delivery_devices()
+        .unwrap()
+        .remove(0);
+    let sender = endpoint(&sender_path);
+    let id = contact_id(&sender.bundle.identity_ed25519);
+    let (payload, _) = secure_packet::seal_for_test(&target, "history to delete").unwrap();
+    activate(&receiver_path);
+    let allow_unknown = allows_unknown_contacts().unwrap();
+    configure_privacy(true).unwrap();
+    assert!(persist_inbound_payload(&payload).unwrap());
+    configure_privacy(allow_unknown).unwrap();
+
+    let log = contact_store()
+        .lock()
+        .unwrap()
+        .message_path
+        .clone()
+        .unwrap();
+    let backup = log.with_extension("backup");
+    fs::rename(&log, &backup).unwrap();
+    fs::create_dir(&log).unwrap();
+    assert!(delete_conversation(&id).is_err());
+    fs::remove_dir(&log).unwrap();
+    fs::rename(&backup, &log).unwrap();
+
+    activate(&receiver_path);
+    assert_eq!(list_conversations().unwrap()["conversations"][0]["id"], id);
+    assert_eq!(
+        list_messages(&id, None, None, None).unwrap()["messages"][0]["body"],
+        "history to delete"
+    );
+    assert_eq!(delete_conversation(&id).unwrap()["deleted"], true);
+    activate(&receiver_path);
+    assert!(
+        list_conversations().unwrap()["conversations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(feature = "signal-ratchet")]
 fn ratchet_journal_recovers_partial_commit_and_failed_prepare_is_retryable() {
     let _guard = identity::TEST_IDENTITY_LOCK.lock().unwrap();
     let directory =

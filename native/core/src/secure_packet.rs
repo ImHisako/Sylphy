@@ -224,70 +224,72 @@ fn seal_for_device_with_route(
         .signal_pre_key
         .as_ref()
         .ok_or(CoreError::UnsupportedVersion)?;
-    let protected_plaintext = ratchet_adapter::encrypt_message(
-        &recipient.bundle.identity_ed25519,
-        signal_pre_key,
-        plaintext.as_bytes(),
-    )?;
     let ratchet_header = b"signal-libsignal-v1".to_vec();
     let sent_at_ms = current_time_ms()?;
     let conversation_id = conversation_bytes(
         &sender.bundle.identity_ed25519,
         &recipient.bundle.identity_ed25519,
     );
-    let envelope = envelope::seal(
-        &root_key,
-        EnvelopeMetadata {
-            version: PROTOCOL_VERSION,
-            message_type: EnvelopeType::Message,
-            conversation_id,
-            sender_identity_key_id: identity_prefix(&sender.bundle.identity_ed25519),
-            recipient_identity_key_id: identity_prefix(&recipient.bundle.identity_ed25519),
-            session_id: transcript[..16].to_vec(),
-            timestamp_logical: sent_at_ms,
-            ratchet_header,
-            attachment_refs: Vec::new(),
+    ratchet_adapter::encrypt_message_with(
+        &recipient.bundle.identity_ed25519,
+        signal_pre_key,
+        plaintext.as_bytes(),
+        |protected_plaintext| {
+            let envelope = envelope::seal(
+                &root_key,
+                EnvelopeMetadata {
+                    version: PROTOCOL_VERSION,
+                    message_type: EnvelopeType::Message,
+                    conversation_id,
+                    sender_identity_key_id: identity_prefix(&sender.bundle.identity_ed25519),
+                    recipient_identity_key_id: identity_prefix(&recipient.bundle.identity_ed25519),
+                    session_id: transcript[..16].to_vec(),
+                    timestamp_logical: sent_at_ms,
+                    ratchet_header,
+                    attachment_refs: Vec::new(),
+                },
+                &protected_plaintext,
+            )?;
+            let mut packet = SecurePacket {
+                version: PROTOCOL_VERSION,
+                message_id,
+                sender,
+                recipient_identity: recipient.bundle.identity_ed25519.clone(),
+                ephemeral_x25519: ephemeral_public.as_bytes().to_vec(),
+                mlkem_ciphertext: pq_ciphertext.to_vec(),
+                envelope,
+                signature: Vec::new(),
+            };
+            packet.signature = signing_key
+                .sign(&packet.signing_payload()?)
+                .to_bytes()
+                .to_vec();
+            let mut bytes = serde_json::to_vec(&packet).map_err(|_| CoreError::Internal)?;
+            if bytes.len() > MAX_PACKET_BYTES && packet.sender.profile.avatar_base64.is_some() {
+                // Prefer propagating the current avatar to existing contacts, but keep
+                // message delivery available when route/envelope overhead is unusually
+                // large and would cross Veilid's application-message ceiling.
+                packet.sender = PublishedIdentity::new(
+                    &signing_key,
+                    local_bundle,
+                    packet.sender.route_blob.clone(),
+                    compact_sender_profile(packet.sender.profile.clone()),
+                    mailbox,
+                )?;
+                packet.signature.clear();
+                packet.signature = signing_key
+                    .sign(&packet.signing_payload()?)
+                    .to_bytes()
+                    .to_vec();
+                bytes = serde_json::to_vec(&packet).map_err(|_| CoreError::Internal)?;
+            }
+            if bytes.len() > MAX_PACKET_BYTES {
+                return Err(CoreError::LimitExceeded);
+            }
+            let id = compact_hex(&packet.message_id);
+            Ok((bytes, id))
         },
-        &protected_plaintext,
-    )?;
-    let mut packet = SecurePacket {
-        version: PROTOCOL_VERSION,
-        message_id,
-        sender,
-        recipient_identity: recipient.bundle.identity_ed25519.clone(),
-        ephemeral_x25519: ephemeral_public.as_bytes().to_vec(),
-        mlkem_ciphertext: pq_ciphertext.to_vec(),
-        envelope,
-        signature: Vec::new(),
-    };
-    packet.signature = signing_key
-        .sign(&packet.signing_payload()?)
-        .to_bytes()
-        .to_vec();
-    let mut bytes = serde_json::to_vec(&packet).map_err(|_| CoreError::Internal)?;
-    if bytes.len() > MAX_PACKET_BYTES && packet.sender.profile.avatar_base64.is_some() {
-        // Prefer propagating the current avatar to existing contacts, but keep
-        // message delivery available when route/envelope overhead is unusually
-        // large and would cross Veilid's application-message ceiling.
-        packet.sender = PublishedIdentity::new(
-            &signing_key,
-            local_bundle,
-            packet.sender.route_blob.clone(),
-            compact_sender_profile(packet.sender.profile.clone()),
-            mailbox,
-        )?;
-        packet.signature.clear();
-        packet.signature = signing_key
-            .sign(&packet.signing_payload()?)
-            .to_bytes()
-            .to_vec();
-        bytes = serde_json::to_vec(&packet).map_err(|_| CoreError::Internal)?;
-    }
-    if bytes.len() > MAX_PACKET_BYTES {
-        return Err(CoreError::LimitExceeded);
-    }
-    let id = compact_hex(&packet.message_id);
-    Ok((bytes, id))
+    )
 }
 
 fn compact_sender_profile(mut profile: PublicProfile) -> PublicProfile {

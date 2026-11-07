@@ -42,6 +42,13 @@ diretto a un contatto sconosciuto serve un destinatario aggiornato. La ricezione
 dei vecchi `AppMessage` resta compatibile, ma soltanto i mittenti aggiornati
 attendono la conferma applicativa prima di rimuovere la copia locale.
 
+I pacchetti diretti che richiedono un nuovo tentativo usano una coda separata
+da quella dei nuovi arrivi. La coda conserva fino a 64 pacchetti distinti,
+ne riprova fino a 8 per ciclo dopo almeno 3 secondi e li lascia scadere dopo
+2 minuti dal primo arrivo. I nuovi arrivi hanno precedenza. Per la DHT gli
+errori temporanei rilasciano il marcatore in volo e il record resta disponibile
+fino alla sua normale scadenza.
+
 ## Capability per coppia
 
 `offline-mailbox-v1` è negoziata nel bundle contenuto nella `PublishedIdentity`
@@ -60,12 +67,13 @@ possono derivarla: un contatto ostile può alterare il proprio canale, non
 quelli degli altri contatti. Le firme Sylphy interne restano necessarie, perché
 la capability DHT da sola non autentica il mittente del messaggio.
 
-Veilid 0.5.7 aggiunge un segreto di cifratura casuale a `create_dht_record`, anche
+Veilid aggiunge un segreto di cifratura casuale a `create_dht_record`, anche
 quando l'owner è deterministico. Il writer riapre quindi il record usando la
 chiave opaca deterministica prima di scrivere, esattamente come il lettore.
 Il wrapping applicativo protegge il pacchetto completo. Il protocollo usa le
-[API DHT ufficiali](https://docs.rs/veilid-core/0.5.7/veilid_core/struct.VeilidAPI.html)
-e le [operazioni del routing context](https://docs.rs/veilid-core/0.5.7/veilid_core/struct.RoutingContext.html).
+[API DHT ufficiali](https://docs.rs/veilid-core/latest/veilid_core/struct.VeilidAPI.html)
+e passa le opzioni di apertura introdotte in
+[Veilid 0.5.8](https://gitlab.com/veilid/veilid/-/blob/v0.5.8/CHANGELOG.md).
 
 ## Payload e conferme
 
@@ -111,7 +119,7 @@ un numero limitato di bundle precedenti e aggiorna gli ID brevi in background,
 così un utente che riceve soltanto può scoprire nuove prekey del mittente.
 Il ritorno dell'app in primo piano forza la ripubblicazione del proprio endpoint.
 
-L'ABI C resta v10. Gli outbox precedenti senza capability vengono caricati e
+L'ABI C del client è 21. Gli outbox precedenti senza capability vengono caricati e
 ritentati sul percorso diretto; non possono essere ricifrati retroattivamente
 senza alterare la sessione. Per questi invii preesistenti è ancora necessario
 che il mittente torni online con il destinatario raggiungibile. Il journal

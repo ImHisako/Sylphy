@@ -106,7 +106,7 @@ Il layer di trasporto riceve esclusivamente pacchetti già autenticati e cifrati
 
 ## Ratchet
 
-La feature `signal-ratchet` integra `signalapp/libsignal` v0.106.0 tramite commit immutabile `fc90b90fa2b9c37822fa47ba0e0dcdf387a0c071` (SPQR v1.6.0). Il percorso di produzione invoca direttamente `process_prekey_bundle`, `message_encrypt` e `message_decrypt`; il bundle pubblico contiene identity key, signed prekey EC e Kyber prekey Signal, tutte legate al fingerprint Sylphy dalla firma Ed25519. Root key, chain key, contatori e skipped-message keys non attraversano mai FFI.
+La feature `signal-ratchet` integra `signalapp/libsignal` v0.106.2 tramite il commit immutabile `850942581c06fa65c0323fd52029afa02fa1a1ba` (SPQR v1.6.0). Il percorso di produzione invoca direttamente `process_prekey_bundle`, `message_encrypt` e `message_decrypt`. Il bundle pubblico contiene identity key, signed prekey EC e Kyber prekey Signal, tutte legate al fingerprint Sylphy dalla firma Ed25519. Root key, chain key, contatori e skipped-message keys non attraversano mai FFI.
 
 Gli aggiornamenti dalla v0.102.1, dalla v0.105.0 e dalla v0.105.1 mantengono il formato v2 dello stato Signal e la capability `signal-libsignal-v1`. Il test `native/core/tests/libsignal_compat.rs` usa record e ciphertext sintetici generati separatamente con le tre versioni originali: verifica la lettura di identità e prekey, bootstrap pendenti, sessioni persistenti con skipped-message keys, rifiuto dei replay e scambio bidirezionale dopo il caricamento. Non occorre azzerare identità o conversazioni. La verifica su dispositivi reali resta distinta dai test automatici e dalla compilazione Android.
 

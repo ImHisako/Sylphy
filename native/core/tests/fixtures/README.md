@@ -1,10 +1,17 @@
 # libsignal upgrade fixture
 
+`libsignal-v0.106.0.json` was generated on 2026-11-07 using official
+libsignal v0.106.0 at commit `fc90b90fa2b9c37822fa47ba0e0dcdf387a0c071`.
+Its SHA-256 is
+`469ad1287dc5e3f644998cd109b642f3b8e14914c4ec8bf5de77e432f509bd1f`.
+To reproduce it, use that dependency and provider string and set
+`SYLPHY_GENERATE_FIXTURE_VERSION=v0.106.0` for the generator below.
+
 `libsignal-v0.105.1.json` was generated on 2026-10-27 with official libsignal
 v0.105.1, commit `1738ead8a12ffe539f6309958123dadb16dc3b95`, **before**
 upgrading the dependency to v0.106.0. Its SHA-256 is
 `85f69dd9f834991d24598412fcb46b508c2d35bbff104cbe18c678ff6eb9f59c`.
-It uses the same disposable scenarios as the older fixtures. All three are
+It uses the same disposable scenarios as the older fixtures. All fixtures are
 read by the current compatibility tests, including decryption from an archived
 session without promoting it back to the active sender slot under Tahini.
 

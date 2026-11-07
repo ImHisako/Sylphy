@@ -20,8 +20,8 @@ The core implements and tests:
   deterministic shutdown.
 
 The `signal-ratchet` feature uses official
-[`signalapp/libsignal v0.106.0`](https://github.com/signalapp/libsignal/releases/tag/v0.106.0),
-pinned to immutable commit `fc90b90fa2b9c37822fa47ba0e0dcdf387a0c071`.
+[`signalapp/libsignal v0.106.2`](https://github.com/signalapp/libsignal/releases/tag/v0.106.2),
+pinned to immutable commit `850942581c06fa65c0323fd52029afa02fa1a1ba`.
 The production path keeps identity, signed prekeys, Kyber prekeys and persistent
 session stores inside the native boundary. Signal/PreKey ciphertexts travel
 inside authenticated encrypted Sylphy packets, subject to the 32 KiB packet

@@ -19,6 +19,7 @@ use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 #[cfg(feature = "veilid")]
@@ -34,6 +35,47 @@ pub(crate) struct InboundPayload {
     offline_receipt: Option<OfflineReceipt>,
     #[cfg(feature = "veilid")]
     direct_call: Option<veilid_core::OperationId>,
+    #[cfg(feature = "veilid")]
+    direct_retry_until: Option<Instant>,
+}
+
+#[cfg(feature = "veilid")]
+#[derive(Default)]
+struct DeferredInbound {
+    entries: VecDeque<(Instant, InboundPayload)>,
+}
+
+#[cfg(feature = "veilid")]
+impl DeferredInbound {
+    fn expire(&mut self, now: Instant) {
+        self.entries
+            .retain(|(_, packet)| packet.direct_retry_until.is_some_and(|end| now < end));
+    }
+
+    fn schedule(&mut self, packet: InboundPayload, now: Instant) {
+        self.expire(now);
+        let ready_at = now + DIRECT_RETRY_DELAY;
+        if self.entries.len() < MAX_DEFERRED_INBOUND
+            && packet.direct_retry_until.is_some_and(|end| ready_at < end)
+            && !self
+                .entries
+                .iter()
+                .any(|(_, pending)| pending.payload == packet.payload)
+        {
+            self.entries.push_back((ready_at, packet));
+        }
+    }
+
+    fn take_ready(&mut self, now: Instant) -> impl Iterator<Item = InboundPayload> + '_ {
+        self.expire(now);
+        let ready = self
+            .entries
+            .iter()
+            .take(MAX_DEFERRED_PER_POLL)
+            .take_while(|(ready_at, _)| *ready_at <= now)
+            .count();
+        self.entries.drain(..ready).map(|(_, packet)| packet)
+    }
 }
 
 #[cfg(feature = "veilid")]
@@ -101,6 +143,7 @@ pub fn capability_status() -> VeilidCapabilityStatus {
 pub struct VeilidNode {
     api: veilid_core::VeilidAPI,
     inbound_envelopes: Arc<Mutex<VecDeque<InboundPayload>>>,
+    deferred_inbound: DeferredInbound,
     seen_mailbox_slots: Arc<Mutex<HashMap<u32, Vec<u8>>>>,
     private_route: Arc<Mutex<Option<veilid_core::RouteBlob>>>,
     last_route_blob: Option<Vec<u8>>,
@@ -177,6 +220,7 @@ impl VeilidNode {
         Ok(Self {
             api,
             inbound_envelopes,
+            deferred_inbound: DeferredInbound::default(),
             seen_mailbox_slots,
             private_route,
             last_route_blob: None,
@@ -194,6 +238,7 @@ impl VeilidNode {
         Self {
             api,
             inbound_envelopes: Arc::new(Mutex::new(VecDeque::new())),
+            deferred_inbound: DeferredInbound::default(),
             seen_mailbox_slots: Arc::new(Mutex::new(HashMap::new())),
             private_route: Arc::new(Mutex::new(None)),
             last_route_blob: None,
@@ -240,7 +285,8 @@ impl VeilidNode {
                 .inbound_envelopes
                 .lock()
                 .map(|inbox| inbox.len())
-                .unwrap_or(0),
+                .unwrap_or(0)
+                + self.deferred_inbound.entries.len(),
         })
     }
 
@@ -393,7 +439,7 @@ fn publish_record(descriptor_json: Option<&str>, bytes: Vec<u8>) -> CoreResult<(
     let descriptor = if let Some(encoded) = descriptor_json {
         let stored = parse_record_descriptor(encoded)?;
         let _ = runtime
-            .block_on(routing.open_dht_record(stored.key(), stored.owner_keypair()))
+            .block_on(routing.open_dht_record(stored.key(), stored.owner_keypair(), None))
             .map_err(|_| CoreError::NetworkStartupFailed)?;
         stored
     } else {
@@ -459,7 +505,7 @@ fn read_identity_record(code: &str) -> CoreResult<Vec<u8>> {
         .routing_context()
         .map_err(|_| CoreError::NetworkStartupFailed)?;
     let _ = runtime
-        .block_on(routing.open_dht_record(key.clone(), None))
+        .block_on(routing.open_dht_record(key.clone(), None, None))
         .map_err(|_| CoreError::NetworkStartupFailed)?;
     let value = runtime
         .block_on(routing.get_dht_value(key.clone(), 0, true))
@@ -551,10 +597,11 @@ pub fn ensure_mailbox(descriptor_json: Option<&str>) -> CoreResult<(MailboxAddre
         let mailbox: PersistedMailbox =
             serde_json::from_str(encoded).map_err(|_| CoreError::VerificationFailed)?;
         let _ = runtime
-            .block_on(
-                routing
-                    .open_dht_record(mailbox.descriptor.key(), mailbox.descriptor.owner_keypair()),
-            )
+            .block_on(routing.open_dht_record(
+                mailbox.descriptor.key(),
+                mailbox.descriptor.owner_keypair(),
+                None,
+            ))
             .map_err(|_| CoreError::NetworkStartupFailed)?;
         mailbox
     } else {
@@ -633,7 +680,7 @@ pub fn store_mailbox_payload(address: &MailboxAddress, payload: &[u8]) -> CoreRe
         .routing_context()
         .map_err(|_| CoreError::NetworkStartupFailed)?;
     let _ = runtime
-        .block_on(routing.open_dht_record(key.clone(), Some(writer.clone())))
+        .block_on(routing.open_dht_record(key.clone(), Some(writer.clone()), None))
         .map_err(|_| CoreError::NetworkStartupFailed)?;
     let result = (|| {
         let digest = Sha256::digest(&frame);
@@ -657,6 +704,7 @@ pub fn store_mailbox_payload(address: &MailboxAddress, payload: &[u8]) -> CoreRe
                     Some(SetDHTValueOptions {
                         writer: Some(writer.clone()),
                         allow_offline: Some(AllowOffline(true)),
+                        ..Default::default()
                     }),
                 ))
                 .map_err(|_| CoreError::NetworkAttachFailed)?;
@@ -713,7 +761,7 @@ async fn poll_mailbox_once(
         .map_err(|_| CoreError::NetworkStartupFailed)?;
     let key = mailbox.descriptor.key();
     let _ = routing
-        .open_dht_record(key.clone(), mailbox.descriptor.owner_keypair())
+        .open_dht_record(key.clone(), mailbox.descriptor.owner_keypair(), None)
         .await
         .map_err(|_| CoreError::NetworkStartupFailed)?;
     let result = async {
@@ -766,6 +814,7 @@ async fn poll_mailbox_once(
                         Some(SetDHTValueOptions {
                             writer: Some(mailbox.writer.clone()),
                             allow_offline: Some(AllowOffline(true)),
+                            ..Default::default()
                         }),
                     )
                     .await
@@ -1020,7 +1069,8 @@ fn fetch_blob_record(
         .map_err(|_| CoreError::NetworkStartupFailed)?;
     let _ = runtime
         .block_on(async {
-            tokio::time::timeout_at(deadline, routing.open_dht_record(key.clone(), None)).await
+            tokio::time::timeout_at(deadline, routing.open_dht_record(key.clone(), None, None))
+                .await
         })
         .map_err(|_| CoreError::NetworkAttachFailed)?
         .map_err(|_| CoreError::NetworkStartupFailed)?;
@@ -1192,13 +1242,17 @@ pub fn deliver_payload(
 
 #[cfg(feature = "veilid")]
 pub(crate) fn take_inbound_payloads() -> CoreResult<Vec<InboundPayload>> {
-    let state = lock_runtime()?;
-    let node = state.node.as_ref().ok_or(CoreError::NetworkStartupFailed)?;
-    let mut inbox = node
+    let mut state = lock_runtime()?;
+    let node = state.node.as_mut().ok_or(CoreError::NetworkStartupFailed)?;
+    let mut payloads: Vec<_> = node
         .inbound_envelopes
         .lock()
-        .map_err(|_| CoreError::Internal)?;
-    Ok(inbox.drain(..).collect())
+        .map_err(|_| CoreError::Internal)?
+        .drain(..)
+        .collect();
+    // Fresh packets can contain the group snapshot or other state a retry needs.
+    payloads.extend(node.deferred_inbound.take_ready(Instant::now()));
+    Ok(payloads)
 }
 
 #[cfg(not(feature = "veilid"))]
@@ -1276,8 +1330,10 @@ pub(crate) fn discard_inbound_payload(_payload: InboundPayload) -> CoreResult<()
 /// in-flight marker so a subsequent poll can fetch the same ciphertext again.
 #[cfg(feature = "veilid")]
 pub(crate) fn retry_inbound_payload(payload: InboundPayload) {
-    let Ok(state) = lock_runtime() else { return };
-    let Some(node) = &state.node else { return };
+    let Ok(mut state) = lock_runtime() else {
+        return;
+    };
+    let Some(node) = &mut state.node else { return };
     if let Some(digest) = payload.offline_digest {
         if let Ok(mut seen) = node.offline_seen.lock() {
             seen.remove(&digest);
@@ -1286,10 +1342,8 @@ pub(crate) fn retry_inbound_payload(payload: InboundPayload) {
         if let Ok(mut seen) = node.seen_mailbox_slots.lock() {
             seen.remove(&subkey);
         }
-    } else if let Ok(mut inbox) = node.inbound_envelopes.lock() {
-        if inbox.len() < MAX_PENDING_INBOUND_ENVELOPES {
-            inbox.push_back(payload);
-        }
+    } else {
+        node.deferred_inbound.schedule(payload, Instant::now());
     }
 }
 
@@ -1360,6 +1414,10 @@ pub(crate) fn wipe_account_memory() -> CoreResult<()> {
         item.payload.zeroize();
     }
     inbox.clear();
+    for (_, item) in &mut node.deferred_inbound.entries {
+        item.payload.zeroize();
+    }
+    node.deferred_inbound.entries.clear();
     node.seen_mailbox_slots
         .lock()
         .map_err(|_| CoreError::Internal)?
@@ -1428,11 +1486,11 @@ async fn store_offline_payload_async(
     let _ = routing
         .create_dht_record(CRYPTO_KIND_VLD0, schema, Some(owner.clone()))
         .await;
-    // Veilid 0.5.7 creates a random record encryption key even with a
+    // Veilid creates a random record encryption key even with a
     // deterministic owner. Reopen with the derived opaque key on both peers;
     // our application-level wrapper already encrypts the complete packet.
     let _ = routing
-        .open_dht_record(key.clone(), Some(owner.clone()))
+        .open_dht_record(key.clone(), Some(owner.clone()), None)
         .await
         .map_err(|_| CoreError::NetworkAttachFailed)?;
     let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
@@ -1469,6 +1527,7 @@ async fn store_offline_payload_async(
                 Some(SetDHTValueOptions {
                     writer: Some(owner.clone()),
                     allow_offline: Some(AllowOffline(false)),
+                    ..Default::default()
                 })
             };
             // Publish the continuation first and the authenticated commit last.
@@ -1673,7 +1732,7 @@ async fn poll_offline_mailbox_once(
         .map_err(|_| CoreError::Internal)?;
     let mut lease = offline_watch::Lease::new(api, &key, keys.id());
     let _ = routing
-        .open_dht_record(key.clone(), Some(keys.owner()))
+        .open_dht_record(key.clone(), Some(keys.owner()), None)
         .await
         .map_err(|_| CoreError::NetworkAttachFailed)?;
     watches.watch(&routing, &key, keys.id()).await;
@@ -1756,6 +1815,7 @@ async fn poll_offline_mailbox_once(
                 offline_digest: Some(digest),
                 offline_receipt: Some(receipt),
                 direct_call: None,
+                direct_retry_until: None,
             });
             crate::activity_events::notify();
         }
@@ -1780,7 +1840,7 @@ async fn acknowledge_offline_slot(
     let owner = receipt.keys.owner();
     let mut lease = offline_watch::Lease::new(api, &receipt.record, receipt.keys.id());
     let _ = routing
-        .open_dht_record(receipt.record.clone(), Some(owner.clone()))
+        .open_dht_record(receipt.record.clone(), Some(owner.clone()), None)
         .await
         .map_err(|_| CoreError::NetworkAttachFailed)?;
     let result = async {
@@ -1799,6 +1859,7 @@ async fn acknowledge_offline_slot(
                         Some(veilid_core::SetDHTValueOptions {
                             writer: Some(owner),
                             allow_offline: Some(veilid_core::AllowOffline(false)),
+                            ..Default::default()
                         }),
                     )
                     .await
@@ -1881,6 +1942,15 @@ fn classify_attach_error(error: &veilid_core::VeilidAPIError) -> CoreError {
 
 #[cfg(feature = "veilid")]
 const MAX_PENDING_INBOUND_ENVELOPES: usize = 256;
+
+#[cfg(feature = "veilid")]
+const MAX_DEFERRED_INBOUND: usize = 64;
+#[cfg(feature = "veilid")]
+const MAX_DEFERRED_PER_POLL: usize = 8;
+#[cfg(feature = "veilid")]
+const DIRECT_RETRY_DELAY: Duration = Duration::from_secs(3);
+#[cfg(feature = "veilid")]
+const DIRECT_RETRY_WINDOW: Duration = Duration::from_secs(120);
 
 #[cfg(feature = "veilid")]
 const MAX_INBOUND_ENVELOPE_BYTES: usize = 32_768;
@@ -1969,6 +2039,9 @@ fn enqueue_inbound_request(
             offline_digest: None,
             offline_receipt: None,
             direct_call,
+            direct_retry_until: mailbox_subkey
+                .is_none()
+                .then(|| Instant::now() + DIRECT_RETRY_WINDOW),
         });
         crate::activity_events::notify();
         return true;
@@ -2112,6 +2185,41 @@ mod tests {
 #[cfg(all(test, feature = "veilid"))]
 mod feature_tests {
     use super::*;
+
+    #[test]
+    fn direct_retries_cannot_fill_the_fresh_inbox_and_eventually_expire() {
+        let now = Instant::now();
+        let mut deferred = DeferredInbound::default();
+        for id in 0..=MAX_DEFERRED_INBOUND {
+            let packet = || InboundPayload {
+                payload: vec![id as u8],
+                mailbox_subkey: None,
+                offline_digest: None,
+                offline_receipt: None,
+                direct_call: None,
+                direct_retry_until: Some(now + DIRECT_RETRY_WINDOW),
+            };
+            deferred.schedule(packet(), now);
+            deferred.schedule(packet(), now);
+        }
+        assert_eq!(deferred.entries.len(), MAX_DEFERRED_INBOUND);
+        assert_eq!(deferred.take_ready(now).count(), 0);
+
+        let inbox = Mutex::new(VecDeque::new());
+        for _ in 0..MAX_PENDING_INBOUND_ENVELOPES {
+            assert!(enqueue_inbound_envelope(&inbox, b"fresh", None));
+        }
+        assert_eq!(inbox.lock().unwrap().len(), MAX_PENDING_INBOUND_ENVELOPES);
+
+        let retry_time = now + DIRECT_RETRY_DELAY;
+        let ready: Vec<_> = deferred.take_ready(retry_time).collect();
+        assert_eq!(ready.len(), MAX_DEFERRED_PER_POLL);
+        for packet in ready {
+            deferred.schedule(packet, retry_time);
+        }
+        assert_eq!(deferred.take_ready(now + DIRECT_RETRY_WINDOW).count(), 0);
+        assert!(deferred.entries.is_empty());
+    }
 
     #[test]
     fn mobile_config_overrides_only_local_store_directories() {

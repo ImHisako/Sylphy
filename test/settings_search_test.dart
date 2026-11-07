@@ -39,6 +39,43 @@ void main() {
   });
 
   for (final width in [390.0, 1200.0]) {
+    testWidgets('short settings category starts at the top at width $width', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(Size(width, 844));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final privacy = _Privacy();
+      await tester.pumpWidget(
+        SylphyApp(profileStore: _Profiles(), privacySettings: privacy),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('open-settings')));
+      await tester.pumpAndSettle();
+      final section = find.byKey(const ValueKey('settings-section-appearance'));
+      await tester.scrollUntilVisible(
+        section.hitTestable(),
+        200,
+        scrollable: find.descendant(
+          of: find.byKey(const ValueKey('settings-index')),
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Scrollable &&
+                widget.axisDirection == AxisDirection.down,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(section);
+      await tester.pumpAndSettle();
+      final content = find.byKey(const ValueKey('settings-content-appearance'));
+      expect(
+        tester.getTopLeft(content).dy,
+        closeTo(tester.getBottomLeft(find.byType(AppBar)).dy, 0.5),
+      );
+      await tester.pumpWidget(const SizedBox());
+      privacy.dispose();
+    });
+
     testWidgets(
       'Halloween can be found, selected and replaced at width $width',
       (tester) async {

@@ -314,9 +314,9 @@ linked-device synchronization, chat pagination, and Android signing setup.
 
 ## Dependencies and licenses
 
-The core uses `veilid-core 0.5.7` and official
-[`signalapp/libsignal v0.106.0`](https://github.com/signalapp/libsignal/releases/tag/v0.106.0),
-pinned to commit `fc90b90fa2b9c37822fa47ba0e0dcdf387a0c071`. The native
+The core uses `veilid-core 0.5.8` and official
+[`signalapp/libsignal v0.106.2`](https://github.com/signalapp/libsignal/releases/tag/v0.106.2),
+pinned to commit `850942581c06fa65c0323fd52029afa02fa1a1ba`. The native
 `Cargo.lock` records the resolved dependencies for reproducible builds.
 
 Libsignal is licensed under AGPL-3.0-only. Review the obligations documented in
